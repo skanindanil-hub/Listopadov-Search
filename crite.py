@@ -1,4 +1,4 @@
-# crite.py — версия с таймаутом 45 сек и защитой от падения HTML
+# crite.py — финальная версия
 import asyncio
 import json
 import html
@@ -116,20 +116,22 @@ def render_text_results(api_results: list[dict]) -> str:
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
             if not inner_results: continue
             
-            lines.append(f"<b>📦 {source} ({src})</b>")
+            lines.append(f"📦 <b>{source} ({src})</b>")
             
             def print_tree(d, prefix="├"):
                 out = []
                 if isinstance(d, dict):
                     for k, v in d.items():
+                        key_name = k.replace("_", " ").capitalize()
                         if isinstance(v, (dict, list)):
-                            out.append(f"{prefix} <b>{k.capitalize()}:</b>")
+                            out.append(f"{prefix} <b>{key_name}:</b>")
                             out.extend(print_tree(v, prefix + "─"))
                         else:
+                            safe_val = html.escape(str(v))
                             if isinstance(v, str) and v.startswith("http"):
-                                out.append(f"{prefix} {k.capitalize()}: <a href='{v}'>ссылка</a>")
+                                out.append(f"{prefix} {key_name}: <a href='{v}'>ссылка</a>")
                             else:
-                                out.append(f"{prefix} {k.capitalize()}: <code>{html.escape(str(v))}</code>")
+                                out.append(f"{prefix} {key_name}: <code>{safe_val}</code>")
                 elif isinstance(d, list):
                     for item in d:
                         if isinstance(item, (dict, list)):
@@ -149,6 +151,7 @@ def render_text_results(api_results: list[dict]) -> str:
     if len(res_str) > 3800: res_str = res_str[:3800] + "\n… [ответ обрезан]"
     return res_str
 
+# --- УЛУЧШЕННЫЙ HTML ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     content = ""
     for res in api_results:
@@ -167,11 +170,13 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                 out += '<div class="grid">'
                 for k, v in d.items():
                     if isinstance(v, (dict, list)):
-                        out += f'<div class="grid-title">{html.escape(k.capitalize())}</div>'
+                        out += f'<div class="grid-title">{html.escape(k.replace("_", " ").capitalize())}</div>'
                         out += f'<div class="grid-content">{render_html_block(v)}</div>'
                     else:
                         val_html = f'<a href="{v}" target="_blank">{html.escape(v)}</a>' if isinstance(v, str) and v.startswith("http") else html.escape(str(v))
-                        out += f'<div class="grid-item"><span class="grid-key">{k.capitalize()}</span><span class="grid-val">{val_html}</span></div>'
+                        # Подсвечиваем важные поля
+                        highlight = "highlight" if k.lower() in ("phone", "name", "email", "telegram", "passport", "inn") else ""
+                        out += f'<div class="grid-item"><span class="grid-key">{k.replace("_", " ").capitalize()}</span><span class="grid-val {highlight}">{val_html}</span></div>'
                 out += '</div>'
             elif isinstance(d, list):
                 for item in d:
@@ -192,21 +197,163 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                     content += render_html_block(item)
             content += '</div>'
 
-    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>OASIS</title>
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OASIS REPORT</title>
     <style>
-        body {{ background: #0b0f19; color: #e2e8f0; font-family: sans-serif; padding: 20px; }}
+        :root {{
+            --bg: #0a0a0f;
+            --card-bg: rgba(22, 27, 38, 0.7);
+            --border: rgba(48, 54, 61, 0.6);
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --purple: #bc8cff;
+            --glow: rgba(88, 166, 255, 0.15);
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            line-height: 1.6;
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(88, 166, 255, 0.05), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(188, 140, 255, 0.05), transparent 25%);
+            background-attachment: fixed;
+        }}
         .container {{ max-width: 800px; margin: 0 auto; }}
-        .source-header {{ background: rgba(34,197,94,0.1); color: #22c55e; padding: 12px 20px; font-weight: bold; margin: 30px 0 15px; border-radius: 8px; border: 1px solid rgba(34,197,94,0.3); }}
-        .card {{ background: #151b26; border: 1px solid #2a3441; border-radius: 12px; padding: 24px; margin-bottom: 20px; }}
-        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #2a3441; }}
-        .grid-key {{ color: #94a3b8; }} .grid-val {{ color: #e2e8f0; text-align: right; }}
-        .service-badge {{ background: rgba(56,189,248,0.1); color: #38bdf8; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; display: inline-block; margin: 10px 0; }}
-        .grid-title {{ color: #38bdf8; font-size: 15px; margin: 15px 0 5px; border-bottom: 1px solid #2a3441; }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-    </style></head><body><div class="container">
-    <h1>🕵️ OASIS SEARCH</h1>
-    <div style="text-align:center; color:#94a3b8; margin-bottom:30px;">Запрос: <b>{html.escape(query)}</b></div>
-    {content}</div></body></html>"""
+        
+        .header {{ 
+            text-align: center; 
+            margin-bottom: 40px; 
+            padding: 20px;
+            background: var(--card-bg);
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+        }}
+        h1 {{ 
+            color: var(--accent); 
+            margin: 0 0 10px 0; 
+            font-size: 28px; 
+            letter-spacing: 1px;
+            text-shadow: 0 0 20px var(--glow);
+        }}
+        .query {{ color: var(--text-muted); font-size: 15px; }}
+        .query b {{ 
+            color: var(--green); 
+            background: rgba(63, 185, 80, 0.1); 
+            padding: 4px 12px; 
+            border-radius: 6px; 
+            border: 1px solid rgba(63, 185, 80, 0.3);
+            font-family: monospace;
+        }}
+        
+        .source-header {{ 
+            background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, transparent 100%);
+            border-left: 4px solid var(--green);
+            color: var(--green); 
+            padding: 12px 20px; 
+            font-size: 16px; 
+            font-weight: 600; 
+            margin: 30px 0 15px 0; 
+            border-radius: 0 8px 8px 0;
+        }}
+        
+        .card {{ 
+            background: var(--card-bg); 
+            border: 1px solid var(--border); 
+            border-radius: 12px; 
+            padding: 20px; 
+            margin-bottom: 20px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            backdrop-filter: blur(10px);
+        }}
+        .card-title {{ 
+            color: var(--purple); 
+            font-size: 16px; 
+            margin-bottom: 15px; 
+            border-bottom: 1px solid var(--border); 
+            padding-bottom: 10px; 
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }}
+        
+        .service-badge {{
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--accent);
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            letter-spacing: 0.5px;
+        }}
+        
+        .grid {{ display: flex; flex-direction: column; gap: 4px; }}
+        .grid-item {{ 
+            display: flex; 
+            justify-content: space-between; 
+            padding: 8px 10px; 
+            border-radius: 6px;
+            transition: background 0.2s;
+        }}
+        .grid-item:hover {{ background: rgba(255,255,255,0.03); }}
+        .grid-key {{ color: var(--text-muted); font-size: 14px; }}
+        .grid-val {{ color: var(--text); font-size: 14px; text-align: right; word-break: break-word; max-width: 65%; }}
+        
+        .grid-val.highlight {{
+            color: var(--accent);
+            font-weight: 600;
+        }}
+        
+        .grid-title {{ 
+            color: var(--text-muted); 
+            font-size: 13px; 
+            font-weight: 600;
+            margin: 15px 0 8px 0; 
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }}
+        .grid-content {{ 
+            background: rgba(0,0,0,0.2); 
+            border: 1px solid var(--border); 
+            border-radius: 8px; 
+            padding: 10px; 
+        }}
+        
+        a {{ 
+            color: var(--accent); 
+            text-decoration: none; 
+            border-bottom: 1px dashed var(--accent); 
+            transition: all 0.2s;
+        }}
+        a:hover {{ 
+            color: #79c0ff;
+            border-bottom: 1px solid #79c0ff;
+        }}
+        .text-muted {{ color: var(--text-muted); font-style: italic; text-align: center; display: block; padding: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🕵️ OASIS SEARCH</h1>
+            <div class="query">Отчет по запросу: <b>{html.escape(query)}</b></div>
+        </div>
+        {content}
+    </div>
+</body>
+</html>"""
 
 # --- ХЭНДЛЕРЫ ---
 @dp.message(Command("start"))
@@ -223,24 +370,21 @@ async def process_search(msg: Message, q: str):
     
     text_report = render_text_results(api_results)
     
-    # Очищаем от HTML-тегов, чтобы Телеграм не падал
-    safe_report = html.escape(text_report)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📄 Открыть красивый HTML", callback_data=f"html_{q[:40]}")]
+        [InlineKeyboardButton(text="📄 HTML", callback_data=f"html_{q[:40]}")]
     ])
     
     try:
         await note.edit_text(
-            f"✅ <b>Результаты поиска:</b>\n\n{safe_report}",
+            f"✅ <b>Результаты поиска:</b>\n\n{text_report}",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=kb
         )
     except Exception as e:
         logging.error(f"Ошибка отправки: {e}")
-        # Если Телеграм снова ругнется на разметку, отправим текст без HTML
-        await note.edit_text(f"✅ Результаты:\n\n{text_report[:3500]}", reply_markup=kb)
+        clean_text = re.sub(r'<[^>]+>', '', text_report)
+        await note.edit_text(f"✅ Результаты:\n\n{clean_text[:3500]}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
