@@ -1,4 +1,4 @@
-# crite.py — вывод как на скрине (HYDRA style) + красивый HTML
+# crite.py — стабильная версия с таймаутами
 import asyncio
 import json
 import html
@@ -6,7 +6,6 @@ import os
 import re
 import logging
 import aiohttp
-import cloudscraper
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -49,38 +48,37 @@ def detect_type(query: str) -> str:
     if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
     return "name"
 
-def sync_fetch(url: str, params: dict) -> tuple[bool, dict | str]:
+async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool, dict | str]:
+    """Универсальный запрос с жестким таймаутом"""
+    timeout = aiohttp.ClientTimeout(total=20)
     try:
-        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows'})
-        resp = scraper.get(url, params=params, timeout=20)
-        if resp.status_code == 200 and "Just a moment" not in resp.text:
-            return True, resp.json()
-        return False, f"HTTP {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-async def fetch_api_1(q: str, q_type: str):
-    return await asyncio.to_thread(sync_fetch, API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1})
-
-async def fetch_api_2(q: str, q_type: str):
-    return await asyncio.to_thread(sync_fetch, API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2})
-
-async def fetch_api_3(q: str, q_type: str):
-    try:
-        headers = {"X-API-Key": API_KEY_3, "Accept": "application/json"}
-        timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(API_URL_3, headers=headers, params={"q": q}, ssl=False) as resp:
+            async with session.get(url, params=params, headers=headers, ssl=False) as resp:
                 if resp.status == 200:
-                    return True, await resp.json()
-        return False, f"HTTP {resp.status}"
+                    raw = await resp.text()
+                    if "Just a moment" not in raw:
+                        return True, json.loads(raw)
+                return False, f"HTTP {resp.status}"
+    except asyncio.TimeoutError:
+        return False, "Таймаут"
     except Exception as e:
         return False, str(e)
 
 async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
-    tasks = [fetch_api_1(q, q_type), fetch_api_2(q, q_type), fetch_api_3(q, q_type)]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Запускаем 3 запроса параллельно, с общим таймаутом 25 секунд
+    tasks = [
+        fetch_api(API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1}),
+        fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
+        fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3})
+    ]
+    
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=25)
+    except asyncio.TimeoutError:
+        logging.error("Общий таймаут запросов к API")
+        return []
     
     combined = []
     sources = ["LEGO", "DevHydra", "Mobius"]
@@ -88,11 +86,12 @@ async def query_all_apis(q: str) -> list[dict]:
     for i, res in enumerate(results):
         if isinstance(res, tuple) and res[0]:
             combined.append({"source": sources[i], "data": res[1]})
+        elif isinstance(res, tuple):
+            logging.warning(f"{sources[i]} failed: {res[1]}")
+            
     return combined
 
-# --- ОЧИСТКА ДАННЫХ ---
 def clean_data(obj):
-    """Удаляет системный мусор, оставляя только инфу"""
     if isinstance(obj, dict):
         res = {}
         for k, v in obj.items():
@@ -106,75 +105,57 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ГЕНЕРАЦИЯ КРАСИВОГО ТЕКСТА (КАК НА СКРИНЕ) ---
 def render_text_results(api_results: list[dict]) -> str:
     lines = []
-    
     for res in api_results:
         source = res["source"]
         data = clean_data(res["data"])
         
         results_dict = data.get("results", {})
-        if not results_dict:
-            continue
+        if not results_dict: continue
 
         for src, src_data in results_dict.items():
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
-            if not inner_results:
-                continue
+            if not inner_results: continue
             
-            # Блок телефона/оператора (как на скрине)
-            if "phone" in inner_results:
-                ph = inner_results["phone"]
-                lines.append("📞 <b>Информация о номере:</b>")
-                if "phone" in ph: lines.append(f"├ Телефон: <code>{ph['phone']}</code>")
-                if "operator" in ph: lines.append(f"├ Оператор: {ph['operator']}")
-                if "region" in ph: lines.append(f"├ Регион: {ph['region']}")
-                lines.append("")
+            lines.append(f"<b>📦 {source} ({src})</b>")
             
-            # Блок телефонных книг
-            if "phonebook" in inner_results:
-                pb = inner_results["phonebook"]
-                lines.append(f"🔍 <b>Телефонные книги:</b> {pb.get('name', '')}")
-                lines.append("")
+            def print_tree(d, prefix="├"):
+                out = []
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        if isinstance(v, (dict, list)):
+                            out.append(f"{prefix} <b>{k.capitalize()}:</b>")
+                            out.extend(print_tree(v, prefix + "─"))
+                        else:
+                            if isinstance(v, str) and v.startswith("http"):
+                                out.append(f"{prefix} {k.capitalize()}: <a href='{v}'>ссылка</a>")
+                            else:
+                                out.append(f"{prefix} {k.capitalize()}: <code>{html.escape(str(v))}</code>")
+                elif isinstance(d, list):
+                    for item in d:
+                        if isinstance(item, (dict, list)):
+                            out.extend(print_tree(item, prefix + "─"))
+                        else:
+                            out.append(f"{prefix} <code>{html.escape(str(item))}</code>")
+                return out
 
-            # Блок баз данных (как NumBuster)
-            if "databases" in inner_results:
-                dbs = inner_results["databases"]
-                if isinstance(dbs, list) and dbs:
-                    lines.append(f"🗂 <b>Найденные базы данных ({len(dbs)}):</b>")
-                    for db in dbs:
-                        lines.append(f"├ <b>{db.get('name', 'База')}</b>")
-                        if "region" in db: lines.append(f"│ ├ Регион: {db['region']}")
-                        if "phone" in db: lines.append(f"│ ├ Телефон: <code>{db['phone']}</code>")
-                        if "name" in db: lines.append(f"│ └ Имя: {db['name']}")
-                        lines.append("")
+            if isinstance(inner_results, dict):
+                for srv_name, srv_data in inner_results.items():
+                    lines.append(f"└─ <b>{srv_name.upper()}</b>")
+                    lines.extend(print_tree(srv_data, "   ├"))
+            lines.append("")
             
-            # Если структура нестандартная, выводим просто ключ-значение
-            for srv_name, srv_data in inner_results.items():
-                if srv_name in ("phone", "phonebook", "databases"):
-                    continue
-                lines.append(f"📦 <b>{srv_name.upper()}</b>")
-                if isinstance(srv_data, dict):
-                    for k, v in srv_data.items():
-                        if not isinstance(v, (dict, list)):
-                            lines.append(f"├ {k.capitalize()}: <code>{html.escape(str(v))}</code>")
-                lines.append("")
-                
     res_str = "\n".join(lines)
-    if not res_str:
-        return "🔍 Данных не найдено."
-    if len(res_str) > 3800:
-        res_str = res_str[:3800] + "\n… [ответ обрезан]"
+    if not res_str: return "🔍 Данных не найдено."
+    if len(res_str) > 3800: res_str = res_str[:3800] + "\n… [ответ обрезан]"
     return res_str
 
-# --- КРАСИВЫЙ HTML ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     content = ""
     for res in api_results:
         source = res["source"]
         data = clean_data(res["data"])
-        
         content += f'<div class="source-header">📦 {html.escape(source)}</div>'
         
         results_dict = data.get("results", {})
@@ -201,8 +182,7 @@ def build_html_report(api_results: list[dict], query: str) -> str:
 
         for src, src_data in results_dict.items():
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
-            if not inner_results:
-                continue
+            if not inner_results: continue
                 
             content += f'<div class="card"><div class="card-title">{html.escape(src)}</div>'
             if isinstance(inner_results, dict):
@@ -214,105 +194,21 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                     content += render_html_block(item)
             content += '</div>'
 
-    return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OASIS REPORT: {html.escape(query)}</title>
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>OASIS</title>
     <style>
-        :root {{
-            --bg: #0b0f19;
-            --card-bg: #151b26;
-            --border: #2a3441;
-            --text: #e2e8f0;
-            --text-muted: #94a3b8;
-            --accent: #38bdf8;
-            --green: #22c55e;
-            --purple: #a855f7;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 20px;
-            line-height: 1.5;
-            background-image: radial-gradient(circle at top right, rgba(56, 189, 248, 0.05), transparent 400px);
-        }}
+        body {{ background: #0b0f19; color: #e2e8f0; font-family: sans-serif; padding: 20px; }}
         .container {{ max-width: 800px; margin: 0 auto; }}
-        .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }}
-        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; letter-spacing: 1px; }}
-        .query {{ color: var(--text-muted); font-size: 16px; }}
-        .query b {{ color: var(--text); background: var(--card-bg); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); font-family: monospace; }}
-        
-        .source-header {{ 
-            background: rgba(34, 197, 94, 0.1); 
-            border: 1px solid rgba(34, 197, 94, 0.3);
-            color: var(--green); 
-            padding: 12px 20px; 
-            font-size: 16px; 
-            font-weight: bold; 
-            margin: 30px 0 15px 0; 
-            border-radius: 8px; 
-            display: inline-block;
-        }}
-        
-        .card {{ 
-            background-color: var(--card-bg); 
-            border: 1px solid var(--border); 
-            border-radius: 12px; 
-            padding: 24px; 
-            margin-bottom: 20px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-        }}
-        .card-title {{ 
-            color: var(--purple); 
-            font-size: 18px; 
-            margin-bottom: 20px; 
-            border-bottom: 1px solid var(--border); 
-            padding-bottom: 12px; 
-            font-weight: 600;
-        }}
-        
-        .service-badge {{
-            background: rgba(56, 189, 248, 0.1);
-            color: var(--accent);
-            border: 1px solid rgba(56, 189, 248, 0.2);
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-            margin-bottom: 15px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        
-        .grid {{ display: flex; flex-direction: column; gap: 10px; }}
-        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed rgba(255,255,255,0.05); }}
-        .grid-item:last-child {{ border-bottom: none; }}
-        .grid-key {{ color: var(--text-muted); font-size: 14px; }}
-        .grid-val {{ color: var(--text); font-size: 14px; text-align: right; word-break: break-word; max-width: 60%; }}
-        
-        .grid-title {{ color: var(--accent); font-size: 15px; font-weight: 600; margin: 20px 0 10px 0; border-bottom: 1px solid var(--border); padding-bottom: 5px; }}
-        .grid-content {{ background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 15px; }}
-        
-        a {{ color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border 0.2s; }}
-        a:hover {{ border-bottom: 1px solid var(--accent); }}
-        .text-muted {{ color: var(--text-muted); font-style: italic; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🕵️ OASIS SEARCH</h1>
-            <div class="query">Отчет по запросу: <b>{html.escape(query)}</b></div>
-        </div>
-        {content}
-    </div>
-</body>
-</html>"""
+        .source-header {{ background: rgba(34,197,94,0.1); color: #22c55e; padding: 12px 20px; font-weight: bold; margin: 30px 0 15px; border-radius: 8px; border: 1px solid rgba(34,197,94,0.3); }}
+        .card {{ background: #151b26; border: 1px solid #2a3441; border-radius: 12px; padding: 24px; margin-bottom: 20px; }}
+        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #2a3441; }}
+        .grid-key {{ color: #94a3b8; }} .grid-val {{ color: #e2e8f0; text-align: right; }}
+        .service-badge {{ background: rgba(56,189,248,0.1); color: #38bdf8; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; display: inline-block; margin: 10px 0; }}
+        .grid-title {{ color: #38bdf8; font-size: 15px; margin: 15px 0 5px; border-bottom: 1px solid #2a3441; }}
+        a {{ color: #38bdf8; text-decoration: none; }}
+    </style></head><body><div class="container">
+    <h1>🕵️ OASIS SEARCH</h1>
+    <div style="text-align:center; color:#94a3b8; margin-bottom:30px;">Запрос: <b>{html.escape(query)}</b></div>
+    {content}</div></body></html>"""
 
 # --- ХЭНДЛЕРЫ ---
 @dp.message(Command("start"))
@@ -325,7 +221,7 @@ async def process_search(msg: Message, q: str):
     api_results = await query_all_apis(q)
     
     if not api_results:
-        return await note.edit_text("❌ Все API вернули ошибку или ничего не нашли.")
+        return await note.edit_text("❌ Все API вернули ошибку или не ответили (таймаут).")
     
     text_report = render_text_results(api_results)
     
