@@ -1,4 +1,4 @@
-# crite.py — финальная версия
+# crite.py — версия с парсингом под HYDRA
 import asyncio
 import json
 import html
@@ -103,8 +103,10 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
+# --- ЖЕСТКИЙ ПАРСЕР ПОД СТРУКТУРУ HYDRA ---
 def render_text_results(api_results: list[dict]) -> str:
     lines = []
+    
     for res in api_results:
         source = res["source"]
         data = clean_data(res["data"])
@@ -116,42 +118,67 @@ def render_text_results(api_results: list[dict]) -> str:
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
             if not inner_results: continue
             
-            lines.append(f"📦 <b>{source} ({src})</b>")
+            # --- ИНФОРМАЦИЯ О НОМЕРЕ ---
+            phone_data = inner_results.get("PHONE_INFO") or inner_results.get("phone")
+            if phone_data and isinstance(phone_data, dict):
+                lines.append("📞 <b>Информация о номере:</b>")
+                if "phone" in phone_data: lines.append(f"├ Телефон: <code>{html.escape(str(phone_data['phone']))}</code>")
+                if "operator" in phone_data: lines.append(f"├ Оператор: {html.escape(str(phone_data['operator']))}")
+                if "region" in phone_data: lines.append(f"├ Регион: {html.escape(str(phone_data['region']))}")
+                if "country" in phone_data: lines.append(f"├ Страна: {html.escape(str(phone_data['country']))}")
+                lines.append("")
             
-            def print_tree(d, prefix="├"):
-                out = []
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        key_name = k.replace("_", " ").capitalize()
-                        if isinstance(v, (dict, list)):
-                            out.append(f"{prefix} <b>{key_name}:</b>")
-                            out.extend(print_tree(v, prefix + "─"))
-                        else:
-                            safe_val = html.escape(str(v))
-                            if isinstance(v, str) and v.startswith("http"):
-                                out.append(f"{prefix} {key_name}: <a href='{v}'>ссылка</a>")
-                            else:
-                                out.append(f"{prefix} {key_name}: <code>{safe_val}</code>")
-                elif isinstance(d, list):
-                    for item in d:
-                        if isinstance(item, (dict, list)):
-                            out.extend(print_tree(item, prefix + "─"))
-                        else:
-                            out.append(f"{prefix} <code>{html.escape(str(item))}</code>")
-                return out
+            # --- ТЕЛЕФОННЫЕ КНИГИ / ИМЕНА ---
+            names_data = inner_results.get("NAMES") or inner_results.get("phonebook")
+            if names_data:
+                names_str = ""
+                if isinstance(names_data, list): names_str = ", ".join([str(n) for n in names_data if n])
+                elif isinstance(names_data, dict) and "name" in names_data: names_str = str(names_data["name"])
+                elif isinstance(names_data, str): names_str = names_data
+                
+                if names_str:
+                    lines.append(f"🔍 <b>Телефонные книги:</b> {html.escape(names_str)}")
+                    lines.append("")
 
-            if isinstance(inner_results, dict):
-                for srv_name, srv_data in inner_results.items():
-                    lines.append(f"└─ <b>{srv_name.upper()}</b>")
-                    lines.extend(print_tree(srv_data, "   ├"))
-            lines.append("")
+            # --- БАЗЫ ДАННЫХ ---
+            dbs_data = inner_results.get("databases") or inner_results.get("DATABASES")
+            if dbs_data and isinstance(dbs_data, list):
+                lines.append(f"🗂 <b>Найденные базы данных ({len(dbs_data)}):</b>")
+                for db in dbs_data:
+                    if isinstance(db, dict):
+                        db_name = db.get("name", "Неизвестная база")
+                        lines.append(f"├ <b>{html.escape(str(db_name))}</b>")
+                        if "region" in db: lines.append(f"│ ├ Регион: {html.escape(str(db['region']))}")
+                        if "phone" in db: lines.append(f"│ ├ Телефон: <code>{html.escape(str(db['phone']))}</code>")
+                        if "date" in db: lines.append(f"│ ├ Дата: {html.escape(str(db['date']))}")
+                        if "name" in db: lines.append(f"│ └ Имя: {html.escape(str(db['name']))}")
+                        lines.append("")
             
+            # --- ОСТАЛЬНОЕ (TG, VK и т.д.) ---
+            for srv_name, srv_data in inner_results.items():
+                if srv_name in ("PHONE_INFO", "phone", "NAMES", "phonebook", "databases", "DATABASES"): continue
+                
+                lines.append(f"📦 <b>{srv_name.upper()}</b>")
+                if isinstance(srv_data, dict):
+                    for k, v in srv_data.items():
+                        if isinstance(v, list):
+                            lines.append(f"├ <b>{k.replace('_', ' ').capitalize()}</b>")
+                            for item in v:
+                                lines.append(f"│ ├ {html.escape(str(item))}")
+                        elif isinstance(v, dict):
+                            lines.append(f"├ <b>{k.replace('_', ' ').capitalize()}</b>")
+                            for sk, sv in v.items():
+                                lines.append(f"│ ├ {sk.capitalize()}: <code>{html.escape(str(sv))}</code>")
+                        else:
+                            lines.append(f"├ {k.replace('_', ' ').capitalize()}: <code>{html.escape(str(v))}</code>")
+                lines.append("")
+
     res_str = "\n".join(lines)
     if not res_str: return "🔍 Данных не найдено."
     if len(res_str) > 3800: res_str = res_str[:3800] + "\n… [ответ обрезан]"
     return res_str
 
-# --- УЛУЧШЕННЫЙ HTML ---
+# --- КРАСИВЫЙ HTML ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     content = ""
     for res in api_results:
@@ -174,7 +201,6 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                         out += f'<div class="grid-content">{render_html_block(v)}</div>'
                     else:
                         val_html = f'<a href="{v}" target="_blank">{html.escape(v)}</a>' if isinstance(v, str) and v.startswith("http") else html.escape(str(v))
-                        # Подсвечиваем важные поля
                         highlight = "highlight" if k.lower() in ("phone", "name", "email", "telegram", "passport", "inn") else ""
                         out += f'<div class="grid-item"><span class="grid-key">{k.replace("_", " ").capitalize()}</span><span class="grid-val {highlight}">{val_html}</span></div>'
                 out += '</div>'
@@ -213,7 +239,6 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             --accent: #58a6ff;
             --green: #3fb950;
             --purple: #bc8cff;
-            --glow: rgba(88, 166, 255, 0.15);
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -222,125 +247,28 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             margin: 0;
             padding: 20px;
             line-height: 1.6;
-            background-image: 
-                radial-gradient(circle at 15% 50%, rgba(88, 166, 255, 0.05), transparent 25%),
-                radial-gradient(circle at 85% 30%, rgba(188, 140, 255, 0.05), transparent 25%);
+            background-image: radial-gradient(circle at 15% 50%, rgba(88, 166, 255, 0.05), transparent 25%), radial-gradient(circle at 85% 30%, rgba(188, 140, 255, 0.05), transparent 25%);
             background-attachment: fixed;
         }}
         .container {{ max-width: 800px; margin: 0 auto; }}
-        
-        .header {{ 
-            text-align: center; 
-            margin-bottom: 40px; 
-            padding: 20px;
-            background: var(--card-bg);
-            border-radius: 16px;
-            border: 1px solid var(--border);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            backdrop-filter: blur(10px);
-        }}
-        h1 {{ 
-            color: var(--accent); 
-            margin: 0 0 10px 0; 
-            font-size: 28px; 
-            letter-spacing: 1px;
-            text-shadow: 0 0 20px var(--glow);
-        }}
+        .header {{ text-align: center; margin-bottom: 40px; padding: 20px; background: var(--card-bg); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 8px 32px rgba(0,0,0,0.3); backdrop-filter: blur(10px); }}
+        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; letter-spacing: 1px; text-shadow: 0 0 20px rgba(88, 166, 255, 0.2); }}
         .query {{ color: var(--text-muted); font-size: 15px; }}
-        .query b {{ 
-            color: var(--green); 
-            background: rgba(63, 185, 80, 0.1); 
-            padding: 4px 12px; 
-            border-radius: 6px; 
-            border: 1px solid rgba(63, 185, 80, 0.3);
-            font-family: monospace;
-        }}
-        
-        .source-header {{ 
-            background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, transparent 100%);
-            border-left: 4px solid var(--green);
-            color: var(--green); 
-            padding: 12px 20px; 
-            font-size: 16px; 
-            font-weight: 600; 
-            margin: 30px 0 15px 0; 
-            border-radius: 0 8px 8px 0;
-        }}
-        
-        .card {{ 
-            background: var(--card-bg); 
-            border: 1px solid var(--border); 
-            border-radius: 12px; 
-            padding: 20px; 
-            margin-bottom: 20px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-            backdrop-filter: blur(10px);
-        }}
-        .card-title {{ 
-            color: var(--purple); 
-            font-size: 16px; 
-            margin-bottom: 15px; 
-            border-bottom: 1px solid var(--border); 
-            padding-bottom: 10px; 
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }}
-        
-        .service-badge {{
-            background: rgba(88, 166, 255, 0.1);
-            color: var(--accent);
-            border: 1px solid rgba(88, 166, 255, 0.2);
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-            margin-bottom: 15px;
-            letter-spacing: 0.5px;
-        }}
-        
+        .query b {{ color: var(--green); background: rgba(63, 185, 80, 0.1); padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(63, 185, 80, 0.3); font-family: monospace; }}
+        .source-header {{ background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, transparent 100%); border-left: 4px solid var(--green); color: var(--green); padding: 12px 20px; font-size: 16px; font-weight: 600; margin: 30px 0 15px 0; border-radius: 0 8px 8px 0; }}
+        .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); backdrop-filter: blur(10px); }}
+        .card-title {{ color: var(--purple); font-size: 16px; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px; font-weight: 600; letter-spacing: 0.5px; }}
+        .service-badge {{ background: rgba(88, 166, 255, 0.1); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.2); display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 15px; letter-spacing: 0.5px; }}
         .grid {{ display: flex; flex-direction: column; gap: 4px; }}
-        .grid-item {{ 
-            display: flex; 
-            justify-content: space-between; 
-            padding: 8px 10px; 
-            border-radius: 6px;
-            transition: background 0.2s;
-        }}
+        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 10px; border-radius: 6px; transition: background 0.2s; }}
         .grid-item:hover {{ background: rgba(255,255,255,0.03); }}
         .grid-key {{ color: var(--text-muted); font-size: 14px; }}
         .grid-val {{ color: var(--text); font-size: 14px; text-align: right; word-break: break-word; max-width: 65%; }}
-        
-        .grid-val.highlight {{
-            color: var(--accent);
-            font-weight: 600;
-        }}
-        
-        .grid-title {{ 
-            color: var(--text-muted); 
-            font-size: 13px; 
-            font-weight: 600;
-            margin: 15px 0 8px 0; 
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }}
-        .grid-content {{ 
-            background: rgba(0,0,0,0.2); 
-            border: 1px solid var(--border); 
-            border-radius: 8px; 
-            padding: 10px; 
-        }}
-        
-        a {{ 
-            color: var(--accent); 
-            text-decoration: none; 
-            border-bottom: 1px dashed var(--accent); 
-            transition: all 0.2s;
-        }}
-        a:hover {{ 
-            color: #79c0ff;
-            border-bottom: 1px solid #79c0ff;
-        }}
+        .grid-val.highlight {{ color: var(--accent); font-weight: 600; }}
+        .grid-title {{ color: var(--text-muted); font-size: 13px; font-weight: 600; margin: 15px 0 8px 0; letter-spacing: 1px; text-transform: uppercase; }}
+        .grid-content {{ background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }}
+        a {{ color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent); transition: all 0.2s; }}
+        a:hover {{ color: #79c0ff; border-bottom: 1px solid #79c0ff; }}
         .text-muted {{ color: var(--text-muted); font-style: italic; text-align: center; display: block; padding: 20px; }}
     </style>
 </head>
