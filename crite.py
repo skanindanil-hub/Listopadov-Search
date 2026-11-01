@@ -1,4 +1,4 @@
-# crite.py — стабильная версия с таймаутами
+# crite.py — версия с таймаутом 45 сек и защитой от падения HTML
 import asyncio
 import json
 import html
@@ -49,8 +49,7 @@ def detect_type(query: str) -> str:
     return "name"
 
 async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool, dict | str]:
-    """Универсальный запрос с жестким таймаутом"""
-    timeout = aiohttp.ClientTimeout(total=20)
+    timeout = aiohttp.ClientTimeout(total=45)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params, headers=headers, ssl=False) as resp:
@@ -67,7 +66,6 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
 async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
     
-    # Запускаем 3 запроса параллельно, с общим таймаутом 25 секунд
     tasks = [
         fetch_api(API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1}),
         fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
@@ -75,9 +73,9 @@ async def query_all_apis(q: str) -> list[dict]:
     ]
     
     try:
-        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=25)
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=45)
     except asyncio.TimeoutError:
-        logging.error("Общий таймаут запросов к API")
+        logging.error("Общий таймаут запросов к API (45 сек)")
         return []
     
     combined = []
@@ -221,20 +219,28 @@ async def process_search(msg: Message, q: str):
     api_results = await query_all_apis(q)
     
     if not api_results:
-        return await note.edit_text("❌ Все API вернули ошибку или не ответили (таймаут).")
+        return await note.edit_text("❌ Все API вернули ошибку или не ответили (таймаут 45 сек).")
     
     text_report = render_text_results(api_results)
+    
+    # Очищаем от HTML-тегов, чтобы Телеграм не падал
+    safe_report = html.escape(text_report)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 Открыть красивый HTML", callback_data=f"html_{q[:40]}")]
     ])
     
-    await note.edit_text(
-        f"✅ <b>Результаты поиска:</b>\n\n{text_report}",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=kb
-    )
+    try:
+        await note.edit_text(
+            f"✅ <b>Результаты поиска:</b>\n\n{safe_report}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=kb
+        )
+    except Exception as e:
+        logging.error(f"Ошибка отправки: {e}")
+        # Если Телеграм снова ругнется на разметку, отправим текст без HTML
+        await note.edit_text(f"✅ Результаты:\n\n{text_report[:3500]}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
