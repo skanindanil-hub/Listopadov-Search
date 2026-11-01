@@ -1,4 +1,4 @@
-# crite.py — версия с парсингом под HYDRA
+# crite.py — финальная версия с жестким логированием
 import asyncio
 import json
 import html
@@ -75,7 +75,7 @@ async def query_all_apis(q: str) -> list[dict]:
     try:
         results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=45)
     except asyncio.TimeoutError:
-        logging.error("Общий таймаут запросов к API (45 сек)")
+        print("[ERROR] Общий таймаут запросов к API (45 сек)", flush=True)
         return []
     
     combined = []
@@ -85,7 +85,7 @@ async def query_all_apis(q: str) -> list[dict]:
         if isinstance(res, tuple) and res[0]:
             combined.append({"source": sources[i], "data": res[1]})
         elif isinstance(res, tuple):
-            logging.warning(f"{sources[i]} failed: {res[1]}")
+            print(f"[WARN] {sources[i]} failed: {res[1]}", flush=True)
             
     return combined
 
@@ -103,10 +103,8 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ЖЕСТКИЙ ПАРСЕР ПОД СТРУКТУРУ HYDRA ---
 def render_text_results(api_results: list[dict]) -> str:
     lines = []
-    
     for res in api_results:
         source = res["source"]
         data = clean_data(res["data"])
@@ -118,67 +116,44 @@ def render_text_results(api_results: list[dict]) -> str:
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
             if not inner_results: continue
             
-            # --- ИНФОРМАЦИЯ О НОМЕРЕ ---
-            phone_data = inner_results.get("PHONE_INFO") or inner_results.get("phone")
-            if phone_data and isinstance(phone_data, dict):
-                lines.append("📞 <b>Информация о номере:</b>")
-                if "phone" in phone_data: lines.append(f"├ Телефон: <code>{html.escape(str(phone_data['phone']))}</code>")
-                if "operator" in phone_data: lines.append(f"├ Оператор: {html.escape(str(phone_data['operator']))}")
-                if "region" in phone_data: lines.append(f"├ Регион: {html.escape(str(phone_data['region']))}")
-                if "country" in phone_data: lines.append(f"├ Страна: {html.escape(str(phone_data['country']))}")
-                lines.append("")
+            lines.append(f"📦 <b>{source} ({src})</b>")
             
-            # --- ТЕЛЕФОННЫЕ КНИГИ / ИМЕНА ---
-            names_data = inner_results.get("NAMES") or inner_results.get("phonebook")
-            if names_data:
-                names_str = ""
-                if isinstance(names_data, list): names_str = ", ".join([str(n) for n in names_data if n])
-                elif isinstance(names_data, dict) and "name" in names_data: names_str = str(names_data["name"])
-                elif isinstance(names_data, str): names_str = names_data
-                
-                if names_str:
-                    lines.append(f"🔍 <b>Телефонные книги:</b> {html.escape(names_str)}")
-                    lines.append("")
-
-            # --- БАЗЫ ДАННЫХ ---
-            dbs_data = inner_results.get("databases") or inner_results.get("DATABASES")
-            if dbs_data and isinstance(dbs_data, list):
-                lines.append(f"🗂 <b>Найденные базы данных ({len(dbs_data)}):</b>")
-                for db in dbs_data:
-                    if isinstance(db, dict):
-                        db_name = db.get("name", "Неизвестная база")
-                        lines.append(f"├ <b>{html.escape(str(db_name))}</b>")
-                        if "region" in db: lines.append(f"│ ├ Регион: {html.escape(str(db['region']))}")
-                        if "phone" in db: lines.append(f"│ ├ Телефон: <code>{html.escape(str(db['phone']))}</code>")
-                        if "date" in db: lines.append(f"│ ├ Дата: {html.escape(str(db['date']))}")
-                        if "name" in db: lines.append(f"│ └ Имя: {html.escape(str(db['name']))}")
-                        lines.append("")
-            
-            # --- ОСТАЛЬНОЕ (TG, VK и т.д.) ---
-            for srv_name, srv_data in inner_results.items():
-                if srv_name in ("PHONE_INFO", "phone", "NAMES", "phonebook", "databases", "DATABASES"): continue
-                
-                lines.append(f"📦 <b>{srv_name.upper()}</b>")
-                if isinstance(srv_data, dict):
-                    for k, v in srv_data.items():
-                        if isinstance(v, list):
-                            lines.append(f"├ <b>{k.replace('_', ' ').capitalize()}</b>")
+            def print_block(block_data, indent=""):
+                out = []
+                if isinstance(block_data, dict):
+                    for k, v in block_data.items():
+                        key_name = k.replace("_", " ").capitalize()
+                        if isinstance(v, dict):
+                            out.append(f"{indent}├ <b>{key_name}</b>")
+                            out.extend(print_block(v, indent + "│ "))
+                        elif isinstance(v, list):
+                            out.append(f"{indent}├ <b>{key_name}</b>")
                             for item in v:
-                                lines.append(f"│ ├ {html.escape(str(item))}")
-                        elif isinstance(v, dict):
-                            lines.append(f"├ <b>{k.replace('_', ' ').capitalize()}</b>")
-                            for sk, sv in v.items():
-                                lines.append(f"│ ├ {sk.capitalize()}: <code>{html.escape(str(sv))}</code>")
+                                if isinstance(item, (dict, list)):
+                                    out.extend(print_block(item, indent + "│ "))
+                                else:
+                                    out.append(f"{indent}│ ├ <code>{html.escape(str(item))}</code>")
                         else:
-                            lines.append(f"├ {k.replace('_', ' ').capitalize()}: <code>{html.escape(str(v))}</code>")
-                lines.append("")
+                            safe_val = html.escape(str(v))
+                            if isinstance(v, bool):
+                                safe_val = "Да" if v else "Нет"
+                            out.append(f"{indent}├ {key_name}: <code>{safe_val}</code>")
+                return out
 
+            if isinstance(inner_results, dict):
+                for srv_name, srv_data in inner_results.items():
+                    lines.append(f"└─ <b>{srv_name.upper()}</b>")
+                    block_lines = print_block(srv_data, "   ")
+                    if block_lines:
+                        block_lines[-1] = block_lines[-1].replace("├", "└", 1)
+                    lines.extend(block_lines)
+            lines.append("")
+            
     res_str = "\n".join(lines)
     if not res_str: return "🔍 Данных не найдено."
     if len(res_str) > 3800: res_str = res_str[:3800] + "\n… [ответ обрезан]"
     return res_str
 
-# --- КРАСИВЫЙ HTML ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     content = ""
     for res in api_results:
@@ -223,77 +198,47 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                     content += render_html_block(item)
             content += '</div>'
 
-    return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OASIS REPORT</title>
+    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>OASIS REPORT</title>
     <style>
-        :root {{
-            --bg: #0a0a0f;
-            --card-bg: rgba(22, 27, 38, 0.7);
-            --border: rgba(48, 54, 61, 0.6);
-            --text: #e6edf3;
-            --text-muted: #8b949e;
-            --accent: #58a6ff;
-            --green: #3fb950;
-            --purple: #bc8cff;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg);
-            color: var(--text);
-            margin: 0;
-            padding: 20px;
-            line-height: 1.6;
-            background-image: radial-gradient(circle at 15% 50%, rgba(88, 166, 255, 0.05), transparent 25%), radial-gradient(circle at 85% 30%, rgba(188, 140, 255, 0.05), transparent 25%);
-            background-attachment: fixed;
-        }}
+        :root {{ --bg: #0a0a0f; --card-bg: rgba(22, 27, 38, 0.7); --border: rgba(48, 54, 61, 0.6); --text: #e6edf3; --text-muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --purple: #bc8cff; }}
+        body {{ font-family: -apple-system, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.6; background-image: radial-gradient(circle at 15% 50%, rgba(88, 166, 255, 0.05), transparent 25%); background-attachment: fixed; }}
         .container {{ max-width: 800px; margin: 0 auto; }}
-        .header {{ text-align: center; margin-bottom: 40px; padding: 20px; background: var(--card-bg); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 8px 32px rgba(0,0,0,0.3); backdrop-filter: blur(10px); }}
-        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; letter-spacing: 1px; text-shadow: 0 0 20px rgba(88, 166, 255, 0.2); }}
-        .query {{ color: var(--text-muted); font-size: 15px; }}
+        .header {{ text-align: center; margin-bottom: 40px; padding: 20px; background: var(--card-bg); border-radius: 16px; border: 1px solid var(--border); }}
+        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; }}
         .query b {{ color: var(--green); background: rgba(63, 185, 80, 0.1); padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(63, 185, 80, 0.3); font-family: monospace; }}
         .source-header {{ background: linear-gradient(90deg, rgba(63, 185, 80, 0.15) 0%, transparent 100%); border-left: 4px solid var(--green); color: var(--green); padding: 12px 20px; font-size: 16px; font-weight: 600; margin: 30px 0 15px 0; border-radius: 0 8px 8px 0; }}
-        .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); backdrop-filter: blur(10px); }}
-        .card-title {{ color: var(--purple); font-size: 16px; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px; font-weight: 600; letter-spacing: 0.5px; }}
-        .service-badge {{ background: rgba(88, 166, 255, 0.1); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.2); display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 15px; letter-spacing: 0.5px; }}
+        .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
+        .card-title {{ color: var(--purple); font-size: 16px; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px; font-weight: 600; }}
+        .service-badge {{ background: rgba(88, 166, 255, 0.1); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.2); display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 15px; }}
         .grid {{ display: flex; flex-direction: column; gap: 4px; }}
-        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 10px; border-radius: 6px; transition: background 0.2s; }}
-        .grid-item:hover {{ background: rgba(255,255,255,0.03); }}
+        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 10px; border-radius: 6px; }}
         .grid-key {{ color: var(--text-muted); font-size: 14px; }}
         .grid-val {{ color: var(--text); font-size: 14px; text-align: right; word-break: break-word; max-width: 65%; }}
         .grid-val.highlight {{ color: var(--accent); font-weight: 600; }}
-        .grid-title {{ color: var(--text-muted); font-size: 13px; font-weight: 600; margin: 15px 0 8px 0; letter-spacing: 1px; text-transform: uppercase; }}
+        .grid-title {{ color: var(--text-muted); font-size: 13px; font-weight: 600; margin: 15px 0 8px 0; text-transform: uppercase; }}
         .grid-content {{ background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }}
-        a {{ color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent); transition: all 0.2s; }}
-        a:hover {{ color: #79c0ff; border-bottom: 1px solid #79c0ff; }}
+        a {{ color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent); }}
         .text-muted {{ color: var(--text-muted); font-style: italic; text-align: center; display: block; padding: 20px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🕵️ OASIS SEARCH</h1>
-            <div class="query">Отчет по запросу: <b>{html.escape(query)}</b></div>
-        </div>
+    </style></head><body><div class="container">
+        <div class="header"><h1>🕵️ OASIS SEARCH</h1><div class="query">Отчет по запросу: <b>{html.escape(query)}</b></div></div>
         {content}
-    </div>
-</body>
-</html>"""
+    </div></body></html>"""
 
-# --- ХЭНДЛЕРЫ ---
+# --- ХЭНДЛЕРЫ С ЛОГАМИ ---
 @dp.message(Command("start"))
 async def start(msg: Message):
+    print(f"[LOG] Получен /start от ID {msg.from_user.id}", flush=True)
     await msg.answer(WELCOME_TEXT, parse_mode="HTML")
 
 async def process_search(msg: Message, q: str):
+    print(f"[LOG] Начало поиска для: {q}", flush=True)
     note = await msg.answer(f"🔍 Ищу во всех базах <code>{html.escape(q)}</code>…", parse_mode="HTML")
     
     api_results = await query_all_apis(q)
+    print(f"[LOG] API ответили. Успешных: {len(api_results)}", flush=True)
     
     if not api_results:
+        print("[ERROR] Все API вернули ошибку.", flush=True)
         return await note.edit_text("❌ Все API вернули ошибку или не ответили (таймаут 45 сек).")
     
     text_report = render_text_results(api_results)
@@ -309,22 +254,23 @@ async def process_search(msg: Message, q: str):
             disable_web_page_preview=True,
             reply_markup=kb
         )
+        print("[LOG] Сообщение успешно отправлено.", flush=True)
     except Exception as e:
-        logging.error(f"Ошибка отправки: {e}")
+        print(f"[ERROR] Ошибка отправки: {e}", flush=True)
         clean_text = re.sub(r'<[^>]+>', '', text_report)
         await note.edit_text(f"✅ Результаты:\n\n{clean_text[:3500]}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
     q = cb.data.replace("html_", "")
+    print(f"[LOG] Запрос HTML для: {q}", flush=True)
     await cb.answer("Генерирую файл...")
     
     note = await cb.message.reply("⏳ Собираю данные для HTML...")
     api_results = await query_all_apis(q)
     
     if not api_results:
-        await note.edit_text("❌ Данные устарели, попробуйте поиск заново.")
-        return
+        return await note.edit_text("❌ Данные устарели.")
         
     html_code = build_html_report(api_results, q)
     file = BufferedInputFile(html_code.encode('utf-8'), filename=f"oasis_{q[:10]}.html")
@@ -334,6 +280,7 @@ async def send_html_file(cb: CallbackQuery):
 
 @dp.message(Command("search"))
 async def cmd_search(msg: Message):
+    print(f"[LOG] Получен /search", flush=True)
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2: return await msg.answer("Укажи запрос.")
     await process_search(msg, parts[1].strip())
@@ -341,18 +288,19 @@ async def cmd_search(msg: Message):
 @dp.message()
 async def auto_search(msg: Message):
     if msg.text and not msg.text.startswith("/"):
+        print(f"[LOG] Получено сообщение: {msg.text}", flush=True)
         await process_search(msg, msg.text.strip())
 
 # --- ЗАПУСК RENDER ---
 async def on_startup(bot: Bot):
+    print(f"[LOG] Запуск. Установка вебхука: {WEBHOOK_URL}", flush=True)
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook: {WEBHOOK_URL}")
+    print("[LOG] Вебхук установлен.", flush=True)
 
 async def health_check(request):
     return web.Response(text="OK")
 
 def main():
-    logging.basicConfig(level=logging.INFO)
     bot = Bot(BOT_TOKEN)
     dp.startup.register(on_startup)
     
