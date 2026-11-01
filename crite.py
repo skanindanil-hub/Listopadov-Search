@@ -1,4 +1,5 @@
- # crite.py — откат на API Mobius
+
+# crite.py — каскадный OSINT-бот (LEGO -> DevHydra -> Mobius)
 import asyncio
 import json
 import html
@@ -20,10 +21,21 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ API ---
+# API 1 (LEGO)
+API_URL_1 = "https://api.lego.new.tg/v1/search"
+API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
+
+# API 2 (DevHydra)
+API_URL_2 = "https://api.devhydra.info/v1/search"
+API_KEY_2 = "HYDRA-LordKEY-2eWKbyuQUJz6XQK5Pv"
+
+# API 3 (Mobius - твой личный бессрочный)
+API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
+API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+
+# --- ОБЩИЕ НАСТРОЙКИ ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
-API_KEY = "MOBIUS-IO-m8CwLHrwIBHnTWCW_pSYPjYgdGD9rsJ31S-RPUnAmro"
-API_URL = "https://mobiusnet.cc.cd/api/v1/search"
 DB_PATH = "bot_data.db"
 MAIN_ADMIN_ID = 8394631079
 ADMIN_USERNAME = "anodoxx"
@@ -163,29 +175,72 @@ WELCOME_TEXT = """🕵️ <b>LISTOPADOV SEARCH</b>
 
 📸 <i>Отправьте лицо, чтобы найти его.</i>"""
 
+def detect_type(query: str) -> str:
+    q = query.strip()
+    if re.match(r"^\+?\d{10,15}$", q): return "phone"
+    if "@" in q and "." in q.split("@")[-1]: return "email"
+    if q.startswith("@") or q.startswith("t.me/") or q.startswith("https://t.me/"): return "telegram"
+    if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
+    return "name"
+
 async def query_api(q: str) -> tuple[bool, dict | str]:
-    headers = {"X-API-Key": API_KEY, "Accept": "application/json"}
-    timeout = aiohttp.ClientTimeout(total=25)
+    q_type = detect_type(q)
     
-    for attempt in range(2):
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(API_URL, headers=headers, params={"q": q}, ssl=False) as resp:
+    # Попытка 1: LEGO
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            resp = await session.get(API_URL_1, params={"q": q, "type": q_type, "key": API_KEY_1}, impersonate="chrome", timeout=15)
+            if resp.status_code == 200 and "Just a moment" not in resp.text:
+                return True, resp.json()
+    except Exception as e:
+        logging.warning(f"LEGO (curl) failed: {e}")
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_1, params={"q": q, "type": q_type, "key": API_KEY_1}, ssl=False) as resp:
+                if resp.status == 200:
                     raw = await resp.text()
-                    if resp.status != 200: 
-                        return False, f"Сервер вернул ошибку: HTTP {resp.status}\n{raw[:200]}"
-                    try: 
+                    if "Just a moment" not in raw:
                         return True, json.loads(raw)
-                    except: 
-                        return False, f"Сервер вернул не JSON:\n{raw[:200]}"
-        except asyncio.TimeoutError:
-            if attempt == 1: 
-                return False, "Сервер Mobius не ответил за 25 секунд. Попробуйте позже."
-            await asyncio.sleep(1) 
-        except Exception as e:
-            return False, f"Ошибка сети: {type(e).__name__}"
-            
-    return False, "Неизвестная ошибка"
+    except Exception as e:
+        logging.warning(f"LEGO (aiohttp) failed: {e}")
+
+    # Попытка 2: DevHydra
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            resp = await session.get(API_URL_2, params={"q": q, "type": q_type, "key": API_KEY_2}, impersonate="chrome", timeout=15)
+            if resp.status_code == 200 and "Just a moment" not in resp.text:
+                return True, resp.json()
+    except Exception as e:
+        logging.warning(f"DevHydra (curl) failed: {e}")
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_2, params={"q": q, "type": q_type, "key": API_KEY_2}, ssl=False) as resp:
+                if resp.status == 200:
+                    raw = await resp.text()
+                    if "Just a moment" not in raw:
+                        return True, json.loads(raw)
+    except Exception as e:
+        logging.warning(f"DevHydra (aiohttp) failed: {e}")
+
+    # Попытка 3: Mobius (Резерв)
+    logging.info("Переключение на резервный API Mobius...")
+    try:
+        headers = {"X-API-Key": API_KEY_3, "Accept": "application/json"}
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_3, headers=headers, params={"q": q}, ssl=False) as resp:
+                if resp.status == 200:
+                    return True, json.loads(await resp.text())
+    except Exception as e:
+        logging.warning(f"Mobius failed: {e}")
+
+    return False, "Все три API сейчас недоступны (ошибка сети или блокировка Cloudflare)."
 
 def build_html_report(data: dict, query: str) -> tuple[str, int]:
     content = ""
