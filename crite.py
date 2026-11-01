@@ -1,5 +1,4 @@
-
-# crite.py — обновленный код для Render с API DevHydra
+ # crite.py — откат на API Mobius
 import asyncio
 import json
 import html
@@ -23,8 +22,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
-API_KEY = "HYDRA-LordKEY-LPpWyLlHhyaAbt1yoj"
-API_URL = "https://api.devhydra.info/v1/search"
+API_KEY = "MOBIUS-IO-m8CwLHrwIBHnTWCW_pSYPjYgdGD9rsJ31S-RPUnAmro"
+API_URL = "https://mobiusnet.cc.cd/api/v1/search"
 DB_PATH = "bot_data.db"
 MAIN_ADMIN_ID = 8394631079
 ADMIN_USERNAME = "anodoxx"
@@ -164,24 +163,14 @@ WELCOME_TEXT = """🕵️ <b>LISTOPADOV SEARCH</b>
 
 📸 <i>Отправьте лицо, чтобы найти его.</i>"""
 
-def detect_type(query: str) -> str:
-    q = query.strip()
-    if re.match(r"^\+?\d{10,15}$", q): return "phone"
-    if "@" in q and "." in q.split("@")[-1]: return "email"
-    if q.startswith("@") or q.startswith("t.me/") or q.startswith("https://t.me/"): return "telegram"
-    if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
-    return "name"
-
 async def query_api(q: str) -> tuple[bool, dict | str]:
-    q_type = detect_type(q)
-    params = {"q": q, "type": q_type, "key": API_KEY}
-    headers = {"Accept": "application/json"}
+    headers = {"X-API-Key": API_KEY, "Accept": "application/json"}
     timeout = aiohttp.ClientTimeout(total=25)
     
     for attempt in range(2):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(API_URL, headers=headers, params=params, ssl=False) as resp:
+                async with session.get(API_URL, headers=headers, params={"q": q}, ssl=False) as resp:
                     raw = await resp.text()
                     if resp.status != 200: 
                         return False, f"Сервер вернул ошибку: HTTP {resp.status}\n{raw[:200]}"
@@ -191,7 +180,7 @@ async def query_api(q: str) -> tuple[bool, dict | str]:
                         return False, f"Сервер вернул не JSON:\n{raw[:200]}"
         except asyncio.TimeoutError:
             if attempt == 1: 
-                return False, "Сервер не ответил за 25 секунд. Попробуйте позже."
+                return False, "Сервер Mobius не ответил за 25 секунд. Попробуйте позже."
             await asyncio.sleep(1) 
         except Exception as e:
             return False, f"Ошибка сети: {type(e).__name__}"
