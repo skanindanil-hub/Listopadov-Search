@@ -1,4 +1,4 @@
-# crite.py — финальная версия с красивым текстом и кнопкой HTML
+# crite.py — вывод как на скрине (HYDRA style) + красивый HTML
 import asyncio
 import json
 import html
@@ -23,7 +23,6 @@ API_KEY_2 = "HYDRA-LordKEY-2eWKbyuQUJz6XQK5Pv"
 API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
-# --- ОБЩИЕ НАСТРОЙКИ ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app-name.onrender.com")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
@@ -93,20 +92,24 @@ async def query_all_apis(q: str) -> list[dict]:
 
 # --- ОЧИСТКА ДАННЫХ ---
 def clean_data(obj):
-    """Рекурсивно удаляет мусорные ключи и пустые значения"""
+    """Удаляет системный мусор, оставляя только инфу"""
     if isinstance(obj, dict):
-        return {
-            k: clean_data(v) for k, v in obj.items()
-            if k not in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms")
-            and v is not None and v != "" and v != {} and v != []
-        }
+        res = {}
+        for k, v in obj.items():
+            if k in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype"):
+                continue
+            if v is None or v == "" or v == {} or v == []:
+                continue
+            res[k] = clean_data(v)
+        return res
     elif isinstance(obj, list):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ТЕКСТОВЫЙ РЕНДЕР ---
+# --- ГЕНЕРАЦИЯ КРАСИВОГО ТЕКСТА (КАК НА СКРИНЕ) ---
 def render_text_results(api_results: list[dict]) -> str:
     lines = []
+    
     for res in api_results:
         source = res["source"]
         data = clean_data(res["data"])
@@ -119,37 +122,45 @@ def render_text_results(api_results: list[dict]) -> str:
             inner_results = src_data.get("result", {}).get("data", {}).get("results", {})
             if not inner_results:
                 continue
-                
-            lines.append(f"<b>📦 {source} ({src})</b>")
             
-            # Функция для вывода дерева
-            def print_tree(d, prefix="├"):
-                out = []
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        key_name = k.replace("_", " ").capitalize()
-                        if isinstance(v, (dict, list)):
-                            out.append(f"{prefix} <b>{key_name}:</b>")
-                            out.extend(print_tree(v, prefix + "─"))
-                        else:
-                            if isinstance(v, str) and v.startswith("http"):
-                                out.append(f"{prefix} {key_name}: <a href='{v}'>ссылка</a>")
-                            else:
-                                out.append(f"{prefix} {key_name}: <code>{html.escape(str(v))}</code>")
-                elif isinstance(d, list):
-                    for item in d:
-                        if isinstance(item, (dict, list)):
-                            out.extend(print_tree(item, prefix + "─"))
-                        else:
-                            out.append(f"{prefix} <code>{html.escape(str(item))}</code>")
-                return out
+            # Блок телефона/оператора (как на скрине)
+            if "phone" in inner_results:
+                ph = inner_results["phone"]
+                lines.append("📞 <b>Информация о номере:</b>")
+                if "phone" in ph: lines.append(f"├ Телефон: <code>{ph['phone']}</code>")
+                if "operator" in ph: lines.append(f"├ Оператор: {ph['operator']}")
+                if "region" in ph: lines.append(f"├ Регион: {ph['region']}")
+                lines.append("")
+            
+            # Блок телефонных книг
+            if "phonebook" in inner_results:
+                pb = inner_results["phonebook"]
+                lines.append(f"🔍 <b>Телефонные книги:</b> {pb.get('name', '')}")
+                lines.append("")
 
-            if isinstance(inner_results, dict):
-                for srv_name, srv_data in inner_results.items():
-                    lines.append(f"└─ <b>{srv_name.upper()}</b>")
-                    lines.extend(print_tree(srv_data, "   ├"))
-            lines.append("")
+            # Блок баз данных (как NumBuster)
+            if "databases" in inner_results:
+                dbs = inner_results["databases"]
+                if isinstance(dbs, list) and dbs:
+                    lines.append(f"🗂 <b>Найденные базы данных ({len(dbs)}):</b>")
+                    for db in dbs:
+                        lines.append(f"├ <b>{db.get('name', 'База')}</b>")
+                        if "region" in db: lines.append(f"│ ├ Регион: {db['region']}")
+                        if "phone" in db: lines.append(f"│ ├ Телефон: <code>{db['phone']}</code>")
+                        if "name" in db: lines.append(f"│ └ Имя: {db['name']}")
+                        lines.append("")
             
+            # Если структура нестандартная, выводим просто ключ-значение
+            for srv_name, srv_data in inner_results.items():
+                if srv_name in ("phone", "phonebook", "databases"):
+                    continue
+                lines.append(f"📦 <b>{srv_name.upper()}</b>")
+                if isinstance(srv_data, dict):
+                    for k, v in srv_data.items():
+                        if not isinstance(v, (dict, list)):
+                            lines.append(f"├ {k.capitalize()}: <code>{html.escape(str(v))}</code>")
+                lines.append("")
+                
     res_str = "\n".join(lines)
     if not res_str:
         return "🔍 Данных не найдено."
@@ -157,7 +168,7 @@ def render_text_results(api_results: list[dict]) -> str:
         res_str = res_str[:3800] + "\n… [ответ обрезан]"
     return res_str
 
-# --- HTML РЕНДЕР ---
+# --- КРАСИВЫЙ HTML ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     content = ""
     for res in api_results:
@@ -174,14 +185,15 @@ def build_html_report(api_results: list[dict], query: str) -> str:
         def render_html_block(d):
             out = ""
             if isinstance(d, dict):
+                out += '<div class="grid">'
                 for k, v in d.items():
-                    key_name = k.replace("_", " ").capitalize()
                     if isinstance(v, (dict, list)):
-                        out += f'<div class="nested-title">{key_name}</div>'
-                        out += f'<div class="nested-card">{render_html_block(v)}</div>'
+                        out += f'<div class="grid-title">{html.escape(k.capitalize())}</div>'
+                        out += f'<div class="grid-content">{render_html_block(v)}</div>'
                     else:
                         val_html = f'<a href="{v}" target="_blank">{html.escape(v)}</a>' if isinstance(v, str) and v.startswith("http") else html.escape(str(v))
-                        out += f'<div class="row"><div class="key">{key_name}</div><div class="val">{val_html}</div></div>'
+                        out += f'<div class="grid-item"><span class="grid-key">{k.capitalize()}</span><span class="grid-val">{val_html}</span></div>'
+                out += '</div>'
             elif isinstance(d, list):
                 for item in d:
                     out += render_html_block(item)
@@ -195,7 +207,7 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             content += f'<div class="card"><div class="card-title">{html.escape(src)}</div>'
             if isinstance(inner_results, dict):
                 for srv_name, srv_data in inner_results.items():
-                    content += f'<div class="service-name">📌 {srv_name.upper()}</div>'
+                    content += f'<div class="service-badge">{srv_name.upper()}</div>'
                     content += render_html_block(srv_data)
             elif isinstance(inner_results, list):
                 for item in inner_results:
@@ -210,39 +222,84 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     <title>OASIS REPORT: {html.escape(query)}</title>
     <style>
         :root {{
-            --bg: #0d1117;
-            --card-bg: #161b22;
-            --border: #30363d;
-            --text: #c9d1d9;
-            --text-muted: #8b949e;
-            --accent: #58a6ff;
-            --green: #3fb950;
+            --bg: #0b0f19;
+            --card-bg: #151b26;
+            --border: #2a3441;
+            --text: #e2e8f0;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --green: #22c55e;
+            --purple: #a855f7;
         }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg);
             color: var(--text);
             margin: 0;
             padding: 20px;
-            line-height: 1.6;
+            line-height: 1.5;
+            background-image: radial-gradient(circle at top right, rgba(56, 189, 248, 0.05), transparent 400px);
         }}
         .container {{ max-width: 800px; margin: 0 auto; }}
-        .header {{ text-align: center; margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }}
-        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; }}
+        .header {{ text-align: center; margin-bottom: 40px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }}
+        h1 {{ color: var(--accent); margin: 0 0 10px 0; font-size: 28px; letter-spacing: 1px; }}
         .query {{ color: var(--text-muted); font-size: 16px; }}
-        .query b {{ color: var(--text); background: var(--card-bg); padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); }}
-        .source-header {{ background: linear-gradient(90deg, var(--card-bg) 0%, var(--bg) 100%); border-left: 4px solid var(--green); padding: 12px 15px; font-size: 18px; font-weight: bold; margin: 30px 0 15px 0; border-radius: 0 6px 6px 0; }}
-        .card {{ background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; }}
-        .card-title {{ color: #d2a8ff; font-size: 18px; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }}
-        .service-name {{ color: var(--accent); font-weight: bold; margin: 15px 0 10px 0; font-size: 15px; }}
-        .row {{ display: flex; border-bottom: 1px dashed #21262d; padding: 8px 0; }}
-        .row:last-child {{ border-bottom: none; }}
-        .key {{ width: 40%; color: var(--text-muted); font-size: 14px; font-weight: 500; }}
-        .val {{ width: 60%; color: var(--text); font-size: 14px; word-break: break-word; }}
-        .nested-title {{ color: var(--text-muted); font-size: 13px; text-transform: uppercase; margin: 15px 0 5px 0; }}
-        .nested-card {{ background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 15px; margin-bottom: 10px; }}
-        a {{ color: var(--accent); text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
+        .query b {{ color: var(--text); background: var(--card-bg); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); font-family: monospace; }}
+        
+        .source-header {{ 
+            background: rgba(34, 197, 94, 0.1); 
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            color: var(--green); 
+            padding: 12px 20px; 
+            font-size: 16px; 
+            font-weight: bold; 
+            margin: 30px 0 15px 0; 
+            border-radius: 8px; 
+            display: inline-block;
+        }}
+        
+        .card {{ 
+            background-color: var(--card-bg); 
+            border: 1px solid var(--border); 
+            border-radius: 12px; 
+            padding: 24px; 
+            margin-bottom: 20px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }}
+        .card-title {{ 
+            color: var(--purple); 
+            font-size: 18px; 
+            margin-bottom: 20px; 
+            border-bottom: 1px solid var(--border); 
+            padding-bottom: 12px; 
+            font-weight: 600;
+        }}
+        
+        .service-badge {{
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--accent);
+            border: 1px solid rgba(56, 189, 248, 0.2);
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        
+        .grid {{ display: flex; flex-direction: column; gap: 10px; }}
+        .grid-item {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed rgba(255,255,255,0.05); }}
+        .grid-item:last-child {{ border-bottom: none; }}
+        .grid-key {{ color: var(--text-muted); font-size: 14px; }}
+        .grid-val {{ color: var(--text); font-size: 14px; text-align: right; word-break: break-word; max-width: 60%; }}
+        
+        .grid-title {{ color: var(--accent); font-size: 15px; font-weight: 600; margin: 20px 0 10px 0; border-bottom: 1px solid var(--border); padding-bottom: 5px; }}
+        .grid-content {{ background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 15px; }}
+        
+        a {{ color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border 0.2s; }}
+        a:hover {{ border-bottom: 1px solid var(--accent); }}
         .text-muted {{ color: var(--text-muted); font-style: italic; }}
     </style>
 </head>
@@ -250,7 +307,7 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     <div class="container">
         <div class="header">
             <h1>🕵️ OASIS SEARCH</h1>
-            <div class="query">Результат по запросу: <b>{html.escape(query)}</b></div>
+            <div class="query">Отчет по запросу: <b>{html.escape(query)}</b></div>
         </div>
         {content}
     </div>
@@ -270,13 +327,10 @@ async def process_search(msg: Message, q: str):
     if not api_results:
         return await note.edit_text("❌ Все API вернули ошибку или ничего не нашли.")
     
-    # 1. Отправляем красивый текст
     text_report = render_text_results(api_results)
     
-    # 2. Создаем инлайн-кнопку для скачивания HTML
-    # В callback_data передаем запрос, чтобы потом сгенерировать файл
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📄 Скачать HTML отчет", callback_data=f"html_{q[:40]}")]
+        [InlineKeyboardButton(text="📄 Открыть красивый HTML", callback_data=f"html_{q[:40]}")]
     ])
     
     await note.edit_text(
@@ -291,7 +345,6 @@ async def send_html_file(cb: CallbackQuery):
     q = cb.data.replace("html_", "")
     await cb.answer("Генерирую файл...")
     
-    # Повторно запрашиваем данные для HTML (или можно было сохранить в FSM, но для простоты запросим снова)
     note = await cb.message.reply("⏳ Собираю данные для HTML...")
     api_results = await query_all_apis(q)
     
