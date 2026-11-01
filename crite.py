@@ -1,8 +1,9 @@
-# crite.py — чистый бот для Render
+# crite.py — каскадный бот для Render
 import asyncio
 import json
 import html
 import os
+import re
 import logging
 import aiohttp
 from aiohttp import web
@@ -11,11 +12,21 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
-API_URL = "https://mobiusnet.cc.cd/api/v1/search"
-API_KEY = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+# --- НАСТРОЙКИ API ---
+# API 1 (LEGO)
+API_URL_1 = "https://api.lego.new.tg/v1/search"
+API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
 
+# API 2 (DevHydra)
+API_URL_2 = "https://api.devhydra.info/v1/search"
+API_KEY_2 = "HYDRA-LordKEY-2eWKbyuQUJz6XQK5Pv"
+
+# API 3 (Mobius)
+API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
+API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+
+# --- ОБЩИЕ НАСТРОЙКИ ---
+BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app-name.onrender.com")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
@@ -33,24 +44,53 @@ WELCOME_TEXT = """🕵️ <b>LISTOPADOV SEARCH</b>
 
 Просто отправь запрос в чат."""
 
+def detect_type(query: str) -> str:
+    q = query.strip()
+    if re.match(r"^\+?\d{10,15}$", q): return "phone"
+    if "@" in q and "." in q.split("@")[-1]: return "email"
+    if q.startswith("@") or q.startswith("t.me/") or q.startswith("https://t.me/"): return "telegram"
+    if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
+    return "name"
+
 async def query_api(q: str) -> tuple[bool, dict | str]:
-    headers = {"X-API-Key": API_KEY, "Accept": "application/json"}
-    timeout = aiohttp.ClientTimeout(total=25)
+    q_type = detect_type(q)
     
+    # Попытка 1: LEGO
     try:
+        timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(API_URL, headers=headers, params={"q": q}, ssl=False) as resp:
-                raw = await resp.text()
-                if resp.status != 200: 
-                    return False, f"HTTP {resp.status}: {raw[:200]}"
-                try: 
-                    return True, json.loads(raw)
-                except: 
-                    return False, f"Не JSON: {raw[:200]}"
-    except asyncio.TimeoutError:
-        return False, "Таймаут (25 сек)."
+            async with session.get(API_URL_1, params={"q": q, "type": q_type, "key": API_KEY_1}, ssl=False) as resp:
+                if resp.status == 200:
+                    raw = await resp.text()
+                    if "Just a moment" not in raw:
+                        return True, json.loads(raw)
     except Exception as e:
-        return False, f"Ошибка: {type(e).__name__}"
+        logging.warning(f"LEGO failed: {e}")
+
+    # Попытка 2: DevHydra
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_2, params={"q": q, "type": q_type, "key": API_KEY_2}, ssl=False) as resp:
+                if resp.status == 200:
+                    raw = await resp.text()
+                    if "Just a moment" not in raw:
+                        return True, json.loads(raw)
+    except Exception as e:
+        logging.warning(f"DevHydra failed: {e}")
+
+    # Попытка 3: Mobius
+    try:
+        headers = {"X-API-Key": API_KEY_3, "Accept": "application/json"}
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_3, headers=headers, params={"q": q}, ssl=False) as resp:
+                if resp.status == 200:
+                    return True, json.loads(await resp.text())
+    except Exception as e:
+        logging.warning(f"Mobius failed: {e}")
+
+    return False, "Все три API сейчас недоступны."
 
 def build_html_report(data: dict, query: str) -> tuple[str, int]:
     content = ""
