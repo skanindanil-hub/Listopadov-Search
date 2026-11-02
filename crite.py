@@ -1,4 +1,4 @@
- # crite.py — основной бот Listopadov Search для Render
+# crite.py — основной бот Listopadov Search для Render (Рефка +2)
 import asyncio
 import json
 import html
@@ -11,7 +11,7 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -26,8 +26,8 @@ API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
 # --- НАСТРОЙКИ БОТА ---
-BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo" # Основной токен
-BOT_USERNAME = "ListopadovSearchBot" # Юзернейм БЕЗ @ (для ссылки)
+BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
+BOT_USERNAME = "ListopadovSearchBot"
 MAIN_ADMIN_ID = 8394631079
 DB_PATH = "bot_data.db"
 
@@ -293,7 +293,6 @@ def build_html_report(api_results: list[dict], query: str) -> str:
         data = clean_data(res["data"])
         results_dict = data.get("results", {})
         items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        
         for src_data in items:
             if not isinstance(src_data, dict): continue
             inner = src_data.get("result", {}).get("data", {}).get("results", {})
@@ -355,7 +354,7 @@ def build_html_report(api_results: list[dict], query: str) -> str:
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_menu")],
-        [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="ref_link"), InlineKeyboardButton(text="🧩 Поиск по неполным данным", callback_data="partial_search")]
+        [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="ref_link")]
     ])
 
 def admin_menu():
@@ -364,34 +363,22 @@ def admin_menu():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
-def post_payment_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="ref_link")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
-    ])
-
 # --- ХЭНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def start(msg: Message, command: CommandStart):
     referrer_id = None
     if command.args and command.args.isdigit():
         referrer_id = int(command.args)
-        if referrer_id == msg.from_user.id:
-            referrer_id = None
+        if referrer_id == msg.from_user.id: referrer_id = None
 
     is_new = await add_user(msg.from_user.id, msg.from_user.username, referrer_id)
     
     if is_new and referrer_id:
-        await add_requests(referrer_id, 5)
+        await add_requests(referrer_id, 2) # <--- ТУТ ИЗМЕНЕНО НА 2
         try:
-            await msg.bot.send_message(referrer_id, f"🎉 По вашей ссылке пришел новый пользователь! Вам начислено <b>+5 запросов</b>.", parse_mode="HTML")
-        except:
-            pass
+            await msg.bot.send_message(referrer_id, f"🎉 По вашей ссылке пришел новый пользователь! Вам начислено <b>+2 запроса</b>.", parse_mode="HTML")
+        except: pass
 
-    await msg.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
-
-@dp.message(Command("help"))
-async def help_cmd(msg: Message):
     await msg.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
 
 @dp.callback_query(F.data == "profile")
@@ -406,8 +393,8 @@ async def cb_profile(cb: CallbackQuery):
         f"🆔 ID: <code>{cb.from_user.id}</code>\n"
         f"📛 Юзер: {uname}\n"
         f"🎖 Статус: {status}\n"
-        f"💳 Баланс: <code>{bal}</code>\n"
-        f"👥 Приглашено друзей: <b>{ref_count}</b>"
+        f"💳 Баланс: <code>{bal}</code> запросов\n"
+        f"👥 Приглашено: <b>{ref_count}</b>"
     )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
@@ -415,11 +402,11 @@ async def cb_profile(cb: CallbackQuery):
 @dp.callback_query(F.data == "ref_link")
 async def cb_ref_link(cb: CallbackQuery):
     ref_link = f"https://t.me/{BOT_USERNAME}?start={cb.from_user.id}"
-    share_text = f"Попробуй этот OSINT-бот! Он ищет по базам. Ссылка: {ref_link}"
+    share_text = f"Попробуй этот OSINT-бот! Ссылка: {ref_link}"
     
     text = (
         f"👥 <b>Пригласи друга</b>\n\n"
-        f"Отправь эту ссылку друзьям. За каждого, кто зайдет по ней, ты получишь <b>+5 запросов</b> на баланс.\n\n"
+        f"За каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n" # <--- ТУТ ИЗМЕНЕНО НА 2
         f"🔗 <code>{ref_link}</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -435,11 +422,7 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
     await cb.answer()
 
-@dp.callback_query(F.data == "partial_search")
-async def cb_info_btn(cb: CallbackQuery):
-    await cb.answer("Отправь запрос текстом. Например: Иванов Иван 1990", show_alert=True)
-
-# --- ПОКУПКА ---
+# --- ПОКУПКА ЗАПРОСОВ ---
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -457,19 +440,19 @@ async def cb_buy_package(cb: CallbackQuery, state: FSMContext):
     amount = int(cb.data.split("_")[1])
     total_ton = amount * PRICE_PER_REQ_TON
     await state.update_data(buy_amount=amount, total_ton=total_ton)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
-        [InlineKeyboardButton(text="💠 GRAM", callback_data="curr_GRAM")],
         [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
     ])
-    await cb.message.edit_text(f"Вы выбрали <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту для оплаты:", parse_mode="HTML", reply_markup=kb)
+    await cb.message.edit_text(f"Вы выбрали <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту:", parse_mode="HTML", reply_markup=kb)
     await state.set_state(BuyStates.wait_currency)
     await cb.answer()
 
 @dp.callback_query(F.data == "buy_custom")
 async def cb_buy_custom(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text("✏️ Введите количество запросов (только цифры):\nНапример: <code>25</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]]))
+    await cb.message.edit_text("✏️ Введите количество запросов:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]]))
     await state.set_state(BuyStates.wait_custom_amount)
     await cb.answer()
 
@@ -479,16 +462,17 @@ async def process_custom_amount(msg: Message, state: FSMContext):
         amount = int(msg.text)
         if amount <= 0: raise ValueError
     except ValueError:
-        return await msg.answer("❌ Введите целое положительное число.")
+        return await msg.answer("❌ Введите целое число.")
+    
     total_ton = amount * PRICE_PER_REQ_TON
     await state.update_data(buy_amount=amount, total_ton=total_ton)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
-        [InlineKeyboardButton(text="💠 GRAM", callback_data="curr_GRAM")],
         [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
     ])
-    await msg.answer(f"Вы хотите купить <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту для оплаты:", parse_mode="HTML", reply_markup=kb)
+    await msg.answer(f"Вы хотите купить <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту:", parse_mode="HTML", reply_markup=kb)
     await state.set_state(BuyStates.wait_currency)
 
 @dp.callback_query(BuyStates.wait_currency, F.data.startswith("curr_"))
@@ -502,23 +486,12 @@ async def process_currency(cb: CallbackQuery, state: FSMContext):
         curr_text = f"Сумма: <b>{total_ton:.2f} TON</b>"
         nano_amount = int(total_ton * 1_000_000_000)
         tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount={nano_amount}"
-    elif currency == "GRAM":
-        total_gram = total_ton * RATE_TON_TO_GRAM
-        curr_text = f"Сумма: <b>{total_gram:.2f} GRAM</b>"
-        tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount=0" 
     else:
         total_usdt = total_ton * RATE_TON_TO_USDT
         curr_text = f"Сумма: <b>~{total_usdt:.2f} USDT</b>"
         tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount=0"
 
-    text = (
-        f"💳 <b>Оплата: {amount} запросов</b>\n\n"
-        f"Валюта: <b>{currency}</b>\n{curr_text}\n"
-        f"Кошелек: <code>{CRYPTO_WALLET}</code>\n\n"
-        f"1. Переведите указанную сумму.\n"
-        f"2. Скопируйте <b>хеш транзакции (TX Hash)</b>.\n"
-        f"3. Отправьте этот хеш сюда."
-    )
+    text = f"💳 <b>Оплата: {amount} запросов</b>\n\nВалюта: <b>{currency}</b>\n{curr_text}\nКошелек: <code>{CRYPTO_WALLET}</code>\n\nОтправьте <b>хеш транзакции</b> сюда."
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть TONKEEPER", url=tonkeeper_link)],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
@@ -552,7 +525,7 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
     await add_requests(int(uid), int(amount))
     await cb.message.edit_text(f"✅ Начислено {amount} запросов для {uid}.")
     try:
-        await bot.send_message(int(uid), HELP_TEXT, parse_mode="HTML", reply_markup=post_payment_menu())
+        await bot.send_message(int(uid), HELP_TEXT, parse_mode="HTML", reply_markup=main_menu())
     except: pass
     await cb.answer()
 
@@ -593,7 +566,7 @@ async def process_give(msg: Message, state: FSMContext):
         await msg.answer(f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=admin_menu())
     except ValueError:
         await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
-    await state.clear()
+         await state.clear()
 
 @dp.message(AdminStates.take_reqs)
 async def process_take(msg: Message, state: FSMContext):
@@ -661,8 +634,6 @@ async def send_html_file(cb: CallbackQuery):
         return await note.edit_text("❌ Данные устарели, попробуйте поиск заново.")
         
     html_code = build_html_report(api_results, q)
-    # Для Render используем BufferedInputFile (отправка из памяти)
-    from aiogram.types import BufferedInputFile
     file = BufferedInputFile(html_code.encode('utf-8'), filename=f"listopadov_{q[:10]}.html")
     await cb.message.answer_document(document=file, caption=f"📄 HTML-отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
     await note.delete()
