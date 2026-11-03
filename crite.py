@@ -1,4 +1,4 @@
-# crite.py — основной бот Listopadov Search для Render (Рефка +2)
+# crite.py — основной бот Listopadov Search для Render (с API для сайта)
 import asyncio
 import json
 import html
@@ -34,7 +34,6 @@ DB_PATH = "bot_data.db"
 # --- НАСТРОЙКИ ОПЛАТЫ ---
 CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 PRICE_PER_REQ_TON = 0.03
-RATE_TON_TO_GRAM = 1.0 
 RATE_TON_TO_USDT = 6.5 
 
 # --- НАСТРОЙКИ RENDER ---
@@ -287,69 +286,6 @@ def render_text_results(api_results: list[dict]) -> str:
     if len(res_str) > 3800: res_str = res_str[:3800] + "\n… [обрезано]"
     return res_str
 
-def build_html_report(api_results: list[dict], query: str) -> str:
-    all_items = []
-    for res in api_results:
-        data = clean_data(res["data"])
-        results_dict = data.get("results", {})
-        items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        for src_data in items:
-            if not isinstance(src_data, dict): continue
-            inner = src_data.get("result", {}).get("data", {}).get("results", {})
-            if isinstance(inner, dict): all_items.append(inner)
-            elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
-
-    total_records = len(all_items)
-    TRANSLATIONS = {"surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", "data": "Источник", "database": "База данных", "login": "Логин", "region": "Регион", "snils": "СНИЛС", "snils_2": "СНИЛС (доп)", "inn": "ИНН", "passport": "Паспорт", "email": "Email", "date": "Дата"}
-
-    details_html = ""
-    for item in all_items:
-        title = "Источник данных"
-        if "database" in item: title = item["database"]
-        elif "source" in item: title = item["source"]
-        elif "name" in item: title = item["name"]
-        
-        details_html += f'<div class="detail-card"><div class="detail-title">{html.escape(str(title))}</div><div class="detail-content">'
-        for k, v in item.items():
-            if k in ("id", "profile_url", "source", "name", "database"): continue
-            if isinstance(v, list):
-                if not v: continue
-                val_str = ", ".join([html.escape(str(i)) for i in v])
-            elif isinstance(v, dict): continue
-            else:
-                if v is None or v == "": continue
-                val_str = html.escape(str(v))
-            details_html += f'<div class="detail-row"><span class="d-key">{TRANSLATIONS.get(k.lower(), k.capitalize())}</span><span class="d-val">{val_str}</span></div>'
-        details_html += '</div></div>'
-
-    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет: {html.escape(query)}</title>
-    <style>
-        :root {{ --bg: #f8f9fa; --card-bg: #ffffff; --text: #111827; --text-muted: #6b7280; --border: #e5e7eb; }}
-        body {{ font-family: -apple-system, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.5; }}
-        .container {{ max-width: 600px; margin: 0 auto; }}
-        .header {{ margin-bottom: 20px; }}
-        .logo {{ font-weight: bold; font-size: 18px; margin-bottom: 20px; }}
-        .main-card {{ background: var(--card-bg); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid var(--border); }}
-        .query-val {{ font-size: 24px; font-weight: 700; margin-bottom: 5px; }}
-        .query-time {{ color: var(--text-muted); font-size: 14px; margin-bottom: 20px; }}
-        .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
-        .stat-box {{ background: var(--bg); padding: 12px; border-radius: 8px; border: 1px solid var(--border); }}
-        .stat-label {{ color: var(--text-muted); font-size: 12px; text-transform: uppercase; margin-bottom: 4px; }}
-        .stat-value {{ font-size: 20px; font-weight: 600; }}
-        .detail-card {{ background: var(--card-bg); border-radius: 12px; margin-bottom: 15px; overflow: hidden; border: 1px solid var(--border); }}
-        .detail-title {{ padding: 15px; font-weight: 600; font-size: 16px; border-bottom: 1px solid var(--border); }}
-        .detail-content {{ padding: 0 15px; }}
-        .detail-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px dashed var(--border); font-size: 14px; }}
-        .detail-row:last-child {{ border-bottom: none; }}
-        .d-key {{ color: var(--text-muted); width: 40%; }}
-        .d-val {{ font-weight: 500; text-align: right; max-width: 60%; word-break: break-word; }}
-    </style></head><body><div class="container">
-    <div class="header"><div class="logo">🕵️ LISTOPADOV SEARCH</div>
-    <div class="main-card"><div class="query-val">{html.escape(query)}</div><div class="query-time">Отчет сгенерирован</div>
-    <div class="stats-grid"><div class="stat-box"><div class="stat-label">ИСТОЧНИКОВ</div><div class="stat-value">{len(api_results)}</div></div>
-    <div class="stat-box"><div class="stat-label">ЗАПИСЕЙ</div><div class="stat-value">{total_records}</div></div></div></div></div>
-    {details_html}</div></body></html>"""
-
 # --- МЕНЮ ---
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -363,7 +299,7 @@ def admin_menu():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
-# --- ХЭНДЛЕРЫ ---
+# --- ХЭНДЛЕРЫ БОТА ---
 @dp.message(CommandStart())
 async def start(msg: Message, command: CommandStart):
     referrer_id = None
@@ -374,7 +310,7 @@ async def start(msg: Message, command: CommandStart):
     is_new = await add_user(msg.from_user.id, msg.from_user.username, referrer_id)
     
     if is_new and referrer_id:
-        await add_requests(referrer_id, 2) # <--- ТУТ ИЗМЕНЕНО НА 2
+        await add_requests(referrer_id, 2) 
         try:
             await msg.bot.send_message(referrer_id, f"🎉 По вашей ссылке пришел новый пользователь! Вам начислено <b>+2 запроса</b>.", parse_mode="HTML")
         except: pass
@@ -406,7 +342,7 @@ async def cb_ref_link(cb: CallbackQuery):
     
     text = (
         f"👥 <b>Пригласи друга</b>\n\n"
-        f"За каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n" # <--- ТУТ ИЗМЕНЕНО НА 2
+        f"За каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n"
         f"🔗 <code>{ref_link}</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -566,7 +502,7 @@ async def process_give(msg: Message, state: FSMContext):
         await msg.answer(f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=admin_menu())
     except ValueError:
         await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
-         await state.clear()
+    await state.clear()
 
 @dp.message(AdminStates.take_reqs)
 async def process_take(msg: Message, state: FSMContext):
@@ -578,25 +514,16 @@ async def process_take(msg: Message, state: FSMContext):
         await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
     await state.clear()
 
-# --- ПОИСК ---
+# --- ПОИСК В БОТЕ ---
 async def process_search(msg: Message, q: str):
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu())
         
-    note = await msg.answer(
-        f"🔍 <b>Начинаю поиск...</b>\n"
-        f"Запрос: <code>{html.escape(q)}</code>\n\n"
-        f"📡 <b>Опрашиваемые базы:</b>\n"
-        f"├ 🔸 LEGO\n"
-        f"├ 🔸 DevHydra\n"
-        f"└ 🔸 Mobius", 
-        parse_mode="HTML"
-    )
-    
+    note = await msg.answer(f"🔍 <b>Начинаю поиск...</b>\nЗапрос: <code>{html.escape(q)}</code>\n\n📡 <b>Опрашиваемые базы:</b>\n├ 🔸 LEGO\n├ 🔸 DevHydra\n└ 🔸 Mobius", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
     if not api_results:
-        await add_requests(msg.from_user.id, 1) # Возврат баланса при ошибке
+        await add_requests(msg.from_user.id, 1)
         return await note.edit_text("❌ Все API вернули ошибку или не ответили.")
     
     text_report = render_text_results(api_results)
@@ -618,10 +545,6 @@ async def process_search(msg: Message, q: str):
     except Exception:
         clean_text = re.sub(r'<[^>]+>', '', text_report)
         await note.edit_text(f"✅ Результаты:\n\n{clean_text[:3500]}\n\n💰 Остаток: {bal}", reply_markup=kb)
-
-@dp.callback_query(F.data == "noop")
-async def cb_noop(cb: CallbackQuery):
-    await cb.answer("Это счетчик баланса.")
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
@@ -651,7 +574,26 @@ async def auto_search(msg: Message, state: FSMContext):
         if current_state is not None: return
         await process_search(msg, msg.text.strip())
 
-# --- ЗАПУСК ДЛЯ RENDER (WEBHOOK) ---
+# --- API ДЛЯ САЙТА ---
+async def api_search_handler(request):
+    query = request.query.get("q")
+    if not query:
+        return web.json_response({"error": "Нет запроса"}, status=400)
+
+    api_results = await query_all_apis(query)
+    
+    if not api_results:
+        return web.json_response({"error": "Ничего не найдено или API недоступны"}, status=404)
+
+    text_report = render_text_results(api_results)
+    
+    return web.json_response({
+        "query": query,
+        "result": text_report,
+        "sources": len(api_results)
+    }, headers={"Access-Control-Allow-Origin": "*"})
+
+# --- ЗАПУСК ДЛЯ RENDER ---
 async def on_startup(bot: Bot):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
@@ -667,6 +609,9 @@ def main():
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
+    
+    # Добавляем API для сайта
+    app.router.add_get("/api/search", api_search_handler)
     
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
