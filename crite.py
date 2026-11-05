@@ -1,4 +1,4 @@
-# crite.py — БЕЗ ПОДПИСКИ
+# crite.py — ФИНАЛ (PostgreSQL, без подписки на канал, всё в одном)
 import asyncio
 import json
 import html
@@ -7,7 +7,7 @@ import os
 import time
 import logging
 import random
-import aiosqlite
+import asyncpg
 import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -30,7 +30,7 @@ API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 BOT_USERNAME = "searchosintlistopadov_bot"
 MAIN_ADMIN_ID = 8394631079
-DB_PATH = "bot_data.db"
+DATABASE_URL = "postgresql://admin:RRxOapzxaKxIHvMAgyRTOwDZWaVAHXLX@dpg-dbltbtegekts73cc59fg-a/oasis_rl3m"
 
 # --- НАСТРОЙКИ ОПЛАТЫ ---
 CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
@@ -45,6 +45,9 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Глобальный пул подключений к базе
+db_pool = None
+
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
     wait_currency = State()
@@ -54,58 +57,52 @@ class AdminStates(StatesGroup):
     give_reqs = State()
     take_reqs = State()
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (POSTGRESQL) ---
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 requests_left INTEGER DEFAULT 3,
-                referrer_id INTEGER,
+                referrer_id BIGINT,
                 joined_at INTEGER
             )
         """)
-        await db.commit()
 
 async def add_user(user_id, username, referrer_id=None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)) as cur:
-            if await cur.fetchone(): return False
-        await db.execute("""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
+        if row: return False
+        await conn.execute("""
             INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at)
-            VALUES (?, ?, 3, ?, ?)
-        """, (user_id, username, referrer_id, int(time.time())))
-        await db.commit()
+            VALUES ($1, $2, 3, $3, $4)
+        """, user_id, username, referrer_id, int(time.time()))
         return True
 
 async def get_balance(user_id) -> int:
     if user_id == MAIN_ADMIN_ID: return 999999
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT requests_left FROM users WHERE user_id=?", (user_id,)) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else 0
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT requests_left FROM users WHERE user_id=$1", user_id)
+        return row['requests_left'] if row else 0
 
 async def deduct_request(user_id) -> bool:
     if user_id == MAIN_ADMIN_ID: return True
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT requests_left FROM users WHERE user_id=?", (user_id,)) as cur:
-            row = await cur.fetchone()
-        if not row or row[0] <= 0: return False
-        await db.execute("UPDATE users SET requests_left = requests_left - 1 WHERE user_id=?", (user_id,))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT requests_left FROM users WHERE user_id=$1", user_id)
+        if not row or row['requests_left'] <= 0: return False
+        await conn.execute("UPDATE users SET requests_left = requests_left - 1 WHERE user_id=$1", user_id)
         return True
 
 async def add_requests(user_id, amount):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET requests_left = requests_left + ? WHERE user_id=?", (amount, user_id))
-        await db.commit()
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2", amount, user_id)
 
 async def get_invited_count(user_id) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users WHERE referrer_id=?", (user_id,)) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else 0
+    async with db_pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", user_id)
 
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
