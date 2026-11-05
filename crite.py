@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL, без подписки на канал, всё в одном)
+# crite.py — ФИНАЛ (PostgreSQL + Уведомления + Счетчик юзеров + Меню)
 import asyncio
 import json
 import html
@@ -104,50 +104,14 @@ async def get_invited_count(user_id) -> int:
     async with db_pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", user_id)
 
+async def get_total_users() -> int:
+    async with db_pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users")
+
 # --- ТЕКСТЫ ---
-WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
+WELCOME_TEXT = """👋 Добро пожаловать в <b>Oasis Search</b>!
 
-🕵️ <b>Личность:</b>
-<code>Фамилия Имя Отчество 01.01.1990</code>
-
-📲 <b>Контакты:</b>
-<code>79123456789</code> – номер телефона
-<code>example@example.com</code> – email
-
-🚘 <b>Транспорт:</b>
-<code>А123БВ777</code> – номер автомобиля
-<code>XTA00000000000000</code> – VIN автомобиля
-
-💬 <b>Социальные сети:</b>
-<code>vk.com/username</code> – Вконтакте
-<code>tiktok.com/@username</code> – TikTok
-<code>instagram.com/username</code> – Instagram
-<code>ok.ru/profile/123456789</code> – Одноклассники
-
-📟 <b>Telegram:</b>
-<code>@username</code>, <code>tg123456789</code> – логин или ID
-
-📄 <b>Документы:</b>
-<code>/vu 1234567890</code> – водительские права
-<code>/passport 1234567890</code> – паспорт
-<code>/snils 12345678901</code> – СНИЛС
-<code>/inn 123456789012</code> – ИНН
-
-🌐 <b>Онлайн-следы:</b>
-<code>/tag профессия город</code> – поиск по телефонным книгам
-<code>example.com</code> или <code>192.0.2.1</code> – домен или IP
-
-🏚 <b>Недвижимость:</b>
-<code>/adr Город, Улица, 1</code>
-<code>77:01:0000000:1234</code> – кадастровый номер
-
-🏢 <b>Юридическое лицо:</b>
-<code>/inn 1234567890</code> – ИНН
-<code>1234567890123</code> – ОГРН или ОГРНИП
-
-📸 <i>Отправьте лицо человека, чтобы попробовать найти его.</i>"""
-
-HELP_TEXT = """✅ <b>Подписка успешно подтверждена!</b>\n\n""" + WELCOME_TEXT
+Для перемещения используйте кнопки ниже:"""
 
 def detect_type(query: str) -> str:
     q = query.strip()
@@ -363,9 +327,10 @@ def build_html_report(api_results: list[dict], query: str) -> str:
 # --- МЕНЮ ---
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_menu")],
-        [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="ref_link")],
-        [InlineKeyboardButton(text="📸 Поиск по фото / Лицу", callback_data="photo_search"), InlineKeyboardButton(text="🧩 Поиск по неполным данным", callback_data="partial_search")]
+        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu")],
+        [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
+        [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
+        [InlineKeyboardButton(text="📸 Поиск по фото", callback_data="photo_search"), InlineKeyboardButton(text="🧩 Неполные данные", callback_data="partial_search")]
     ])
 
 def admin_menu():
@@ -387,15 +352,29 @@ async def start(msg: Message, command: CommandStart):
         await add_requests(referrer_id, 2) 
         try: await msg.bot.send_message(referrer_id, f"🎉 По вашей ссылке пришел новый пользователь! Вам начислено <b>+2 запроса</b>.", parse_mode="HTML")
         except: pass
-    await msg.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
+
+    total_users = await get_total_users()
+    welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
+    
+    await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu())
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
     bal = await get_balance(cb.from_user.id)
     ref_count = await get_invited_count(cb.from_user.id)
+    total_users = await get_total_users()
     uname = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
     status = "👑 Админ" if cb.from_user.id == MAIN_ADMIN_ID else "👤 Юзер"
-    text = f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n📛 Юзер: {uname}\n🎖 Статус: {status}\n💳 Баланс: <code>{bal}</code> запросов\n👥 Приглашено: <b>{ref_count}</b>"
+    
+    text = (
+        f"👤 <b>Профиль</b>\n\n"
+        f"🆔 ID: <code>{cb.from_user.id}</code>\n"
+        f"📛 Юзер: {uname}\n"
+        f"🎖 Статус: {status}\n"
+        f"💳 Баланс: <code>{bal}</code> запросов\n"
+        f"👥 Приглашено: <b>{ref_count}</b>\n\n"
+        f"📈 Всего в боте: <b>{total_users}</b> юзеров"
+    )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
@@ -406,6 +385,18 @@ async def cb_ref_link(cb: CallbackQuery):
     text = f"👥 <b>Пригласи друга</b>\n\nЗа каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n🔗 <code>{ref_link}</code>"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]])
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
+
+@dp.callback_query(F.data == "terms")
+async def cb_terms(cb: CallbackQuery):
+    text = (
+        "📄 <b>Условия использования</b>\n\n"
+        "1. Бот предоставляет доступ к агрегатору открытых данных.\n"
+        "2. Запрещено использовать бота для преследования и травли.\n"
+        "3. Администрация не несет ответственности за использование данных.\n"
+        "4. Оплата не подлежит возврату."
+    )
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
 @dp.callback_query(F.data.in_({"photo_search", "partial_search"}))
@@ -510,7 +501,7 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
     _, uid, amount = cb.data.split("_")
     await add_requests(int(uid), int(amount))
     await cb.message.edit_text(f"✅ Начислено {amount} запросов для {uid}.")
-    try: await bot.send_message(int(uid), HELP_TEXT, parse_mode="HTML", reply_markup=main_menu())
+    try: await bot.send_message(int(uid), f"✅ Оплата подтверждена! Начислено <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu())
     except: pass
     await cb.answer()
 
@@ -543,13 +534,44 @@ async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 @dp.message(AdminStates.give_reqs)
-async def process_give(msg: Message, state: FSMContext):
+async def process_give(msg: Message, state: FSMContext, bot: Bot):
     try:
-        uid, amount = map(int, msg.text.split())
+        parts = msg.text.strip().split()
+        if len(parts) != 2:
+            raise ValueError("Нужно ровно два числа")
+        uid = int(parts[0])
+        amount = int(parts[1])
+        
+        logging.info(f"АДМИН ВЫДАЕТ: ID={uid}, Сумма={amount}")
+        
         await add_requests(uid, amount)
-        await msg.answer(f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=admin_menu())
-    except ValueError:
-        await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
+        new_bal = await get_balance(uid)
+        
+        await msg.answer(
+            f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.\n"
+            f"💰 Текущий баланс: <code>{new_bal}</code>", 
+            parse_mode="HTML", 
+            reply_markup=admin_menu()
+        )
+        
+        try:
+            await bot.send_message(
+                uid, 
+                f"🎁 <b>Вам начислены запросы!</b>\n\n"
+                f"Администратор выдал вам <b>+{amount}</b> запросов.\n"
+                f"💳 Ваш текущий баланс: <code>{new_bal}</code>", 
+                parse_mode="HTML",
+                reply_markup=main_menu()
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось отправить уведомление {uid}: {e}")
+            await msg.answer(f"⚠️ Запросы выданы, но уведомление не доставлено (юзер заблокировал бота).")
+
+    except ValueError as e:
+        await msg.answer(f"❌ Ошибка формата. Введи: <code>ID количество</code>\nДетали: {e}")
+    except Exception as e:
+        logging.error(f"ОШИБКА ВЫДАЧИ: {e}")
+        await msg.answer(f"❌ Системная ошибка: {e}")
     await state.clear()
 
 @dp.message(AdminStates.take_reqs)
