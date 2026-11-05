@@ -1,4 +1,4 @@
-# crite.py — ПОЛНЫЙ КОД (Бот + API + HTML + Подписка + Фикс проверки)
+# crite.py — БЕЗ ПОДПИСКИ
 import asyncio
 import json
 import html
@@ -31,10 +31,6 @@ BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 BOT_USERNAME = "searchosintlistopadov_bot"
 MAIN_ADMIN_ID = 8394631079
 DB_PATH = "bot_data.db"
-
-# --- НАСТРОЙКИ ПОДПИСКИ ---
-CHANNEL_ID = "-1001234567890" # ВАЖНО: Замени на реальный ID канала!
-CHANNEL_LINK = "https://t.me/+BqWOF7S3AqQ1YzI6"
 
 # --- НАСТРОЙКИ ОПЛАТЫ ---
 CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
@@ -110,31 +106,6 @@ async def get_invited_count(user_id) -> int:
         async with db.execute("SELECT COUNT(*) FROM users WHERE referrer_id=?", (user_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
-
-# --- ПРОВЕРКА ПОДПИСКИ (ИСПРАВЛЕННАЯ) ---
-async def check_subscription(bot: Bot, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        logging.info(f"ТЕСТ ПОДПИСКИ: Юзер {user_id}, Статус: {member.status}")
-        
-        # Если статус один из этих - доступ разрешен
-        if member.status in ["creator", "administrator", "member"]:
-            return True
-            
-        # Если статус restricted (ограничен), проверяем не забанен ли он
-        if member.status == "restricted":
-            return member.is_member
-            
-        return False
-    except Exception as e:
-        logging.error(f"ОШИБКА ПРОВЕРКИ ПОДПИСКИ: {e}")
-        return False
-
-def sub_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url=CHANNEL_LINK)],
-        [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub")]
-    ])
 
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
@@ -410,15 +381,6 @@ FAKE_SOURCES = ["Додо (База телефонов)", "Соцсети (VK/TG
 
 @dp.message(CommandStart())
 async def start(msg: Message, command: CommandStart):
-    is_subscribed = await check_subscription(msg.bot, msg.from_user.id)
-    if not is_subscribed:
-        await msg.answer(
-            "⚠️ <b>Для использования бота необходимо подписаться на наш канал!</b>\n\n"
-            "1. Нажмите кнопку «Подписаться».\n"
-            "2. Вернитесь в бота и нажмите «Проверить подписку».",
-            parse_mode="HTML", reply_markup=sub_menu()
-        )
-        return
     referrer_id = None
     if command.args and command.args.isdigit():
         referrer_id = int(command.args)
@@ -430,20 +392,8 @@ async def start(msg: Message, command: CommandStart):
         except: pass
     await msg.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
 
-@dp.callback_query(F.data == "check_sub")
-async def cb_check_sub(cb: CallbackQuery):
-    is_subscribed = await check_subscription(cb.bot, cb.from_user.id)
-    if is_subscribed:
-        await cb.message.delete()
-        await cb.message.answer(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
-        await cb.answer("✅ Подписка подтверждена!")
-    else:
-        await cb.answer("❌ Вы всё еще не подписаны на канал!", show_alert=True)
-
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
-    if not await check_subscription(cb.bot, cb.from_user.id):
-        return await cb.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
     bal = await get_balance(cb.from_user.id)
     ref_count = await get_invited_count(cb.from_user.id)
     uname = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
@@ -454,8 +404,6 @@ async def cb_profile(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "ref_link")
 async def cb_ref_link(cb: CallbackQuery):
-    if not await check_subscription(cb.bot, cb.from_user.id):
-        return await cb.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
     ref_link = f"https://t.me/{BOT_USERNAME}?start={cb.from_user.id}"
     share_text = f"Попробуй этот OSINT-бот! Ссылка: {ref_link}"
     text = f"👥 <b>Пригласи друга</b>\n\nЗа каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n🔗 <code>{ref_link}</code>"
@@ -465,8 +413,6 @@ async def cb_ref_link(cb: CallbackQuery):
 
 @dp.callback_query(F.data.in_({"photo_search", "partial_search"}))
 async def cb_info_btn(cb: CallbackQuery):
-    if not await check_subscription(cb.bot, cb.from_user.id):
-        return await cb.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
     if cb.data == "photo_search":
         await cb.answer("📸 Просто отправь фото человека в чат, и бот попробует найти его.", show_alert=True)
     else:
@@ -474,16 +420,12 @@ async def cb_info_btn(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
-    if not await check_subscription(cb.bot, cb.from_user.id):
-        return await cb.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
     await state.clear()
     await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
     await cb.answer()
 
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
-    if not await check_subscription(cb.bot, cb.from_user.id):
-        return await cb.answer("❌ Сначала подпишитесь на канал!", show_alert=True)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="10 запросов", callback_data="buy_10"), InlineKeyboardButton(text="50 запросов", callback_data="buy_50")],
         [InlineKeyboardButton(text="100 запросов", callback_data="buy_100"), InlineKeyboardButton(text="1000 запросов", callback_data="buy_1000")],
@@ -625,9 +567,6 @@ async def process_take(msg: Message, state: FSMContext):
 
 # --- ПОИСК ---
 async def process_search(msg: Message, q: str):
-    if not await check_subscription(msg.bot, msg.from_user.id):
-        return await msg.answer("❌ Сначала подпишитесь на канал!", reply_markup=sub_menu())
-        
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu())
 
