@@ -1,4 +1,4 @@
-# crite.py — ПОЛНЫЙ КОД (Бот + API + HTML + Кнопки + Подписка + Логи)
+# crite.py — ПОЛНЫЙ КОД (Бот + API + HTML + Подписка + Фикс проверки)
 import asyncio
 import json
 import html
@@ -111,17 +111,20 @@ async def get_invited_count(user_id) -> int:
             row = await cur.fetchone()
             return row[0] if row else 0
 
-# --- ПРОВЕРКА ПОДПИСКИ (С ЛОГАМИ) ---
+# --- ПРОВЕРКА ПОДПИСКИ (ИСПРАВЛЕННАЯ) ---
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        # Выводим в логи статус, который вернул Telegram
         logging.info(f"ТЕСТ ПОДПИСКИ: Юзер {user_id}, Статус: {member.status}")
         
+        # Если статус один из этих - доступ разрешен
         if member.status in ["creator", "administrator", "member"]:
             return True
+            
+        # Если статус restricted (ограничен), проверяем не забанен ли он
         if member.status == "restricted":
-            return not member.is_member
+            return member.is_member
+            
         return False
     except Exception as e:
         logging.error(f"ОШИБКА ПРОВЕРКИ ПОДПИСКИ: {e}")
@@ -276,7 +279,7 @@ async def api_search_handler(request):
 
     return web.json_response({"query": query, "data": categorized, "total_records": len(all_items)}, headers={"Access-Control-Allow-Origin": "*"})
 
-# --- КРАСИВЫЙ РЕНДЕР ---
+# --- РЕНДЕР ---
 def render_text_results(api_results: list[dict]) -> str:
     all_items = []
     for res in api_results:
@@ -620,7 +623,7 @@ async def process_take(msg: Message, state: FSMContext):
         await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
     await state.clear()
 
-# --- ПОИСК С КРАСИВЫМ ВЫВОДОМ ---
+# --- ПОИСК ---
 async def process_search(msg: Message, q: str):
     if not await check_subscription(msg.bot, msg.from_user.id):
         return await msg.answer("❌ Сначала подпишитесь на канал!", reply_markup=sub_menu())
