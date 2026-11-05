@@ -1,5 +1,1 @@
-aiogram>=3.4
-aiohttp>=3.9
-aiosqlite>=0.19
-curl_cffi
-cloudscraper
+
