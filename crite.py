@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL + Уведомления + Счетчик юзеров + Меню)
+# crite.py — ФИНАЛ (PostgreSQL + Уведомления + Счетчик + Исправленная выдача)
 import asyncio
 import json
 import html
@@ -45,7 +45,6 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальный пул подключений к базе
 db_pool = None
 
 class BuyStates(StatesGroup):
@@ -57,7 +56,7 @@ class AdminStates(StatesGroup):
     give_reqs = State()
     take_reqs = State()
 
-# --- БАЗА ДАННЫХ (POSTGRESQL) ---
+# --- БАЗА ДАННЫХ ---
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
@@ -355,7 +354,6 @@ async def start(msg: Message, command: CommandStart):
 
     total_users = await get_total_users()
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
-    
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu())
 
 @dp.callback_query(F.data == "profile")
@@ -389,22 +387,16 @@ async def cb_ref_link(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "terms")
 async def cb_terms(cb: CallbackQuery):
-    text = (
-        "📄 <b>Условия использования</b>\n\n"
-        "1. Бот предоставляет доступ к агрегатору открытых данных.\n"
-        "2. Запрещено использовать бота для преследования и травли.\n"
-        "3. Администрация не несет ответственности за использование данных.\n"
-        "4. Оплата не подлежит возврату."
-    )
+    text = "📄 <b>Условия</b>\n\n1. Бот агрегирует открытые данные.\n2. Запрещено использовать для травли.\n3. Администрация не несет ответственности."
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
 @dp.callback_query(F.data.in_({"photo_search", "partial_search"}))
 async def cb_info_btn(cb: CallbackQuery):
     if cb.data == "photo_search":
-        await cb.answer("📸 Просто отправь фото человека в чат, и бот попробует найти его.", show_alert=True)
+        await cb.answer("📸 Просто отправь фото в чат.", show_alert=True)
     else:
-        await cb.answer("🧩 Отправь запрос с неполными данными (например: Иванов Иван 1990).", show_alert=True)
+        await cb.answer("🧩 Отправь запрос (например: Иванов Иван 1990).", show_alert=True)
 
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
@@ -536,13 +528,21 @@ async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
 @dp.message(AdminStates.give_reqs)
 async def process_give(msg: Message, state: FSMContext, bot: Bot):
     try:
-        parts = msg.text.strip().split()
+        clean_text = msg.text.replace(",", " ").replace("(", " ").replace(")", " ")
+        parts = clean_text.strip().split()
+        
         if len(parts) != 2:
             raise ValueError("Нужно ровно два числа")
+            
         uid = int(parts[0])
         amount = int(parts[1])
         
         logging.info(f"АДМИН ВЫДАЕТ: ID={uid}, Сумма={amount}")
+        
+        async with db_pool.acquire() as conn:
+            user_exists = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", uid)
+            if not user_exists:
+                return await msg.answer(f"❌ Ошибка: Пользователь с ID <code>{uid}</code> не найден в базе.\nОн точно нажимал /start в боте?", parse_mode="HTML")
         
         await add_requests(uid, amount)
         new_bal = await get_balance(uid)
@@ -564,11 +564,11 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
                 reply_markup=main_menu()
             )
         except Exception as e:
-            logging.warning(f"Не удалось отправить уведомление {uid}: {e}")
-            await msg.answer(f"⚠️ Запросы выданы, но уведомление не доставлено (юзер заблокировал бота).")
+            logging.error(f"ОШИБКА ОТПРАВКИ УВЕДОМЛЕНИЯ {uid}: {e}")
+            await msg.answer(f"⚠️ <b>Запросы в базе начислены!</b> Но сообщение покупателю не ушло. Ошибка: {e}")
 
     except ValueError as e:
-        await msg.answer(f"❌ Ошибка формата. Введи: <code>ID количество</code>\nДетали: {e}")
+        await msg.answer(f"❌ Ошибка формата. Введи: <code>ID количество</code>")
     except Exception as e:
         logging.error(f"ОШИБКА ВЫДАЧИ: {e}")
         await msg.answer(f"❌ Системная ошибка: {e}")
