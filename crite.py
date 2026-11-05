@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (Search на первом месте + Maigret + Примеры + Оплата)
+# crite.py — СТАБИЛЬНАЯ ВЕРСИЯ (Без Maigret, PostgreSQL, Оплата, Примеры)
 import asyncio
 import json
 import html
@@ -9,7 +9,6 @@ import logging
 import random
 import asyncpg
 import aiohttp
-from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -18,15 +17,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
-# --- Maigret ---
-try:
-    import maigret
-    from maigret.sites import MaigretDatabase
-    MAIGRET_AVAILABLE = True
-except ImportError:
-    MAIGRET_AVAILABLE = False
-    logging.warning("Maigret не установлен.")
 
 # --- НАСТРОЙКИ API ---
 API_URL_1 = "https://api.lego.new.tg/v1/search"
@@ -56,7 +46,6 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
-maigret_db = None
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -69,7 +58,7 @@ class AdminStates(StatesGroup):
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
-    global db_pool, maigret_db
+    global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("""
@@ -81,19 +70,6 @@ async def init_db():
                 joined_at INTEGER
             )
         """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS maigret_logs (
-                user_id BIGINT NOT NULL,
-                used_at TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
-    
-    if MAIGRET_AVAILABLE:
-        try:
-            maigret_db = MaigretDatabase().load_from_path("maigret/resources/data.json")
-            logging.info("База Maigret загружена.")
-        except Exception as e:
-            logging.error(f"Ошибка загрузки базы Maigret: {e}")
 
 async def add_user(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
@@ -130,17 +106,6 @@ async def get_invited_count(user_id) -> int:
 async def get_total_users() -> int:
     async with db_pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM users")
-
-async def check_maigret_limit(user_id) -> bool:
-    async with db_pool.acquire() as conn:
-        count = await conn.fetchval(
-            "SELECT COUNT(*) FROM maigret_logs WHERE user_id=$1 AND used_at >= CURRENT_DATE", user_id
-        )
-        return count == 0
-
-async def log_maigret_use(user_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO maigret_logs (user_id) VALUES ($1)", user_id)
 
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
@@ -409,7 +374,6 @@ def main_menu():
 def search_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Обычный поиск", callback_data="search_normal")],
-        [InlineKeyboardButton(text="🕵‍♂ Maigret", callback_data="search_maigret")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
     ])
 
@@ -432,7 +396,6 @@ async def start(msg: Message, command: CommandStart):
         except: pass
 
     total_users = await get_total_users()
-    # Добавляем примеры запросов внизу стартового сообщения
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu())
 
@@ -464,21 +427,6 @@ async def cb_search_menu(cb: CallbackQuery):
 @dp.callback_query(F.data == "search_normal")
 async def cb_search_normal(cb: CallbackQuery):
     await cb.message.edit_text("🔍 Отправь запрос в чат (номер, email, ФИО и т.д.)", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "search_maigret")
-async def cb_search_maigret(cb: CallbackQuery):
-    if not MAIGRET_AVAILABLE:
-        return await cb.answer("❌ Maigret не установлен на сервере.", show_alert=True)
-    
-    if not await check_maigret_limit(cb.from_user.id):
-        return await cb.answer("❌ Ты уже использовал Maigret сегодня. Лимит: 1 раз в день.", show_alert=True)
-    
-    await cb.message.edit_text(
-        "🕵‍♂ <b>Maigret</b>\n\nОтправь ник (например: <code>anodoxx</code>), и я проверю его по сайтам.\n<i>Лимит: 1 запрос в день.</i>", 
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]])
-    )
     await cb.answer()
 
 @dp.callback_query(F.data == "ref_link")
@@ -606,7 +554,6 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
         
     await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu())
     
-    # Уведомление Админу
     admin_text = (
         f"💰 <b>Новая заявка на оплату!</b>\n\n"
         f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
@@ -639,7 +586,6 @@ async def admin_reject(cb: CallbackQuery, bot: Bot):
     except: pass
     await cb.answer()
 
-# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
@@ -691,7 +637,6 @@ async def process_take(msg: Message, state: FSMContext):
         await msg.answer("❌ Ошибка формата.")
     await state.clear()
 
-# --- ПОИСК ---
 async def process_search(msg: Message, q: str):
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu())
@@ -714,29 +659,6 @@ async def auto_search(msg: Message, state: FSMContext):
     if msg.text and not msg.text.startswith("/"):
         current_state = await state.get_state()
         if current_state is not None: return
-        
-        # Если это ответ на Maigret
-        if maigret_db and len(msg.text) < 50 and not any(c in msg.text for c in [" ", "@", ".", "+"]):
-            if not await check_maigret_limit(msg.from_user.id):
-                return await msg.answer("❌ Maigret: лимит 1 раз в день.")
-            
-            note = await msg.answer(f"🕵‍♂ <b>Maigret сканирует:</b> <code>{html.escape(msg.text)}</code>…")
-            try:
-                sites = maigret_db.ranked_sites_dict(top=500)
-                results = await maigret.search(username=msg.text, site_dict=sites, timeout=20, is_parsing_enabled=False)
-                found = [f"• <a href='{r['url_user']}'>{s}</a>" for s, r in results.items() if r["status"].is_found()]
-                
-                await log_maigret_use(msg.from_user.id)
-                
-                if found:
-                    report = f"✅ <b>Найдено {len(found)}:</b>\n\n" + "\n".join(found[:50])
-                else:
-                    report = "🔍 Ничего не найдено."
-                await note.edit_text(report[:3800], parse_mode="HTML", disable_web_page_preview=True)
-                return
-            except Exception as e:
-                return await note.edit_text(f"❌ Ошибка Maigret: {e}")
-        
         await process_search(msg, msg.text.strip())
 
 @dp.callback_query(F.data.startswith("html_"))
@@ -750,7 +672,6 @@ async def send_html_file(cb: CallbackQuery):
     await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
     await note.delete()
 
-# --- ЗАПУСК ---
 async def on_startup(bot: Bot):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
