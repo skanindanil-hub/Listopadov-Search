@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL + Ручное подтверждение TON + Maigret + Кнопки)
+# crite.py — ФИНАЛ (Search на первом месте + Maigret + Примеры + Оплата)
 import asyncio
 import json
 import html
@@ -26,7 +26,7 @@ try:
     MAIGRET_AVAILABLE = True
 except ImportError:
     MAIGRET_AVAILABLE = False
-    logging.warning("Maigret не установлен. Функция Maigret отключена.")
+    logging.warning("Maigret не установлен.")
 
 # --- НАСТРОЙКИ API ---
 API_URL_1 = "https://api.lego.new.tg/v1/search"
@@ -61,6 +61,7 @@ maigret_db = None
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
     wait_currency = State()
+    wait_hash = State()
 
 class AdminStates(StatesGroup):
     give_reqs = State()
@@ -142,9 +143,48 @@ async def log_maigret_use(user_id):
         await conn.execute("INSERT INTO maigret_logs (user_id) VALUES ($1)", user_id)
 
 # --- ТЕКСТЫ ---
-WELCOME_TEXT = """👋 Добро пожаловать в <b>Oasis Search</b>!
+WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
 
-Выберите действие:"""
+🕵️ <b>Личность:</b>
+<code>Фамилия Имя Отчество 01.01.1990</code>
+<i>(Можно искать и по неполным данным: ФИО, возрасту или части даты рождения.)</i>
+
+📲 <b>Контакты:</b>
+<code>79123456789</code> – номер телефона
+<code>example@example.com</code> – email
+
+🚘 <b>Транспорт:</b>
+<code>А123БВ777</code> – номер автомобиля
+<code>XTA00000000000000</code> – VIN автомобиля
+
+💬 <b>Социальные сети:</b>
+<code>vk.com/username</code> – Вконтакте
+<code>tiktok.com/@username</code> – TikTok
+<code>instagram.com/username</code> – Instagram
+<code>ok.ru/profile/123456789</code> – Одноклассники
+
+📟 <b>Telegram:</b>
+<code>@username</code>, <code>tg123456789</code> – логин или ID
+
+📄 <b>Документы:</b>
+<code>/vu 1234567890</code> – водительские права
+<code>/passport 1234567890</code> – паспорт
+<code>/snils 12345678901</code> – СНИЛС
+<code>/inn 123456789012</code> – ИНН
+
+🌐 <b>Онлайн-следы:</b>
+<code>/tag профессия город</code> – поиск по телефонным книгам
+<code>example.com</code> или <code>192.0.2.1</code> – домен или IP
+
+🏚 <b>Недвижимость:</b>
+<code>/adr Город, Улица, 1</code>
+<code>77:01:0000000:1234</code> – кадастровый номер
+
+🏢 <b>Юридическое лицо:</b>
+<code>/inn 1234567890</code> – ИНН
+<code>1234567890123</code> – ОГРН или ОГРНИП
+
+📸 <i>Отправьте лицо человека, чтобы попробовать найти его.</i>"""
 
 def detect_type(query: str) -> str:
     q = query.strip()
@@ -379,8 +419,6 @@ def admin_menu():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
-FAKE_SOURCES = ["Додо (База телефонов)", "Соцсети (VK/TG)", "Госуслуги (Утечки)", "Базы ЖКХ", "Автомобили ГИБДД", "СНИЛС/ИНН", "Судебные дела", "Паспортный стол", "Сбер/Тинькофф", "Почтовые сервисы"]
-
 @dp.message(CommandStart())
 async def start(msg: Message, command: CommandStart):
     referrer_id = None
@@ -394,6 +432,7 @@ async def start(msg: Message, command: CommandStart):
         except: pass
 
     total_users = await get_total_users()
+    # Добавляем примеры запросов внизу стартового сообщения
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu())
 
@@ -436,7 +475,7 @@ async def cb_search_maigret(cb: CallbackQuery):
         return await cb.answer("❌ Ты уже использовал Maigret сегодня. Лимит: 1 раз в день.", show_alert=True)
     
     await cb.message.edit_text(
-        "🕵‍♂ <b>Maigret</b>\n\nОтправь ник (например: <code>anodoxx</code>), и я проверю его по 500 сайтам.\n<i>Лимит: 1 запрос в день.</i>", 
+        "🕵‍♂ <b>Maigret</b>\n\nОтправь ник (например: <code>anodoxx</code>), и я проверю его по сайтам.\n<i>Лимит: 1 запрос в день.</i>", 
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]])
     )
@@ -463,7 +502,6 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
     await cb.answer()
 
-# --- ПОКУПКА ---
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
