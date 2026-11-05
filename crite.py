@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (Oasis Search + API + Подписка + Красивый вывод + HTML)
+# crite.py — ПОЛНЫЙ КОД (Бот + API + HTML + Кнопки + Подписка + Логи)
 import asyncio
 import json
 import html
@@ -33,7 +33,7 @@ MAIN_ADMIN_ID = 8394631079
 DB_PATH = "bot_data.db"
 
 # --- НАСТРОЙКИ ПОДПИСКИ ---
-CHANNEL_ID = "-1001234567890" # ВАЖНО: Замени на ID твоего канала!
+CHANNEL_ID = "-1001234567890" # ВАЖНО: Замени на реальный ID канала!
 CHANNEL_LINK = "https://t.me/+BqWOF7S3AqQ1YzI6"
 
 # --- НАСТРОЙКИ ОПЛАТЫ ---
@@ -111,15 +111,20 @@ async def get_invited_count(user_id) -> int:
             row = await cur.fetchone()
             return row[0] if row else 0
 
-# --- ПРОВЕРКА ПОДПИСКИ ---
+# --- ПРОВЕРКА ПОДПИСКИ (С ЛОГАМИ) ---
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ["member", "administrator", "creator"]:
+        # Выводим в логи статус, который вернул Telegram
+        logging.info(f"ТЕСТ ПОДПИСКИ: Юзер {user_id}, Статус: {member.status}")
+        
+        if member.status in ["creator", "administrator", "member"]:
             return True
+        if member.status == "restricted":
+            return not member.is_member
         return False
     except Exception as e:
-        logging.error(f"Ошибка проверки подписки: {e}")
+        logging.error(f"ОШИБКА ПРОВЕРКИ ПОДПИСКИ: {e}")
         return False
 
 def sub_menu():
@@ -271,7 +276,7 @@ async def api_search_handler(request):
 
     return web.json_response({"query": query, "data": categorized, "total_records": len(all_items)}, headers={"Access-Control-Allow-Origin": "*"})
 
-# --- КРАСИВЫЙ РЕНДЕР (КАК У MOBIUS) ---
+# --- КРАСИВЫЙ РЕНДЕР ---
 def render_text_results(api_results: list[dict]) -> str:
     all_items = []
     for res in api_results:
@@ -641,7 +646,6 @@ async def process_search(msg: Message, q: str):
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
     
-    # Считаем количество записей
     total_records = 0
     for res in api_results:
         data = clean_data(res["data"])
