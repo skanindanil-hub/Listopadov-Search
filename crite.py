@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL + Уведомления + Счетчик + Исправленная выдача)
+# crite.py — ФИНАЛ (PostgreSQL + Уведомления с правильным балансом + Счетчик)
 import asyncio
 import json
 import html
@@ -545,6 +545,10 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
                 return await msg.answer(f"❌ Ошибка: Пользователь с ID <code>{uid}</code> не найден в базе.\nОн точно нажимал /start в боте?", parse_mode="HTML")
         
         await add_requests(uid, amount)
+        
+        # Ждем полсекунды, чтобы база гарантированно обновилась
+        await asyncio.sleep(0.5) 
+        
         new_bal = await get_balance(uid)
         
         await msg.answer(
