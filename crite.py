@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL + RETURNING для точного баланса + Все фичи)
+# crite.py — ФИНАЛ (PostgreSQL + Ручное подтверждение TON + Maigret + Кнопки)
 import asyncio
 import json
 import html
@@ -9,6 +9,7 @@ import logging
 import random
 import asyncpg
 import aiohttp
+from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -17,6 +18,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+# --- Maigret ---
+try:
+    import maigret
+    from maigret.sites import MaigretDatabase
+    MAIGRET_AVAILABLE = True
+except ImportError:
+    MAIGRET_AVAILABLE = False
+    logging.warning("Maigret не установлен. Функция Maigret отключена.")
 
 # --- НАСТРОЙКИ API ---
 API_URL_1 = "https://api.lego.new.tg/v1/search"
@@ -46,11 +56,11 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
+maigret_db = None
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
     wait_currency = State()
-    wait_hash = State()
 
 class AdminStates(StatesGroup):
     give_reqs = State()
@@ -58,7 +68,7 @@ class AdminStates(StatesGroup):
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
-    global db_pool
+    global db_pool, maigret_db
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("""
@@ -70,6 +80,19 @@ async def init_db():
                 joined_at INTEGER
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS maigret_logs (
+                user_id BIGINT NOT NULL,
+                used_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """)
+    
+    if MAIGRET_AVAILABLE:
+        try:
+            maigret_db = MaigretDatabase().load_from_path("maigret/resources/data.json")
+            logging.info("База Maigret загружена.")
+        except Exception as e:
+            logging.error(f"Ошибка загрузки базы Maigret: {e}")
 
 async def add_user(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
@@ -107,10 +130,21 @@ async def get_total_users() -> int:
     async with db_pool.acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM users")
 
+async def check_maigret_limit(user_id) -> bool:
+    async with db_pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM maigret_logs WHERE user_id=$1 AND used_at >= CURRENT_DATE", user_id
+        )
+        return count == 0
+
+async def log_maigret_use(user_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO maigret_logs (user_id) VALUES ($1)", user_id)
+
 # --- ТЕКСТЫ ---
 WELCOME_TEXT = """👋 Добро пожаловать в <b>Oasis Search</b>!
 
-Для перемещения используйте кнопки ниже:"""
+Выберите действие:"""
 
 def detect_type(query: str) -> str:
     q = query.strip()
@@ -326,10 +360,17 @@ def build_html_report(api_results: list[dict], query: str) -> str:
 # --- МЕНЮ ---
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
         [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu")],
         [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
         [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
-        [InlineKeyboardButton(text="📸 Поиск по фото", callback_data="photo_search"), InlineKeyboardButton(text="🧩 Неполные данные", callback_data="partial_search")]
+    ])
+
+def search_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Обычный поиск", callback_data="search_normal")],
+        [InlineKeyboardButton(text="🕵‍♂ Maigret", callback_data="search_maigret")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
     ])
 
 def admin_menu():
@@ -376,6 +417,31 @@ async def cb_profile(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
+@dp.callback_query(F.data == "search_menu")
+async def cb_search_menu(cb: CallbackQuery):
+    await cb.message.edit_text("Выберите тип поиска:", reply_markup=search_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "search_normal")
+async def cb_search_normal(cb: CallbackQuery):
+    await cb.message.edit_text("🔍 Отправь запрос в чат (номер, email, ФИО и т.д.)", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
+    await cb.answer()
+
+@dp.callback_query(F.data == "search_maigret")
+async def cb_search_maigret(cb: CallbackQuery):
+    if not MAIGRET_AVAILABLE:
+        return await cb.answer("❌ Maigret не установлен на сервере.", show_alert=True)
+    
+    if not await check_maigret_limit(cb.from_user.id):
+        return await cb.answer("❌ Ты уже использовал Maigret сегодня. Лимит: 1 раз в день.", show_alert=True)
+    
+    await cb.message.edit_text(
+        "🕵‍♂ <b>Maigret</b>\n\nОтправь ник (например: <code>anodoxx</code>), и я проверю его по 500 сайтам.\n<i>Лимит: 1 запрос в день.</i>", 
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]])
+    )
+    await cb.answer()
+
 @dp.callback_query(F.data == "ref_link")
 async def cb_ref_link(cb: CallbackQuery):
     ref_link = f"https://t.me/{BOT_USERNAME}?start={cb.from_user.id}"
@@ -391,19 +457,13 @@ async def cb_terms(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
-@dp.callback_query(F.data.in_({"photo_search", "partial_search"}))
-async def cb_info_btn(cb: CallbackQuery):
-    if cb.data == "photo_search":
-        await cb.answer("📸 Просто отправь фото в чат.", show_alert=True)
-    else:
-        await cb.answer("🧩 Отправь запрос (например: Иванов Иван 1990).", show_alert=True)
-
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
     await cb.answer()
 
+# --- ПОКУПКА ---
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -421,6 +481,7 @@ async def cb_buy_package(cb: CallbackQuery, state: FSMContext):
     amount = int(cb.data.split("_")[1])
     total_ton = amount * PRICE_PER_REQ_TON
     await state.update_data(buy_amount=amount, total_ton=total_ton)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
         [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
@@ -459,18 +520,39 @@ async def process_currency(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     amount = data.get("buy_amount")
     total_ton = data.get("total_ton")
+    
     if currency == "TON":
         curr_text = f"Сумма: <b>{total_ton:.2f} TON</b>"
         nano_amount = int(total_ton * 1_000_000_000)
         tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount={nano_amount}"
     else:
-        total_usdt = total_ton * RATE_TON_TO_USDT
-        curr_text = f"Сумма: <b>~{total_usdt:.2f} USDT</b>"
+        curr_text = f"Сумма: <b>~{total_ton * 6.5:.2f} USDT</b>"
         tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount=0"
-    text = f"💳 <b>Оплата: {amount} запросов</b>\n\nВалюта: <b>{currency}</b>\n{curr_text}\nКошелек: <code>{CRYPTO_WALLET}</code>\n\nОтправьте <b>хеш транзакции</b> сюда."
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть TONKEEPER", url=tonkeeper_link)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]])
+    
+    text = (
+        f"💳 <b>Оплата: {amount} запросов</b>\n\n"
+        f"Валюта: <b>{currency}</b>\n{curr_text}\n"
+        f"Кошелек: <code>{CRYPTO_WALLET}</code>\n\n"
+        f"1. Оплатите по кнопке ниже.\n"
+        f"2. Нажмите кнопку «Я оплатил» и отправьте хеш."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Открыть TONKEEPER", url=tonkeeper_link)],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid_{amount}_{total_ton}_{currency}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
+    ])
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await state.update_data(currency=currency)
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("paid_"))
+async def cb_paid(cb: CallbackQuery, state: FSMContext):
+    _, amount, total_ton, currency = cb.data.split("_")
+    await state.update_data(buy_amount=amount, total_ton=total_ton, currency=currency)
+    
+    await cb.message.edit_text(
+        "📩 <b>Отправь хеш транзакции</b>\n\n"
+        "Скопируй хеш перевода в кошельке и отправь его сюда одним сообщением."
+    )
     await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
@@ -480,11 +562,24 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     amount, total_ton, currency = data.get("buy_amount"), data.get("total_ton"), data.get("currency", "TON")
     tx_hash = msg.text.strip()
     await state.clear()
+    
     if len(tx_hash) < 10:
         return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
-    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку.", reply_markup=main_menu())
-    admin_text = f"💰 <b>Заявка на оплату!</b>\n\n👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n📦 {amount} запросов\n💵 {total_ton:.2f} TON ({currency})\n🔗 <code>{html.escape(tx_hash)}</code>"
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"appr_{msg.from_user.id}_{amount}"), InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{msg.from_user.id}")]])
+        
+    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu())
+    
+    # Уведомление Админу
+    admin_text = (
+        f"💰 <b>Новая заявка на оплату!</b>\n\n"
+        f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
+        f"📦 {amount} запросов\n"
+        f"💵 {float(total_ton):.2f} TON ({currency})\n"
+        f"🔗 <code>{html.escape(tx_hash)}</code>"
+    )
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"appr_{msg.from_user.id}_{amount}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{msg.from_user.id}")
+    ]])
     await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
 
 @dp.callback_query(F.data.startswith("appr_"))
@@ -493,7 +588,7 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
     _, uid, amount = cb.data.split("_")
     await add_requests(int(uid), int(amount))
     await cb.message.edit_text(f"✅ Начислено {amount} запросов для {uid}.")
-    try: await bot.send_message(int(uid), f"✅ Оплата подтверждена! Начислено <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu())
+    try: await bot.send_message(int(uid), f"✅ <b>Оплата подтверждена!</b>\nНачислено <b>+{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu())
     except: pass
     await cb.answer()
 
@@ -502,10 +597,11 @@ async def admin_reject(cb: CallbackQuery, bot: Bot):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
     _, uid = cb.data.split("_")
     await cb.message.edit_text(f"❌ Отклонено для {uid}.")
-    try: await bot.send_message(int(uid), "❌ Оплата отклонена.", reply_markup=main_menu())
+    try: await bot.send_message(int(uid), "❌ Оплата отклонена. Свяжитесь с поддержкой.", reply_markup=main_menu())
     except: pass
     await cb.answer()
 
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
@@ -514,7 +610,7 @@ async def admin_panel(msg: Message):
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите `ID количество` (например: `123456789 50`):", parse_mode="Markdown")
+    await cb.message.edit_text("Введите `ID количество`:", parse_mode="Markdown")
     await state.set_state(AdminStates.give_reqs)
     await cb.answer()
 
@@ -528,54 +624,23 @@ async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
 @dp.message(AdminStates.give_reqs)
 async def process_give(msg: Message, state: FSMContext, bot: Bot):
     try:
-        clean_text = msg.text.replace(",", " ").replace("(", " ").replace(")", " ")
-        parts = clean_text.strip().split()
-        
-        if len(parts) != 2:
-            raise ValueError("Нужно ровно два числа")
-            
-        uid = int(parts[0])
-        amount = int(parts[1])
-        
-        logging.info(f"АДМИН ВЫДАЕТ: ID={uid}, Сумма={amount}")
+        parts = msg.text.strip().split()
+        if len(parts) != 2: raise ValueError()
+        uid, amount = int(parts[0]), int(parts[1])
         
         async with db_pool.acquire() as conn:
-            # Проверяем, есть ли юзер
-            user_exists = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", uid)
-            if not user_exists:
-                return await msg.answer(f"❌ Ошибка: Пользователь с ID <code>{uid}</code> не найден в базе.\nПусть он обязательно нажмет /start.", parse_mode="HTML")
-        
-            # Атомарный UPDATE + RETURNING (сразу возвращает новый баланс)
+            if not await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", uid):
+                return await msg.answer(f"❌ Пользователь {uid} не найден.")
             new_bal = await conn.fetchval(
                 "UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2 RETURNING requests_left",
                 amount, uid
             )
         
-        await msg.answer(
-            f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.\n"
-            f"💰 Текущий баланс: <code>{new_bal}</code>", 
-            parse_mode="HTML", 
-            reply_markup=admin_menu()
-        )
-        
-        try:
-            await bot.send_message(
-                uid, 
-                f"🎁 <b>Вам начислены запросы!</b>\n\n"
-                f"Администратор выдал вам <b>+{amount}</b> запросов.\n"
-                f"💳 Ваш текущий баланс: <code>{new_bal}</code>", 
-                parse_mode="HTML",
-                reply_markup=main_menu()
-            )
-        except Exception as e:
-            logging.error(f"ОШИБКА ОТПРАВКИ {uid}: {e}")
-            await msg.answer(f"⚠️ Запросы в базе начислены, но сообщение покупателю не ушло (возможно, он заблокировал бота).")
-
-    except ValueError:
-        await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
-    except Exception as e:
-        logging.error(f"ОШИБКА ВЫДАЧИ: {e}")
-        await msg.answer(f"❌ Системная ошибка: {e}")
+        await msg.answer(f"✅ Выдано {amount} для {uid}. Баланс: {new_bal}", reply_markup=admin_menu())
+        try: await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu())
+        except: pass
+    except:
+        await msg.answer("❌ Ошибка формата.")
     await state.clear()
 
 @dp.message(AdminStates.take_reqs)
@@ -583,9 +648,9 @@ async def process_take(msg: Message, state: FSMContext):
     try:
         uid, amount = map(int, msg.text.split())
         await add_requests(uid, -amount)
-        await msg.answer(f"✅ У пользователя <code>{uid}</code> забрано <b>{amount}</b> запросов.", parse_mode="HTML", reply_markup=admin_menu())
-    except ValueError:
-        await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
+        await msg.answer(f"✅ Забрано {amount} у {uid}.", reply_markup=admin_menu())
+    except:
+        await msg.answer("❌ Ошибка формата.")
     await state.clear()
 
 # --- ПОИСК ---
@@ -593,82 +658,65 @@ async def process_search(msg: Message, q: str):
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu())
 
-    fake_choice = random.sample(FAKE_SOURCES, 3)
-    
-    note = await msg.answer(
-        f"🔍 <b>Запуск поиска по параметрам конструктора:</b> {html.escape(q)}\n\n"
-        f"<i>Опрашиваем базы данных и утечки...</i>\n\n"
-        f"📡 <b>Источники:</b> {', '.join(fake_choice)}", 
-        parse_mode="HTML"
-    )
-    
+    note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
     if not api_results:
         await add_requests(msg.from_user.id, 1)
-        return await note.edit_text("❌ Все базы вернули ошибку или ничего не нашли.")
+        return await note.edit_text("❌ Все базы вернули ошибку.")
     
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📄 HTML-отчет", callback_data=f"html_{q[:40]}")]])
     
-    total_records = 0
-    for res in api_results:
-        data = clean_data(res["data"])
-        results_dict = data.get("results", {})
-        items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        for src_data in items:
-            if not isinstance(src_data, dict): continue
-            inner = src_data.get("result", {}).get("data", {}).get("results", {})
-            if isinstance(inner, dict): total_records += 1
-            elif isinstance(inner, list): total_records += len(inner)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"📄 Открыть полный отчет ({total_records} шт)", callback_data=f"html_{q[:40]}")]])
-    
-    final_text = (
-        f"<b>Oasis Search</b>\n"
-        f"├ Запрос: {html.escape(q)}\n"
-        f"└ Тип: Nonfull\n\n"
-        f"{text_report}\n\n"
-        f"💰 Остаток запросов: {bal}"
-    )
-    
-    try:
-        await note.edit_text(final_text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
-    except Exception:
-        clean_text = re.sub(r'<[^>]+>', '', text_report)
-        await note.edit_text(f"✅ Результаты:\n\n{clean_text[:3500]}\n\n💰 Остаток: {bal}", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("html_"))
-async def send_html_file(cb: CallbackQuery):
-    q = cb.data.replace("html_", "")
-    await cb.answer("Генерирую файл...")
-    note = await cb.message.reply("⏳ Собираю данные для HTML...")
-    api_results = await query_all_apis(q)
-    if not api_results:
-        return await note.edit_text("❌ Данные устарели, попробуйте поиск заново.")
-    html_code = build_html_report(api_results, q)
-    file = BufferedInputFile(html_code.encode('utf-8'), filename=f"oasis_{q[:10]}.html")
-    await cb.message.answer_document(document=file, caption=f"📄 HTML-отчет Oasis Search: <code>{html.escape(q)}</code>", parse_mode="HTML")
-    await note.delete()
-
-@dp.message(Command("search"))
-async def cmd_search(msg: Message):
-    parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2: return await msg.answer("Укажи запрос.")
-    await process_search(msg, parts[1].strip())
+    await note.edit_text(f"<b>Oasis Search</b>\n├ Запрос: {html.escape(q)}\n└ Тип: Nonfull\n\n{text_report}\n\n💰 Остаток: {bal}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
 
 @dp.message()
 async def auto_search(msg: Message, state: FSMContext):
     if msg.text and not msg.text.startswith("/"):
         current_state = await state.get_state()
         if current_state is not None: return
+        
+        # Если это ответ на Maigret
+        if maigret_db and len(msg.text) < 50 and not any(c in msg.text for c in [" ", "@", ".", "+"]):
+            if not await check_maigret_limit(msg.from_user.id):
+                return await msg.answer("❌ Maigret: лимит 1 раз в день.")
+            
+            note = await msg.answer(f"🕵‍♂ <b>Maigret сканирует:</b> <code>{html.escape(msg.text)}</code>…")
+            try:
+                sites = maigret_db.ranked_sites_dict(top=500)
+                results = await maigret.search(username=msg.text, site_dict=sites, timeout=20, is_parsing_enabled=False)
+                found = [f"• <a href='{r['url_user']}'>{s}</a>" for s, r in results.items() if r["status"].is_found()]
+                
+                await log_maigret_use(msg.from_user.id)
+                
+                if found:
+                    report = f"✅ <b>Найдено {len(found)}:</b>\n\n" + "\n".join(found[:50])
+                else:
+                    report = "🔍 Ничего не найдено."
+                await note.edit_text(report[:3800], parse_mode="HTML", disable_web_page_preview=True)
+                return
+            except Exception as e:
+                return await note.edit_text(f"❌ Ошибка Maigret: {e}")
+        
         await process_search(msg, msg.text.strip())
 
-# --- ЗАПУСК ДЛЯ RENDER ---
+@dp.callback_query(F.data.startswith("html_"))
+async def send_html_file(cb: CallbackQuery):
+    q = cb.data.replace("html_", "")
+    await cb.answer("Генерирую...")
+    note = await cb.message.reply("⏳ Собираю...")
+    api_results = await query_all_apis(q)
+    if not api_results: return await note.edit_text("❌ Устарело.")
+    file = BufferedInputFile(build_html_report(api_results, q).encode('utf-8'), filename=f"oasis_{q[:10]}.html")
+    await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
+    await note.delete()
+
+# --- ЗАПУСК ---
 async def on_startup(bot: Bot):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    logging.info(f"Webhook: {WEBHOOK_URL}")
 
 async def health_check(request):
     return web.Response(text="OK")
@@ -678,7 +726,6 @@ def main():
     dp.startup.register(on_startup)
     app = web.Application()
     app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
     app.router.add_get("/api/search", api_search_handler)
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
