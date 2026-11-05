@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛ (PostgreSQL + Уведомления с правильным балансом + Счетчик)
+# crite.py — ФИНАЛ (PostgreSQL + RETURNING для точного баланса + Все фичи)
 import asyncio
 import json
 import html
@@ -540,16 +540,16 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
         logging.info(f"АДМИН ВЫДАЕТ: ID={uid}, Сумма={amount}")
         
         async with db_pool.acquire() as conn:
+            # Проверяем, есть ли юзер
             user_exists = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", uid)
             if not user_exists:
-                return await msg.answer(f"❌ Ошибка: Пользователь с ID <code>{uid}</code> не найден в базе.\nОн точно нажимал /start в боте?", parse_mode="HTML")
+                return await msg.answer(f"❌ Ошибка: Пользователь с ID <code>{uid}</code> не найден в базе.\nПусть он обязательно нажмет /start.", parse_mode="HTML")
         
-        await add_requests(uid, amount)
-        
-        # Ждем полсекунды, чтобы база гарантированно обновилась
-        await asyncio.sleep(0.5) 
-        
-        new_bal = await get_balance(uid)
+            # Атомарный UPDATE + RETURNING (сразу возвращает новый баланс)
+            new_bal = await conn.fetchval(
+                "UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2 RETURNING requests_left",
+                amount, uid
+            )
         
         await msg.answer(
             f"✅ Пользователю <code>{uid}</code> выдано <b>{amount}</b> запросов.\n"
@@ -568,11 +568,11 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
                 reply_markup=main_menu()
             )
         except Exception as e:
-            logging.error(f"ОШИБКА ОТПРАВКИ УВЕДОМЛЕНИЯ {uid}: {e}")
-            await msg.answer(f"⚠️ <b>Запросы в базе начислены!</b> Но сообщение покупателю не ушло. Ошибка: {e}")
+            logging.error(f"ОШИБКА ОТПРАВКИ {uid}: {e}")
+            await msg.answer(f"⚠️ Запросы в базе начислены, но сообщение покупателю не ушло (возможно, он заблокировал бота).")
 
-    except ValueError as e:
-        await msg.answer(f"❌ Ошибка формата. Введи: <code>ID количество</code>")
+    except ValueError:
+        await msg.answer("❌ Ошибка формата. Введи: <code>ID количество</code>")
     except Exception as e:
         logging.error(f"ОШИБКА ВЫДАЧИ: {e}")
         await msg.answer(f"❌ Системная ошибка: {e}")
