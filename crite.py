@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Выдача без проверки + Промокоды + Веб)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (4 API + Логи + Промокоды)
 import asyncio
 import json
 import html
@@ -22,10 +22,16 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 # --- НАСТРОЙКИ API ---
 API_URL_1 = "https://api.lego.new.tg/v1/search"
 API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
+
 API_URL_2 = "https://api.devhydra.info/v1/search"
 API_KEY_2 = "HYDRA-LordKEY-2eWKbyuQUJz6XQK5Pv"
+
 API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+
+# Твой новый API
+API_URL_4 = "https://api.getkratos.lol/v1/search" 
+API_KEY_4 = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
 
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
@@ -122,12 +128,9 @@ async def deduct_request(user_id) -> bool:
 
 async def add_requests(user_id, amount):
     async with db_pool.acquire() as conn:
-        # Проверяем, есть ли юзер в базе
         user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
         if not user:
-            # Если нет — создаем его с 0 запросов
             await conn.execute("INSERT INTO users (user_id, username, requests_left, joined_at) VALUES ($1, 'unknown', 0, $2)", user_id, int(time.time()))
-        # Начисляем баланс
         await conn.execute("UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2", amount, user_id)
 
 async def get_invited_count(user_id) -> int:
@@ -189,21 +192,50 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
 
 async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
+    
     tasks = [
         fetch_api(API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1}),
         fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
-        fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3})
+        fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3}),
+        # Запрос к Kratos (стандартный формат)
+        fetch_api(API_URL_4, {"q": q, "key": API_KEY_4})
     ]
+    
     try:
         results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30)
     except asyncio.TimeoutError:
         return []
     
     combined = []
-    sources = ["LEGO", "DevHydra", "Mobius"]
+    sources = ["LEGO", "Hydra", "Mobius", "Kratos"]
+    
     for i, res in enumerate(results):
-        if isinstance(res, tuple) and res[0]:
-            combined.append({"source": sources[i], "data": res[1]})
+        if isinstance(res, Exception):
+            logging.error(f"API {sources[i]} ошибка: {res}")
+            continue
+            
+        success, data = res
+        
+        if not success:
+            logging.error(f"API {sources[i]} вернул ошибку: {data}")
+            continue
+            
+        if isinstance(data, dict):
+            items = []
+            if "results" in data and isinstance(data["results"], list):
+                items = data["results"]
+            elif "data" in data and isinstance(data["data"], list):
+                items = data["data"]
+            elif "items" in data and isinstance(data["items"], list):
+                items = data["items"]
+            elif isinstance(data, list):
+                items = data
+            
+            if items:
+                combined.append({"source": sources[i], "data": items})
+            else:
+                logging.warning(f"API {sources[i]} вернул пустой список. Ответ: {str(data)[:200]}")
+                
     return combined
 
 def clean_data(obj):
@@ -705,20 +737,15 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
         if len(parts) != 2: raise ValueError()
         uid, amount = int(parts[0]), int(parts[1])
         
-        # Начисляем запросы (функция add_requests сама создаст юзера, если его нет в базе)
         await add_requests(uid, amount)
-        
-        # Получаем новый баланс
         new_bal = await get_balance(uid)
         
         await msg.answer(f"✅ Выдано {amount} для {uid}. Новый баланс: {new_bal}", reply_markup=admin_menu())
         
-        # Пытаемся отправить уведомление юзеру
         try: 
             await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid))
         except: 
             pass
-            
     except Exception as e:
         await msg.answer(f"❌ Ошибка: {e}. Введи: ID количество")
     await state.clear()
@@ -768,15 +795,11 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
         if promo['current_uses'] >= promo['max_uses']:
             return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_menu(msg.from_user.id))
             
-        # Начисляем баланс (автосоздание юзера внутри)
         await add_requests(msg.from_user.id, promo['req_amount'])
-        
-        # Обновляем счетчик и записываем активацию
         await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
         await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
     
     new_bal = await get_balance(msg.from_user.id)
-    
     await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nБаланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
     
     try:
@@ -843,7 +866,7 @@ async def process_promo_create(msg: Message, state: FSMContext):
     await state.clear()
 
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
-async def process_search(msg: Message, q: str):
+async def process_search(msg: Message, q: str, bot: Bot):
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id))
 
@@ -852,6 +875,9 @@ async def process_search(msg: Message, q: str):
     
     if not api_results:
         await add_requests(msg.from_user.id, 1)
+        try:
+            await bot.send_message(MAIN_ADMIN_ID, f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\nПроверь логи Render — API не отдал данные.")
+        except: pass
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
     text_report = render_text_results(api_results)
@@ -888,16 +914,13 @@ async def auto_search(msg: Message, state: FSMContext, bot: Bot):
         current_state = await state.get_state()
         if current_state is not None: return
         
-        # Если юзер не нажимал /start, но написал промокод в чат - бот попробует его активировать
         code = re.sub(r'[^A-Za-z0-9]', '', msg.text).upper()
         async with db_pool.acquire() as conn:
             promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
             if promo:
-                # Вызываем активацию
                 return await process_promo_code(msg, state, bot)
         
-        # Если это не промокод - делаем поиск
-        await process_search(msg, msg.text.strip())
+        await process_search(msg, msg.text.strip(), bot)
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
