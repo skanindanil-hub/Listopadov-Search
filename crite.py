@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Диагностика API + Новый ключ Hydra)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Рабочий парсер + Обработка ошибок)
 import asyncio
 import json
 import html
@@ -20,16 +20,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # --- НАСТРОЙКИ API ---
-API_URL_1 = "https://api.lego.new.tg/v1/search"
-API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
-
 API_URL_2 = "https://api.devhydra.info/v1/search"
 API_KEY_2 = "HYDRA-LordKEY-kkVS8I3FHeB7p9DmO8"
 
 API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
-# API Kratos
 API_URL_KRATOS = "https://api.getkratos.lol/search"
 API_KEY_KRATOS = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
 
@@ -177,6 +173,7 @@ def detect_type(query: str) -> str:
 
 async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
+    raw = "" # Инициализируем, чтобы не было ошибки
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params, headers=headers) as resp:
@@ -197,7 +194,7 @@ async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
         "Content-Type": "application/json",
         "User-Agent": "kratos-api/2.1+a7f3k9"
     }
-    
+    raw = ""
     q_upper = q.strip().upper()
     if re.match(r"^\+?\d{10,15}$", q):
         k_type = "PHONE"
@@ -208,11 +205,7 @@ async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
     else:
         k_type = "NAME"
 
-    payload = {
-        "query": q,
-        "type": k_type,
-        "limit": 100
-    }
+    payload = {"query": q, "type": k_type, "limit": 100}
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -230,7 +223,6 @@ async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
     
     tasks = [
-        fetch_api(API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1}),
         fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
         fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3}),
         fetch_kratos(q)
@@ -242,34 +234,18 @@ async def query_all_apis(q: str) -> list[dict]:
         return []
     
     combined = []
-    sources = ["LEGO", "Hydra", "Mobius", "Kratos"]
+    sources = ["Hydra", "Mobius", "Kratos"]
     
     for i, res in enumerate(results):
         if isinstance(res, Exception):
-            combined.append({"source": sources[i], "error": str(res)})
             continue
             
         success, data = res
-        
         if not success:
-            combined.append({"source": sources[i], "error": str(data)})
             continue
             
         if isinstance(data, dict):
-            items = []
-            if "results" in data and isinstance(data["results"], list):
-                items = data["results"]
-            elif "data" in data and isinstance(data["data"], list):
-                items = data["data"]
-            elif "items" in data and isinstance(data["items"], list):
-                items = data["items"]
-            elif isinstance(data, list):
-                items = data
-            
-            if items:
-                combined.append({"source": sources[i], "data": items})
-            else:
-                combined.append({"source": sources[i], "empty_json": data})
+            combined.append({"source": sources[i], "data": data})
                 
     return combined
 
@@ -297,7 +273,7 @@ def render_text_results(api_results: list[dict]) -> str:
         "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
         "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
         "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
-        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш"
+        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО"
     }
 
     def extract_recursive(obj):
@@ -386,7 +362,7 @@ def build_html_report(api_results: list[dict], query: str) -> str:
         "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
         "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
         "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
-        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш"
+        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО"
     }
 
     for item in all_items:
@@ -908,23 +884,8 @@ async def process_search(msg: Message, q: str, bot: Bot):
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
-    has_data = any("data" in res for res in api_results)
-    
-    if not has_data:
+    if not api_results:
         await add_requests(msg.from_user.id, 1)
-        
-        log_text = f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\n\n"
-        for res in api_results:
-            if "empty_json" in res:
-                json_str = json.dumps(res["empty_json"], ensure_ascii=False)
-                log_text += f"🔹 <b>{res['source']} JSON:</b>\n<code>{html.escape(json_str[:500])}</code>\n\n"
-            elif "error" in res:
-                log_text += f"🔴 <b>{res['source']} ERROR:</b>\n<code>{html.escape(res['error'][:200])}</code>\n\n"
-        
-        try:
-            await bot.send_message(MAIN_ADMIN_ID, log_text[:4000], parse_mode="HTML")
-        except: pass
-        
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
     text_report = render_text_results(api_results)
