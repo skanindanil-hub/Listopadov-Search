@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Веб-отчеты + Промокоды)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Промокоды + Фикс ввода для iOS)
 import asyncio
 import json
 import html
@@ -733,19 +733,25 @@ async def cb_enter_promo(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 @dp.message(PromoStates.wait_code)
-async def process_promo_code(msg: Message, state: FSMContext):
-    code = msg.text.strip()
+async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
+    raw_text = msg.text or ""
+    code = raw_text.strip().upper().strip('.')
+    
     await state.clear()
     
+    try:
+        await bot.send_message(MAIN_ADMIN_ID, f"🔍 <b>Попытка ввода промокода</b>\nЮзер: @{msg.from_user.username} ({msg.from_user.id})\nВвел: <code>{html.escape(raw_text)}</code>\nОчищено до: <code>{html.escape(code)}</code>", parse_mode="HTML")
+    except:
+        pass
+    
     async with db_pool.acquire() as conn:
-        # Проверяем, не активировал ли уже
         used = await conn.fetchrow("SELECT * FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
         if used:
             return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id))
             
         promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
         if not promo:
-            return await msg.answer("❌ Промокод не найден.", reply_markup=main_menu(msg.from_user.id))
+            return await msg.answer("❌ Промокод не найден. Проверь правильность написания.", reply_markup=main_menu(msg.from_user.id))
             
         if promo['expires_at'] > 0 and promo['expires_at'] < int(time.time()):
             return await msg.answer("❌ Срок действия промокода истек.", reply_markup=main_menu(msg.from_user.id))
@@ -753,7 +759,6 @@ async def process_promo_code(msg: Message, state: FSMContext):
         if promo['current_uses'] >= promo['max_uses']:
             return await msg.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_menu(msg.from_user.id))
             
-        # Активируем
         await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
         await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
         await add_requests(msg.from_user.id, promo['req_amount'])
