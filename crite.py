@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (4 API + Логи + Промокоды)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Новый ключ Hydra + Kratos POST)
 import asyncio
 import json
 import html
@@ -24,14 +24,14 @@ API_URL_1 = "https://api.lego.new.tg/v1/search"
 API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
 
 API_URL_2 = "https://api.devhydra.info/v1/search"
-API_KEY_2 = "HYDRA-LordKEY-2eWKbyuQUJz6XQK5Pv"
+API_KEY_2 = "HYDRA-LordKEY-kkVS8I3FHeB7p9DmO8" # <--- ОБНОВЛЕННЫЙ КЛЮЧ ГИДРЫ
 
 API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
-# Твой новый API
-API_URL_4 = "https://api.getkratos.lol/v1/search" 
-API_KEY_4 = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
+# API Kratos
+API_URL_KRATOS = "https://api.getkratos.lol/search"
+API_KEY_KRATOS = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
 
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
@@ -190,6 +190,42 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
     except Exception as e:
         return False, str(e)
 
+async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {
+        "Authorization": f"Bearer {API_KEY_KRATOS}",
+        "Content-Type": "application/json",
+        "User-Agent": "kratos-api/2.1+a7f3k9"
+    }
+    
+    q_upper = q.strip().upper()
+    if re.match(r"^\+?\d{10,15}$", q):
+        k_type = "PHONE"
+    elif "@" in q:
+        k_type = "EMAIL"
+    elif q_upper.startswith("@"):
+        k_type = "TELEGRAM"
+    else:
+        k_type = "NAME"
+
+    payload = {
+        "query": q,
+        "type": k_type,
+        "limit": 100
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(API_URL_KRATOS, headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    raw = await resp.text()
+                    return True, json.loads(raw)
+                return False, f"HTTP {resp.status}"
+    except asyncio.TimeoutError:
+        return False, "Таймаут"
+    except Exception as e:
+        return False, str(e)
+
 async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
     
@@ -197,8 +233,7 @@ async def query_all_apis(q: str) -> list[dict]:
         fetch_api(API_URL_1, {"q": q, "type": q_type, "key": API_KEY_1}),
         fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
         fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3}),
-        # Запрос к Kratos (стандартный формат)
-        fetch_api(API_URL_4, {"q": q, "key": API_KEY_4})
+        fetch_kratos(q)
     ]
     
     try:
@@ -876,7 +911,7 @@ async def process_search(msg: Message, q: str, bot: Bot):
     if not api_results:
         await add_requests(msg.from_user.id, 1)
         try:
-            await bot.send_message(MAIN_ADMIN_ID, f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\nПроверь логи Render — API не отдал данные.")
+            await bot.send_message(MAIN_ADMIN_ID, f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\nПроверь логи Render — API не отдал данные.", parse_mode="HTML")
         except: pass
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
