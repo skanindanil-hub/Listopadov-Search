@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Новый ключ Hydra + Kratos POST)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Диагностика API + Новый ключ Hydra)
 import asyncio
 import json
 import html
@@ -24,7 +24,7 @@ API_URL_1 = "https://api.lego.new.tg/v1/search"
 API_KEY_1 = "LEGO-LORDKEY-p2TA1DqD98RUHGibdm"
 
 API_URL_2 = "https://api.devhydra.info/v1/search"
-API_KEY_2 = "HYDRA-LordKEY-kkVS8I3FHeB7p9DmO8" # <--- ОБНОВЛЕННЫЙ КЛЮЧ ГИДРЫ
+API_KEY_2 = "HYDRA-LordKEY-kkVS8I3FHeB7p9DmO8"
 
 API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
@@ -184,7 +184,7 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
                     raw = await resp.text()
                     if "Just a moment" not in raw:
                         return True, json.loads(raw)
-                return False, f"HTTP {resp.status}"
+                return False, f"HTTP {resp.status} - {raw[:100]}"
     except asyncio.TimeoutError:
         return False, "Таймаут"
     except Exception as e:
@@ -220,7 +220,7 @@ async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
                 if resp.status == 200:
                     raw = await resp.text()
                     return True, json.loads(raw)
-                return False, f"HTTP {resp.status}"
+                return False, f"HTTP {resp.status} - {raw[:100]}"
     except asyncio.TimeoutError:
         return False, "Таймаут"
     except Exception as e:
@@ -246,13 +246,13 @@ async def query_all_apis(q: str) -> list[dict]:
     
     for i, res in enumerate(results):
         if isinstance(res, Exception):
-            logging.error(f"API {sources[i]} ошибка: {res}")
+            combined.append({"source": sources[i], "error": str(res)})
             continue
             
         success, data = res
         
         if not success:
-            logging.error(f"API {sources[i]} вернул ошибку: {data}")
+            combined.append({"source": sources[i], "error": str(data)})
             continue
             
         if isinstance(data, dict):
@@ -269,7 +269,7 @@ async def query_all_apis(q: str) -> list[dict]:
             if items:
                 combined.append({"source": sources[i], "data": items})
             else:
-                logging.warning(f"API {sources[i]} вернул пустой список. Ответ: {str(data)[:200]}")
+                combined.append({"source": sources[i], "empty_json": data})
                 
     return combined
 
@@ -908,11 +908,23 @@ async def process_search(msg: Message, q: str, bot: Bot):
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
-    if not api_results:
+    has_data = any("data" in res for res in api_results)
+    
+    if not has_data:
         await add_requests(msg.from_user.id, 1)
+        
+        log_text = f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\n\n"
+        for res in api_results:
+            if "empty_json" in res:
+                json_str = json.dumps(res["empty_json"], ensure_ascii=False)
+                log_text += f"🔹 <b>{res['source']} JSON:</b>\n<code>{html.escape(json_str[:500])}</code>\n\n"
+            elif "error" in res:
+                log_text += f"🔴 <b>{res['source']} ERROR:</b>\n<code>{html.escape(res['error'][:200])}</code>\n\n"
+        
         try:
-            await bot.send_message(MAIN_ADMIN_ID, f"⚠️ <b>Поиск пустой!</b>\nЗапрос: <code>{q}</code>\nПроверь логи Render — API не отдал данные.", parse_mode="HTML")
+            await bot.send_message(MAIN_ADMIN_ID, log_text[:4000], parse_mode="HTML")
         except: pass
+        
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
     text_report = render_text_results(api_results)
