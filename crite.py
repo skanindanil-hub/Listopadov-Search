@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Без сайта, с админкой в меню)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ + ВЕБ-ОТЧЕТЫ
 import asyncio
 import json
 import html
@@ -46,7 +46,8 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
-html_cache = {} # Хранилище для отчетов
+html_cache = {} 
+report_cache = {} # Хранилище для веб-отчетов: {id: {"query": q, "results": api_results}}
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -302,6 +303,16 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     <div class="stats-grid"><div class="stat-box"><div class="stat-label">ИСТОЧНИКОВ</div><div class="stat-value">{len(api_results)}</div></div>
     <div class="stat-box"><div class="stat-label">ЗАПИСЕЙ</div><div class="stat-value">{total_records}</div></div></div></div></div>
     {details_html}</div></body></html>"""
+
+# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
+async def web_report_handler(request):
+    report_id = request.match_info.get('report_id')
+    if report_id not in report_cache:
+        return web.Response(text="<h1>404 Отчет не найден или устарел</h1><p>Сгенерируйте новый в боте.</p>", content_type="text/html", status=404)
+    
+    data = report_cache[report_id]
+    html_content = build_html_report(data["results"], data["query"])
+    return web.Response(text=html_content, content_type="text/html")
 
 # --- МЕНЮ ---
 def main_menu(user_id=None):
@@ -603,9 +614,19 @@ async def process_search(msg: Message, q: str):
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
     
+    # Кэш для HTML файла
     report_id = str(random.randint(100000, 999999))
     html_cache[report_id] = q
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📄 HTML-отчет", callback_data=f"html_{report_id}")]])
+    
+    # Кэш для Веб-отчета (ссылка)
+    web_id = str(random.randint(1000000, 9999999))
+    report_cache[web_id] = {"query": q, "results": api_results}
+    web_link = f"{WEBHOOK_HOST}/report/{web_id}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Веб-отчет", url=web_link)],
+        [InlineKeyboardButton(text="📄 HTML-файл", callback_data=f"html_{report_id}")]
+    ])
     
     await note.edit_text(f"<b>Oasis Search</b>\n├ Запрос: {html.escape(q)}\n└ Тип: Nonfull\n\n{text_report}\n\n💰 Остаток: {bal}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
 
@@ -645,7 +666,7 @@ def main():
     dp.startup.register(on_startup)
     app = web.Application()
     app.router.add_get("/", health_check)
-    # Строка с сайтом удалена
+    app.router.add_get("/report/{report_id}", web_report_handler) # Новый путь для веб-отчетов
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
