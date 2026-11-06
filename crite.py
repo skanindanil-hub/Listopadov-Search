@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Чистый парсер + Монитор API + Система админов)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Прокси + Статус API + Чистый парсер)
 import asyncio
 import json
 import html
@@ -28,6 +28,10 @@ API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
 API_URL_KRATOS = "https://api.getkratos.lol/search"
 API_KEY_KRATOS = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
+
+# --- ПРОКСИ (опционально) ---
+# Если впишешь сюда прокси (например, http://user:pass@ip:port), все запросы пойдут через него
+PROXY_URL = os.getenv("PROXY_URL", None) 
 
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
@@ -189,7 +193,8 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
     raw = ""
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params, headers=headers) as resp:
+            # Добавляем прокси, если он указан
+            async with session.get(url, params=params, headers=headers, proxy=PROXY_URL) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
                     if "Just a moment" not in raw:
@@ -222,7 +227,8 @@ async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(API_URL_KRATOS, headers=headers, json=payload) as resp:
+            # Добавляем прокси, если он указан
+            async with session.post(API_URL_KRATOS, headers=headers, json=payload, proxy=PROXY_URL) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
                     return True, json.loads(raw)
@@ -588,22 +594,31 @@ async def cb_adm_api_status(cb: CallbackQuery):
     statuses = []
     
     start = time.time()
-    succ_h, _ = await fetch_api(API_URL_2, {"q": test_q, "type": "phone", "key": API_KEY_2})
+    succ_h, err_h = await fetch_api(API_URL_2, {"q": test_q, "type": "phone", "key": API_KEY_2})
     t_h = round(time.time() - start, 2)
-    statuses.append(f"{'🟢' if succ_h else '🔴'} <b>Hydra:</b> {'OK' if succ_h else 'Ошибка'} ({t_h}с)")
+    if succ_h:
+        statuses.append(f"🟢 <b>Hydra:</b> OK ({t_h}с)")
+    else:
+        statuses.append(f"🔴 <b>Hydra:</b> {html.escape(str(err_h))[:50]}")
     
     start = time.time()
-    succ_m, _ = await fetch_api(API_URL_3, {"q": test_q}, headers={"X-API-Key": API_KEY_3})
+    succ_m, err_m = await fetch_api(API_URL_3, {"q": test_q}, headers={"X-API-Key": API_KEY_3})
     t_m = round(time.time() - start, 2)
-    statuses.append(f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else 'Ошибка'} ({t_m}с)")
+    if succ_m:
+        statuses.append(f"🟢 <b>Mobius:</b> OK ({t_m}с)")
+    else:
+        statuses.append(f"🔴 <b>Mobius:</b> {html.escape(str(err_m))[:50]}")
     
     start = time.time()
-    succ_k, _ = await fetch_kratos(test_q)
+    succ_k, err_k = await fetch_kratos(test_q)
     t_k = round(time.time() - start, 2)
-    statuses.append(f"{'🟢' if succ_k else '🔴'} <b>Kratos:</b> {'OK' if succ_k else 'Ошибка'} ({t_k}с)")
+    if succ_k:
+        statuses.append(f"🟢 <b>Kratos:</b> OK ({t_k}с)")
+    else:
+        statuses.append(f"🔴 <b>Kratos:</b> {html.escape(str(err_k))[:50]}")
     
     text = "📡 <b>Статус API на текущий момент:</b>\n\n" + "\n".join(statuses)
-    text += "\n\n<i>🟢 - Отвечает. 🔴 - Лежит или неверный ключ.</i>"
+    text += "\n\n<i>🟢 - Отвечает. 🔴 - Ошибка (в скобках причина).</i>"
     
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
