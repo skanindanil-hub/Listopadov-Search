@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Промокоды без /start + Автосоздание юзера)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Выдача без проверки + Промокоды + Веб)
 import asyncio
 import json
 import html
@@ -101,7 +101,7 @@ async def add_user(user_id, username, referrer_id=None):
         row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
         if row: return False
         await conn.execute("""
-            INSERT INTO users (user_id, username, requests_left, 3, referrer_id, joined_at)
+            INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at)
             VALUES ($1, $2, 3, $3, $4)
         """, user_id, username, referrer_id, int(time.time()))
         return True
@@ -122,9 +122,10 @@ async def deduct_request(user_id) -> bool:
 
 async def add_requests(user_id, amount):
     async with db_pool.acquire() as conn:
-        # ПРОВЕРКА: если юзера нет, создаем его
+        # Проверяем, есть ли юзер в базе
         user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
         if not user:
+            # Если нет — создаем его с 0 запросов
             await conn.execute("INSERT INTO users (user_id, username, requests_left, joined_at) VALUES ($1, 'unknown', 0, $2)", user_id, int(time.time()))
         # Начисляем баланс
         await conn.execute("UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2", amount, user_id)
@@ -704,19 +705,22 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
         if len(parts) != 2: raise ValueError()
         uid, amount = int(parts[0]), int(parts[1])
         
-        async with db_pool.acquire() as conn:
-            if not await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", uid):
-                return await msg.answer(f"❌ Пользователь {uid} не найден.")
-            new_bal = await conn.fetchval(
-                "UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2 RETURNING requests_left",
-                amount, uid
-            )
+        # Начисляем запросы (функция add_requests сама создаст юзера, если его нет в базе)
+        await add_requests(uid, amount)
         
-        await msg.answer(f"✅ Выдано {amount} для {uid}. Баланс: {new_bal}", reply_markup=admin_menu())
-        try: await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid))
-        except: pass
-    except:
-        await msg.answer("❌ Ошибка формата.")
+        # Получаем новый баланс
+        new_bal = await get_balance(uid)
+        
+        await msg.answer(f"✅ Выдано {amount} для {uid}. Новый баланс: {new_bal}", reply_markup=admin_menu())
+        
+        # Пытаемся отправить уведомление юзеру
+        try: 
+            await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid))
+        except: 
+            pass
+            
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка: {e}. Введи: ID количество")
     await state.clear()
 
 @dp.message(AdminStates.take_reqs)
