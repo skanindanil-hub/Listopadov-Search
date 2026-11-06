@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Промокоды + Фикс ввода для iOS)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Промокоды + Абсолютная чистка + Логи)
 import asyncio
 import json
 import html
@@ -735,37 +735,64 @@ async def cb_enter_promo(cb: CallbackQuery, state: FSMContext):
 @dp.message(PromoStates.wait_code)
 async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
     raw_text = msg.text or ""
-    code = raw_text.strip().upper().strip('.')
+    
+    # Оставляем ТОЛЬКО английские буквы и цифры. Всё остальное (пробелы, русские буквы с айфона) вырезаем.
+    code = re.sub(r'[^A-Za-z0-9]', '', raw_text).upper()
     
     await state.clear()
     
+    # Лог тебе: что ввел, что получилось
     try:
-        await bot.send_message(MAIN_ADMIN_ID, f"🔍 <b>Попытка ввода промокода</b>\nЮзер: @{msg.from_user.username} ({msg.from_user.id})\nВвел: <code>{html.escape(raw_text)}</code>\nОчищено до: <code>{html.escape(code)}</code>", parse_mode="HTML")
-    except:
-        pass
+        await bot.send_message(
+            MAIN_ADMIN_ID, 
+            f"🔍 <b>Попытка ввода промокода</b>\n"
+            f"Юзер: @{msg.from_user.username} (<code>{msg.from_user.id}</code>)\n"
+            f"Ввел: <code>{html.escape(raw_text)}</code>\n"
+            f"Очищено: <code>{html.escape(code)}</code>", 
+            parse_mode="HTML"
+        )
+    except: pass
     
-    async with db_pool.acquire() as conn:
-        used = await conn.fetchrow("SELECT * FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
-        if used:
-            return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id))
+    try:
+        async with db_pool.acquire() as conn:
+            # 1. Проверяем, не активировал ли он уже
+            used = await conn.fetchrow("SELECT 1 FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
+            if used:
+                return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id))
+                
+            # 2. Ищем промокод
+            promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
+            if not promo:
+                return await msg.answer(f"❌ Промокод <code>{html.escape(code)}</code> не найден.", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+                
+            # 3. Проверяем срок
+            if promo['expires_at'] > 0 and promo['expires_at'] < int(time.time()):
+                return await msg.answer("❌ Срок действия истек.", reply_markup=main_menu(msg.from_user.id))
+                
+            # 4. Проверяем лимит
+            if promo['current_uses'] >= promo['max_uses']:
+                return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_menu(msg.from_user.id))
+                
+            # 5. Активируем
+            await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
+            await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
+            await add_requests(msg.from_user.id, promo['req_amount'])
             
-        promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
-        if not promo:
-            return await msg.answer("❌ Промокод не найден. Проверь правильность написания.", reply_markup=main_menu(msg.from_user.id))
+            new_bal = await get_balance(msg.from_user.id)
             
-        if promo['expires_at'] > 0 and promo['expires_at'] < int(time.time()):
-            return await msg.answer("❌ Срок действия промокода истек.", reply_markup=main_menu(msg.from_user.id))
-            
-        if promo['current_uses'] >= promo['max_uses']:
-            return await msg.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_menu(msg.from_user.id))
-            
-        await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
-        await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
-        await add_requests(msg.from_user.id, promo['req_amount'])
+        await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nБаланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
         
-        new_bal = await get_balance(msg.from_user.id)
+        # Лог тебе: успешная активация
+        try:
+            await bot.send_message(MAIN_ADMIN_ID, f"✅ <b>Успешная активация!</b>\nЮзер: {msg.from_user.id}\nКод: {code}", parse_mode="HTML")
+        except: pass
         
-    await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nТекущий баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+    except Exception as e:
+        # Если база вылетела, пишем тебе, а не молчим
+        await msg.answer("❌ Ошибка базы данных. Попробуйте позже.", reply_markup=main_menu(msg.from_user.id))
+        try:
+            await bot.send_message(MAIN_ADMIN_ID, f"⚠️ <b>Ошибка при активации промокода!</b>\n<code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except: pass
 
 @dp.callback_query(F.data == "adm_promo")
 async def cb_adm_promo(cb: CallbackQuery):
@@ -804,7 +831,10 @@ async def process_promo_create(msg: Message, state: FSMContext):
     try:
         parts = msg.text.strip().split()
         if len(parts) != 4: raise ValueError()
-        code, req_amount, max_uses, days = parts[0].upper(), int(parts[1]), int(parts[2]), int(parts[3])
+        
+        # Чистим код от пробелов при создании
+        code = re.sub(r'[^A-Za-z0-9]', '', parts[0]).upper()
+        req_amount, max_uses, days = int(parts[1]), int(parts[2]), int(parts[3])
         
         expires_at = int(time.time()) + (days * 86400) if days > 0 else 0
         
@@ -820,9 +850,9 @@ async def process_promo_create(msg: Message, state: FSMContext):
                 VALUES ($1, $2, $3, $4, $5)
             """, code, req_amount, max_uses, expires_at, int(time.time()))
             
-        await msg.answer(f"✅ Промокод <code>{code}</code> создан!\n\n📦 Запросов: {req_amount}\n👥 Лимит активаций: {max_uses}\n⏳ Срок: {days if days > 0 else 'Бессрочно'}", parse_mode="HTML", reply_markup=promo_menu())
-    except:
-        await msg.answer("❌ Ошибка формата. Введи: КОД КОЛВО_ЗАПРОСОВ ЛИМИТ ДНЕЙ", reply_markup=promo_menu())
+        await msg.answer(f"✅ Промокод <code>{code}</code> создан!\n\n📦 Запросов: {req_amount}\n👥 Лимит: {max_uses}\n⏳ Срок: {days if days > 0 else 'Бессрочно'}", parse_mode="HTML", reply_markup=promo_menu())
+    except Exception as e:
+        await msg.answer(f"❌ Ошибка формата. Введи: КОД КОЛВО_ЗАПРОСОВ ЛИМИТ ДНЕЙ\n(Пример: TEST123 10 5 1)", reply_markup=promo_menu())
     await state.clear()
 
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
