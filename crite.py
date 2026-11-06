@@ -1,4 +1,4 @@
-# crite.py — СТАБИЛЬНАЯ ВЕРСИЯ (Без Maigret, PostgreSQL, Оплата, Примеры)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Без сайта, с админкой в меню)
 import asyncio
 import json
 import html
@@ -46,6 +46,7 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
+html_cache = {} # Хранилище для отчетов
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -112,7 +113,6 @@ WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
 
 🕵️ <b>Личность:</b>
 <code>Фамилия Имя Отчество 01.01.1990</code>
-<i>(Можно искать и по неполным данным: ФИО, возрасту или части даты рождения.)</i>
 
 📲 <b>Контакты:</b>
 <code>79123456789</code> – номер телефона
@@ -120,36 +120,19 @@ WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
 
 🚘 <b>Транспорт:</b>
 <code>А123БВ777</code> – номер автомобиля
-<code>XTA00000000000000</code> – VIN автомобиля
+<code>XTA00000000000000</code> – VIN
 
-💬 <b>Социальные сети:</b>
-<code>vk.com/username</code> – Вконтакте
-<code>tiktok.com/@username</code> – TikTok
-<code>instagram.com/username</code> – Instagram
-<code>ok.ru/profile/123456789</code> – Одноклассники
+💬 <b>Соцсети:</b>
+<code>vk.com/username</code>, <code>tiktok.com/@username</code>
 
 📟 <b>Telegram:</b>
-<code>@username</code>, <code>tg123456789</code> – логин или ID
+<code>@username</code>, <code>tg123456789</code>
 
 📄 <b>Документы:</b>
-<code>/vu 1234567890</code> – водительские права
-<code>/passport 1234567890</code> – паспорт
-<code>/snils 12345678901</code> – СНИЛС
-<code>/inn 123456789012</code> – ИНН
-
-🌐 <b>Онлайн-следы:</b>
-<code>/tag профессия город</code> – поиск по телефонным книгам
-<code>example.com</code> или <code>192.0.2.1</code> – домен или IP
+/vu, /passport, /snils, /inn
 
 🏚 <b>Недвижимость:</b>
-<code>/adr Город, Улица, 1</code>
-<code>77:01:0000000:1234</code> – кадастровый номер
-
-🏢 <b>Юридическое лицо:</b>
-<code>/inn 1234567890</code> – ИНН
-<code>1234567890123</code> – ОГРН или ОГРНИП
-
-📸 <i>Отправьте лицо человека, чтобы попробовать найти его.</i>"""
+/adr Город, Улица, 1, кадастровый номер"""
 
 def detect_type(query: str) -> str:
     q = query.strip()
@@ -163,7 +146,7 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
     timeout = aiohttp.ClientTimeout(total=25)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params, headers=headers, ssl=False) as resp:
+            async with session.get(url, params=params, headers=headers) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
                     if "Just a moment" not in raw:
@@ -206,48 +189,6 @@ def clean_data(obj):
     elif isinstance(obj, list):
         return [clean_data(v) for v in obj if v]
     return obj
-
-# --- API ДЛЯ САЙТА ---
-async def api_search_handler(request):
-    query = request.query.get("q")
-    if not query:
-        return web.json_response({"error": "Нет запроса"}, status=400)
-
-    api_results = await query_all_apis(query)
-    if not api_results:
-        return web.json_response({"error": "Ничего не найдено"}, status=404)
-
-    all_items = []
-    for res in api_results:
-        data = clean_data(res["data"])
-        results_dict = data.get("results", {})
-        items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        for src_data in items:
-            if not isinstance(src_data, dict): continue
-            inner = src_data.get("result", {}).get("data", {}).get("results", {})
-            if isinstance(inner, dict): all_items.append(inner)
-            elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
-
-    categorized = {"phones": set(), "names": set(), "emails": set(), "addresses": set(), "socials": set(), "passports": set(), "inn": set(), "snils": set(), "banks": set(), "other": set()}
-
-    for item in all_items:
-        for k, v in item.items():
-            k_lower = k.lower()
-            val = str(v)
-            if k_lower in ("phone", "phone_2"): categorized["phones"].add(val)
-            elif k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername"): categorized["names"].add(val)
-            elif k_lower in ("email", "emails"): categorized["emails"].add(val)
-            elif k_lower in ("address", "addresses", "region", "city"): categorized["addresses"].add(val)
-            elif k_lower in ("telegram", "vk", "instagram", "tiktok"): categorized["socials"].add(val)
-            elif k_lower == "passport": categorized["passports"].add(val)
-            elif k_lower == "inn": categorized["inn"].add(val)
-            elif k_lower == "snils": categorized["snils"].add(val)
-            elif "банк" in val.lower() or "bank" in k_lower: categorized["banks"].add(val)
-            elif isinstance(v, str) and len(v) < 100: categorized["other"].add(val)
-
-    for k in categorized: categorized[k] = list(categorized[k])
-
-    return web.json_response({"query": query, "data": categorized, "total_records": len(all_items)}, headers={"Access-Control-Allow-Origin": "*"})
 
 # --- РЕНДЕР ---
 def render_text_results(api_results: list[dict]) -> str:
@@ -363,13 +304,17 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     {details_html}</div></body></html>"""
 
 # --- МЕНЮ ---
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
+def main_menu(user_id=None):
+    kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
         [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu")],
         [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
-        [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
-    ])
+        [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
+    ]
+    if user_id == MAIN_ADMIN_ID:
+        kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
+        
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def search_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -397,7 +342,14 @@ async def start(msg: Message, command: CommandStart):
 
     total_users = await get_total_users()
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
-    await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu())
+    await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+
+@dp.callback_query(F.data == "admin_panel")
+async def cb_admin_panel(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: 
+        return await cb.answer("⛔ Нет доступа", show_alert=True)
+    await cb.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
+    await cb.answer()
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
@@ -447,7 +399,7 @@ async def cb_terms(cb: CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
+    await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu(cb.from_user.id))
     await cb.answer()
 
 @dp.callback_query(F.data == "buy_menu")
@@ -552,7 +504,7 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     if len(tx_hash) < 10:
         return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
         
-    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu())
+    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id))
     
     admin_text = (
         f"💰 <b>Новая заявка на оплату!</b>\n\n"
@@ -573,7 +525,7 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
     _, uid, amount = cb.data.split("_")
     await add_requests(int(uid), int(amount))
     await cb.message.edit_text(f"✅ Начислено {amount} запросов для {uid}.")
-    try: await bot.send_message(int(uid), f"✅ <b>Оплата подтверждена!</b>\nНачислено <b>+{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu())
+    try: await bot.send_message(int(uid), f"✅ <b>Оплата подтверждена!</b>\nНачислено <b>+{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu(int(uid)))
     except: pass
     await cb.answer()
 
@@ -582,7 +534,7 @@ async def admin_reject(cb: CallbackQuery, bot: Bot):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
     _, uid = cb.data.split("_")
     await cb.message.edit_text(f"❌ Отклонено для {uid}.")
-    try: await bot.send_message(int(uid), "❌ Оплата отклонена. Свяжитесь с поддержкой.", reply_markup=main_menu())
+    try: await bot.send_message(int(uid), "❌ Оплата отклонена. Свяжитесь с поддержкой.", reply_markup=main_menu(int(uid)))
     except: pass
     await cb.answer()
 
@@ -594,14 +546,14 @@ async def admin_panel(msg: Message):
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите `ID количество`:", parse_mode="Markdown")
+    await cb.message.edit_text("Введите <code>ID количество</code>:", parse_mode="HTML")
     await state.set_state(AdminStates.give_reqs)
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_take")
 async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите `ID количество` для списания:", parse_mode="Markdown")
+    await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML")
     await state.set_state(AdminStates.take_reqs)
     await cb.answer()
 
@@ -621,7 +573,7 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
             )
         
         await msg.answer(f"✅ Выдано {amount} для {uid}. Баланс: {new_bal}", reply_markup=admin_menu())
-        try: await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu())
+        try: await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid))
         except: pass
     except:
         await msg.answer("❌ Ошибка формата.")
@@ -639,18 +591,21 @@ async def process_take(msg: Message, state: FSMContext):
 
 async def process_search(msg: Message, q: str):
     if not await deduct_request(msg.from_user.id):
-        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu())
+        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id))
 
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
     if not api_results:
         await add_requests(msg.from_user.id, 1)
-        return await note.edit_text("❌ Все базы вернули ошибку.")
+        return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📄 HTML-отчет", callback_data=f"html_{q[:40]}")]])
+    
+    report_id = str(random.randint(100000, 999999))
+    html_cache[report_id] = q
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📄 HTML-отчет", callback_data=f"html_{report_id}")]])
     
     await note.edit_text(f"<b>Oasis Search</b>\n├ Запрос: {html.escape(q)}\n└ Тип: Nonfull\n\n{text_report}\n\n💰 Остаток: {bal}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
 
@@ -663,11 +618,16 @@ async def auto_search(msg: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("html_"))
 async def send_html_file(cb: CallbackQuery):
-    q = cb.data.replace("html_", "")
+    report_id = cb.data.replace("html_", "")
+    q = html_cache.get(report_id)
+    
+    if not q:
+        return await cb.answer("Отчёт устарел, сделайте новый запрос.", show_alert=True)
+        
     await cb.answer("Генерирую...")
     note = await cb.message.reply("⏳ Собираю...")
     api_results = await query_all_apis(q)
-    if not api_results: return await note.edit_text("❌ Устарело.")
+    if not api_results: return await note.edit_text("❌ Данные устарели или ошибка.")
     file = BufferedInputFile(build_html_report(api_results, q).encode('utf-8'), filename=f"oasis_{q[:10]}.html")
     await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
     await note.delete()
@@ -685,7 +645,7 @@ def main():
     dp.startup.register(on_startup)
     app = web.Application()
     app.router.add_get("/", health_check)
-    app.router.add_get("/api/search", api_search_handler)
+    # Строка с сайтом удалена
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
