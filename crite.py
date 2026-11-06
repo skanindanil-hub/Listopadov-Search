@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Рабочие промокоды + Веб-отчеты)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Промокоды без /start + Автосоздание юзера)
 import asyncio
 import json
 import html
@@ -101,7 +101,7 @@ async def add_user(user_id, username, referrer_id=None):
         row = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
         if row: return False
         await conn.execute("""
-            INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at)
+            INSERT INTO users (user_id, username, requests_left, 3, referrer_id, joined_at)
             VALUES ($1, $2, 3, $3, $4)
         """, user_id, username, referrer_id, int(time.time()))
         return True
@@ -122,6 +122,11 @@ async def deduct_request(user_id) -> bool:
 
 async def add_requests(user_id, amount):
     async with db_pool.acquire() as conn:
+        # ПРОВЕРКА: если юзера нет, создаем его
+        user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
+        if not user:
+            await conn.execute("INSERT INTO users (user_id, username, requests_left, joined_at) VALUES ($1, 'unknown', 0, $2)", user_id, int(time.time()))
+        # Начисляем баланс
         await conn.execute("UPDATE users SET requests_left = requests_left + $1 WHERE user_id=$2", amount, user_id)
 
 async def get_invited_count(user_id) -> int:
@@ -759,7 +764,7 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
         if promo['current_uses'] >= promo['max_uses']:
             return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_menu(msg.from_user.id))
             
-        # Начисляем баланс через рабочую функцию
+        # Начисляем баланс (автосоздание юзера внутри)
         await add_requests(msg.from_user.id, promo['req_amount'])
         
         # Обновляем счетчик и записываем активацию
@@ -874,10 +879,20 @@ async def process_search(msg: Message, q: str):
     )
 
 @dp.message()
-async def auto_search(msg: Message, state: FSMContext):
+async def auto_search(msg: Message, state: FSMContext, bot: Bot):
     if msg.text and not msg.text.startswith("/"):
         current_state = await state.get_state()
         if current_state is not None: return
+        
+        # Если юзер не нажимал /start, но написал промокод в чат - бот попробует его активировать
+        code = re.sub(r'[^A-Za-z0-9]', '', msg.text).upper()
+        async with db_pool.acquire() as conn:
+            promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
+            if promo:
+                # Вызываем активацию
+                return await process_promo_code(msg, state, bot)
+        
+        # Если это не промокод - делаем поиск
         await process_search(msg, msg.text.strip())
 
 @dp.callback_query(F.data.startswith("html_"))
