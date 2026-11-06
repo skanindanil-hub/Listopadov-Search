@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ + ВЕБ-ОТЧЕТЫ
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Веб-отчеты + Промокоды)
 import asyncio
 import json
 import html
@@ -7,9 +7,11 @@ import os
 import time
 import logging
 import random
+import string
 import asyncpg
 import aiohttp
 from aiohttp import web
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
@@ -47,7 +49,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
 html_cache = {} 
-report_cache = {} # Хранилище для веб-отчетов: {id: {"query": q, "results": api_results}}
+report_cache = {} 
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -57,6 +59,10 @@ class BuyStates(StatesGroup):
 class AdminStates(StatesGroup):
     give_reqs = State()
     take_reqs = State()
+    promo_create = State()
+
+class PromoStates(StatesGroup):
+    wait_code = State()
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
@@ -70,6 +76,24 @@ async def init_db():
                 requests_left INTEGER DEFAULT 3,
                 referrer_id BIGINT,
                 joined_at INTEGER
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS promocodes (
+                code TEXT PRIMARY KEY,
+                req_amount INTEGER,
+                max_uses INTEGER,
+                current_uses INTEGER DEFAULT 0,
+                expires_at BIGINT,
+                created_at BIGINT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS promo_uses (
+                user_id BIGINT,
+                code TEXT,
+                used_at BIGINT,
+                PRIMARY KEY (user_id, code)
             )
         """)
 
@@ -191,59 +215,84 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- РЕНДЕР ---
+# --- ПАРСЕР И РЕНДЕР ДЛЯ ТЕЛЕГРАМА ---
 def render_text_results(api_results: list[dict]) -> str:
-    all_items = []
+    fio, genders, dates = set(), set(), set()
+    phones, emails, socials, docs, addresses, others = set(), set(), set(), set(), set(), set()
+
+    TRANSLATIONS = {
+        "surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", 
+        "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
+        "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
+        "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
+        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш"
+    }
+
+    def extract_recursive(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                k_lower = str(k).lower()
+                if isinstance(v, (str, int)):
+                    val_str = str(v)
+                    if not val_str.strip(): continue
+                    
+                    if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
+                        if len(val_str) > 2: fio.add(val_str)
+                    elif k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
+                    elif k_lower in ("email", "mail"): emails.add(val_str)
+                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
+                    elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
+                    elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
+                    elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
+                    elif k_lower in ("address", "region"): addresses.add(val_str)
+                    else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
+                else:
+                    extract_recursive(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_recursive(item)
+
     for res in api_results:
-        data = clean_data(res["data"])
-        results_dict = data.get("results", {})
-        items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        for src_data in items:
-            if not isinstance(src_data, dict): continue
-            inner = src_data.get("result", {}).get("data", {}).get("results", {})
-            if isinstance(inner, dict): all_items.append(inner)
-            elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
-
-    fio, phones, emails, vk, birth_dates, genders = set(), set(), set(), set(), set(), set()
-
-    for item in all_items:
-        for k, v in item.items():
-            k_lower = k.lower()
-            val = str(v)
-            if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio"): fio.add(val)
-            elif k_lower in ("phone", "phone_2"): phones.add(val)
-            elif k_lower in ("email", "emails"): emails.add(val)
-            elif k_lower == "vk": vk.add(val)
-            elif k_lower in ("birthday", "birth_date", "date"): birth_dates.add(val)
-            elif k_lower == "gender": genders.add("Мужской" if val.lower() in ("m", "male", "мужской") else "Женский")
+        extract_recursive(res.get("data", {}))
 
     lines = []
-    main_info = []
-    if fio: main_info.append(f"├ ФИО: {', '.join(fio)}")
-    if genders: main_info.append(f"├ Пол: {', '.join(genders)}")
-    if birth_dates: main_info.append(f"└ Дата рождения: {', '.join(birth_dates)}")
-    
-    if main_info:
+    if fio or genders or dates:
         lines.append("👤 <b>Основные данные</b>")
-        lines.extend(main_info)
+        if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
+        if genders: lines.append(f"├ Пол: {', '.join(genders)}")
+        if dates: lines.append(f"├ Дата рождения: {', '.join(dates)}")
+        lines.append("")
+        
+    if phones or emails:
+        lines.append("📞 <b>Контакты</b>")
+        if phones: lines.append(f"├ Телефоны: {', '.join(phones)}")
+        if emails: lines.append(f"├ E-mail: {', '.join(emails)}")
         lines.append("")
 
-    if phones:
-        lines.append(f"📞 Телефоны: {', '.join(phones)}")
+    if socials:
+        lines.append("🌐 <b>Социальные сети</b>")
+        for s in socials: lines.append(f"├ {s}")
         lines.append("")
 
-    if vk:
-        vk_link = [f"https://vk.com/{v}" if not v.startswith("http") else v for v in vk]
-        lines.append(f"🌐 ВКонтакте: {', '.join(vk_link)}")
+    if addresses:
+        lines.append("🏠 <b>Адреса</b>")
+        for a in addresses: lines.append(f"├ {a}")
         lines.append("")
 
-    if emails:
-        lines.append(f"📧 E-mail: {', '.join(emails)}")
+    if docs:
+        lines.append("📄 <b>Документы</b>")
+        for d in docs: lines.append(f"├ {d}")
         lines.append("")
 
-    if not lines: return "🔍 Данных не найдено."
+    if others:
+        lines.append("🗂 <b>Прочие данные</b>")
+        for o in others: lines.append(f"├ {o}")
+        lines.append("")
 
-    return "\n".join(lines)
+    if not lines: 
+        return "🔍 <b>Данных не найдено.</b>\nВ базах нет информации по этому запросу."
+
+    return "\n".join(lines).strip()
 
 def build_html_report(api_results: list[dict], query: str) -> str:
     all_items = []
@@ -256,60 +305,143 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             inner = src_data.get("result", {}).get("data", {}).get("results", {})
             if isinstance(inner, dict): all_items.append(inner)
             elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
-    total_records = len(all_items)
-    TRANSLATIONS = {"surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", "data": "Источник", "database": "База данных", "login": "Логин", "region": "Регион", "snils": "СНИЛС", "snils_2": "СНИЛС (доп)", "inn": "ИНН", "passport": "Паспорт", "email": "Email", "date": "Дата"}
-    details_html = ""
+
+    fio, genders, dates = set(), set(), set()
+    phones, emails, socials, docs, addresses, others = set(), set(), set(), set(), set(), set()
+
+    TRANSLATIONS = {
+        "surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", 
+        "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
+        "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
+        "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
+        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш"
+    }
+
     for item in all_items:
-        title = "Источник данных"
-        if "database" in item: title = item["database"]
-        elif "source" in item: title = item["source"]
-        elif "name" in item: title = item["name"]
-        details_html += f'<div class="detail-card"><div class="detail-title">{html.escape(str(title))}</div><div class="detail-content">'
         for k, v in item.items():
-            if k in ("id", "profile_url", "source", "name", "database"): continue
+            k_lower = k.lower()
             if isinstance(v, list):
-                if not v: continue
-                val_str = ", ".join([html.escape(str(i)) for i in v])
+                for i in v:
+                    val_str = str(i)
+                    if k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
+                    elif k_lower in ("email", "mail"): emails.add(val_str)
+                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
+                    elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
+                    elif k_lower in ("address", "region"): addresses.add(val_str)
+                    else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
             elif isinstance(v, dict): continue
             else:
                 if v is None or v == "": continue
-                val_str = html.escape(str(v))
-            details_html += f'<div class="detail-row"><span class="d-key">{TRANSLATIONS.get(k.lower(), k.capitalize())}</span><span class="d-val">{val_str}</span></div>'
-        details_html += '</div></div>'
-    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет Oasis Search: {html.escape(query)}</title>
-    <style>
-        :root {{ --bg: #f8f9fa; --card-bg: #ffffff; --text: #111827; --text-muted: #6b7280; --border: #e5e7eb; }}
-        body {{ font-family: -apple-system, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.5; }}
-        .container {{ max-width: 600px; margin: 0 auto; }}
-        .header {{ margin-bottom: 20px; }}
-        .logo {{ font-weight: bold; font-size: 18px; margin-bottom: 20px; color: #2563eb; }}
-        .main-card {{ background: var(--card-bg); border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid var(--border); }}
-        .query-val {{ font-size: 24px; font-weight: 700; margin-bottom: 5px; }}
-        .query-time {{ color: var(--text-muted); font-size: 14px; margin-bottom: 20px; }}
-        .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
-        .stat-box {{ background: var(--bg); padding: 12px; border-radius: 8px; border: 1px solid var(--border); }}
-        .stat-label {{ color: var(--text-muted); font-size: 12px; text-transform: uppercase; margin-bottom: 4px; }}
-        .stat-value {{ font-size: 20px; font-weight: 600; }}
-        .detail-card {{ background: var(--card-bg); border-radius: 12px; margin-bottom: 15px; overflow: hidden; border: 1px solid var(--border); }}
-        .detail-title {{ padding: 15px; font-weight: 600; font-size: 16px; border-bottom: 1px solid var(--border); background: #eff6ff; color: #1e40af;}}
-        .detail-content {{ padding: 0 15px; }}
-        .detail-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px dashed var(--border); font-size: 14px; }}
-        .detail-row:last-child {{ border-bottom: none; }}
-        .d-key {{ color: var(--text-muted); width: 40%; }}
-        .d-val {{ font-weight: 500; text-align: right; max-width: 60%; word-break: break-word; }}
-    </style></head><body><div class="container">
-    <div class="header"><div class="logo">🕵️ OASIS SEARCH</div>
-    <div class="main-card"><div class="query-val">{html.escape(query)}</div><div class="query-time">Отчет сгенерирован</div>
-    <div class="stats-grid"><div class="stat-box"><div class="stat-label">ИСТОЧНИКОВ</div><div class="stat-value">{len(api_results)}</div></div>
-    <div class="stat-box"><div class="stat-label">ЗАПИСЕЙ</div><div class="stat-value">{total_records}</div></div></div></div></div>
-    {details_html}</div></body></html>"""
+                val_str = str(v)
+                if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
+                    if len(val_str) > 2: fio.add(val_str)
+                elif k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
+                elif k_lower in ("email", "mail"): emails.add(val_str)
+                elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
+                elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
+                elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
+                elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
+                elif k_lower in ("address", "region"): addresses.add(val_str)
+                else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
+
+    def make_list(data_set, icon):
+        if not data_set:
+            return f'<div class="empty-state">Нет данных</div>'
+        items_html = "".join([f'<div class="data-row"><span class="d-icon">{icon}</span><span class="d-val">{html.escape(str(val))}</span></div>' for val in data_set])
+        return f'<div class="data-group">{items_html}</div>'
+
+    main_name = list(fio)[0] if fio else query
+    initial = main_name[0].upper() if main_name else "?"
+
+    details_html = f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Oasis Report: {html.escape(query)}</title>
+        <style>
+            :root {{ --bg: #0d1117; --card-bg: #161b22; --text: #c9d1d9; --accent: #58a6ff; --success: #238636; --border: #30363d; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.5; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .profile-header {{ display: flex; align-items: center; gap: 20px; background: var(--card-bg); border-radius: 16px; padding: 24px; border: 1px solid var(--border); margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
+            .avatar {{ width: 80px; height: 80px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), #a371f7); display: flex; justify-content: center; align-items: center; font-size: 32px; font-weight: bold; color: #fff; box-shadow: 0 0 15px rgba(88, 166, 255, 0.4); flex-shrink: 0; }}
+            .profile-info h1 {{ margin: 0 0 8px 0; font-size: 24px; color: #fff; }}
+            .tags {{ display: flex; gap: 8px; flex-wrap: wrap; }}
+            .tag {{ background: rgba(88, 166, 255, 0.1); color: var(--accent); padding: 4px 10px; border-radius: 20px; font-size: 13px; border: 1px solid rgba(88, 166, 255, 0.2); }}
+            .tabs {{ display: flex; gap: 8px; margin-bottom: 20px; overflow-x: auto; padding-bottom: 5px; }}
+            .tabs::-webkit-scrollbar {{ height: 6px; }}
+            .tabs::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
+            .tab {{ padding: 10px 20px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; color: var(--text); transition: all 0.2s; white-space: nowrap; user-select: none; }}
+            .tab:hover {{ background: #21262d; }}
+            .tab.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+            .tab-content {{ display: none; }}
+            .tab-content.active {{ display: block; animation: fadeIn 0.3s ease-in-out; }}
+            @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(5px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+            .data-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }}
+            .data-header {{ background: #1f242c; padding: 12px 20px; font-weight: 600; color: #fff; border-bottom: 1px solid var(--border); }}
+            .data-group {{ padding: 10px 20px; }}
+            .data-row {{ display: flex; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border); }}
+            .data-row:last-child {{ border-bottom: none; }}
+            .d-icon {{ width: 24px; margin-right: 12px; opacity: 0.7; }}
+            .d-val {{ font-family: monospace; font-size: 14px; word-break: break-all; }}
+            .empty-state {{ padding: 20px; text-align: center; color: #8b949e; font-style: italic; }}
+            .footer {{ text-align: center; margin-top: 40px; color: #8b949e; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="profile-header">
+                <div class="avatar">{html.escape(initial)}</div>
+                <div class="profile-info">
+                    <h1>{html.escape(main_name)}</h1>
+                    <div class="tags">
+                        <span class="tag">🔍 Поиск: {html.escape(query)}</span>
+                        {f'<span class="tag">🎂 {html.escape(list(dates)[0])}</span>' if dates else ''}
+                        {f'<span class="tag">⚧ {html.escape(list(genders)[0])}</span>' if genders else ''}
+                    </div>
+                </div>
+            </div>
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab(event, 'tab-main')">📞 Контакты</div>
+                <div class="tab" onclick="switchTab(event, 'tab-social')">🌐 Соцсети</div>
+                <div class="tab" onclick="switchTab(event, 'tab-docs')">📄 Документы</div>
+                <div class="tab" onclick="switchTab(event, 'tab-other')">🗂 Прочее</div>
+            </div>
+            <div id="tab-main" class="tab-content active">
+                <div class="data-card"><div class="data-header">📞 Телефоны</div>{make_list(phones, "📱")}</div>
+                <div class="data-card"><div class="data-header">📧 Почта</div>{make_list(emails, "✉️")}</div>
+                <div class="data-card"><div class="data-header">🏠 Адреса</div>{make_list(addresses, "📍")}</div>
+            </div>
+            <div id="tab-social" class="tab-content">
+                <div class="data-card"><div class="data-header">🌐 Социальные сети</div>{make_list(socials, "🔗")}</div>
+            </div>
+            <div id="tab-docs" class="tab-content">
+                <div class="data-card"><div class="data-header">📄 Документы</div>{make_list(docs, "🪪")}</div>
+            </div>
+            <div id="tab-other" class="tab-content">
+                <div class="data-card"><div class="data-header">🗂 Прочие данные</div>{make_list(others, "🔹")}</div>
+            </div>
+            <div class="footer">Oasis Search • Отчет сгенерирован автоматически • {len(api_results)} источников</div>
+        </div>
+        <script>
+            function switchTab(evt, tabId) {{
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                evt.currentTarget.classList.add('active');
+                document.getElementById(tabId).classList.add('active');
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    return details_html
 
 # --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
 async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
         return web.Response(text="<h1>404 Отчет не найден или устарел</h1><p>Сгенерируйте новый в боте.</p>", content_type="text/html", status=404)
-    
     data = report_cache[report_id]
     html_content = build_html_report(data["results"], data["query"])
     return web.Response(text=html_content, content_type="text/html")
@@ -318,13 +450,12 @@ async def web_report_handler(request):
 def main_menu(user_id=None):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
-        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu")],
+        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎟 Промокод", callback_data="enter_promo")],
         [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
         [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
     ]
     if user_id == MAIN_ADMIN_ID:
         kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
-        
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def search_menu():
@@ -336,7 +467,15 @@ def search_menu():
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+    ])
+
+def promo_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="promo_create")],
+        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="promo_list")],
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
     ])
 
 @dp.message(CommandStart())
@@ -369,16 +508,7 @@ async def cb_profile(cb: CallbackQuery):
     total_users = await get_total_users()
     uname = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
     status = "👑 Админ" if cb.from_user.id == MAIN_ADMIN_ID else "👤 Юзер"
-    
-    text = (
-        f"👤 <b>Профиль</b>\n\n"
-        f"🆔 ID: <code>{cb.from_user.id}</code>\n"
-        f"📛 Юзер: {uname}\n"
-        f"🎖 Статус: {status}\n"
-        f"💳 Баланс: <code>{bal}</code> запросов\n"
-        f"👥 Приглашено: <b>{ref_count}</b>\n\n"
-        f"📈 Всего в боте: <b>{total_users}</b> юзеров"
-    )
+    text = (f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n📛 Юзер: {uname}\n🎖 Статус: {status}\n💳 Баланс: <code>{bal}</code> запросов\n👥 Приглашено: <b>{ref_count}</b>\n\n📈 Всего в боте: <b>{total_users}</b> юзеров")
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
@@ -430,7 +560,6 @@ async def cb_buy_package(cb: CallbackQuery, state: FSMContext):
     amount = int(cb.data.split("_")[1])
     total_ton = amount * PRICE_PER_REQ_TON
     await state.update_data(buy_amount=amount, total_ton=total_ton)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
         [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
@@ -497,11 +626,7 @@ async def process_currency(cb: CallbackQuery, state: FSMContext):
 async def cb_paid(cb: CallbackQuery, state: FSMContext):
     _, amount, total_ton, currency = cb.data.split("_")
     await state.update_data(buy_amount=amount, total_ton=total_ton, currency=currency)
-    
-    await cb.message.edit_text(
-        "📩 <b>Отправь хеш транзакции</b>\n\n"
-        "Скопируй хеш перевода в кошельке и отправь его сюда одним сообщением."
-    )
+    await cb.message.edit_text("📩 <b>Отправь хеш транзакции</b>\n\nСкопируй хеш перевода в кошельке и отправь его сюда одним сообщением.")
     await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
@@ -600,6 +725,102 @@ async def process_take(msg: Message, state: FSMContext):
         await msg.answer("❌ Ошибка формата.")
     await state.clear()
 
+# --- ПРОМОКОДЫ ---
+@dp.callback_query(F.data == "enter_promo")
+async def cb_enter_promo(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("🎟 <b>Активация промокода</b>\n\nОтправь промокод одним сообщением в чат:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]]))
+    await state.set_state(PromoStates.wait_code)
+    await cb.answer()
+
+@dp.message(PromoStates.wait_code)
+async def process_promo_code(msg: Message, state: FSMContext):
+    code = msg.text.strip()
+    await state.clear()
+    
+    async with db_pool.acquire() as conn:
+        # Проверяем, не активировал ли уже
+        used = await conn.fetchrow("SELECT * FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
+        if used:
+            return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id))
+            
+        promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
+        if not promo:
+            return await msg.answer("❌ Промокод не найден.", reply_markup=main_menu(msg.from_user.id))
+            
+        if promo['expires_at'] > 0 and promo['expires_at'] < int(time.time()):
+            return await msg.answer("❌ Срок действия промокода истек.", reply_markup=main_menu(msg.from_user.id))
+            
+        if promo['current_uses'] >= promo['max_uses']:
+            return await msg.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_menu(msg.from_user.id))
+            
+        # Активируем
+        await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
+        await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
+        await add_requests(msg.from_user.id, promo['req_amount'])
+        
+        new_bal = await get_balance(msg.from_user.id)
+        
+    await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nТекущий баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+
+@dp.callback_query(F.data == "adm_promo")
+async def cb_adm_promo(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("🎟 <b>Управление промокодами</b>", parse_mode="HTML", reply_markup=promo_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "promo_list")
+async def cb_promo_list(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    async with db_pool.acquire() as conn:
+        promos = await conn.fetch("SELECT * FROM promocodes ORDER BY created_at DESC LIMIT 20")
+    
+    if not promos:
+        return await cb.message.edit_text("Список промокодов пуст.", reply_markup=promo_menu())
+        
+    text = "🎟 <b>Последние промокоды:</b>\n\n"
+    for p in promos:
+        exp = datetime.fromtimestamp(p['expires_at']).strftime('%d.%m.%Y') if p['expires_at'] > 0 else "Бессрочно"
+        status = "🔴" if p['expires_at'] > 0 and p['expires_at'] < int(time.time()) or p['current_uses'] >= p['max_uses'] else "🟢"
+        text += f"{status} <code>{p['code']}</code> | +{p['req_amount']} req | {p['current_uses']}/{p['max_uses']} | до {exp}\n"
+        
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=promo_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "promo_create")
+async def cb_promo_create(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("Введи данные промокода в формате:\n<code>КОД КОЛВО_ЗАПРОСОВ ЛИМИТ_АКТИВАЦИЙ ДНЕЙ</code>\n\nПример:\n<code>OASIS 10 50 7</code>\n(Код OASIS, 10 запросов, 50 активаций, действует 7 дней)\n\n<i>Для бессрочного введи 0 в конце.</i>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_promo")]]))
+    await state.set_state(AdminStates.promo_create)
+    await cb.answer()
+
+@dp.message(AdminStates.promo_create)
+async def process_promo_create(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    try:
+        parts = msg.text.strip().split()
+        if len(parts) != 4: raise ValueError()
+        code, req_amount, max_uses, days = parts[0].upper(), int(parts[1]), int(parts[2]), int(parts[3])
+        
+        expires_at = int(time.time()) + (days * 86400) if days > 0 else 0
+        
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetchrow("SELECT code FROM promocodes WHERE code=$1", code)
+            if existing:
+                await msg.answer("❌ Такой промокод уже существует. Придумай другой код.", reply_markup=promo_menu())
+                await state.clear()
+                return
+                
+            await conn.execute("""
+                INSERT INTO promocodes (code, req_amount, max_uses, expires_at, created_at)
+                VALUES ($1, $2, $3, $4, $5)
+            """, code, req_amount, max_uses, expires_at, int(time.time()))
+            
+        await msg.answer(f"✅ Промокод <code>{code}</code> создан!\n\n📦 Запросов: {req_amount}\n👥 Лимит активаций: {max_uses}\n⏳ Срок: {days if days > 0 else 'Бессрочно'}", parse_mode="HTML", reply_markup=promo_menu())
+    except:
+        await msg.answer("❌ Ошибка формата. Введи: КОД КОЛВО_ЗАПРОСОВ ЛИМИТ ДНЕЙ", reply_markup=promo_menu())
+    await state.clear()
+
+# --- ПОИСК И ГЕНЕРАЦИЯ ---
 async def process_search(msg: Message, q: str):
     if not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id))
@@ -614,21 +835,30 @@ async def process_search(msg: Message, q: str):
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
     
-    # Кэш для HTML файла
     report_id = str(random.randint(100000, 999999))
     html_cache[report_id] = q
     
-    # Кэш для Веб-отчета (ссылка)
     web_id = str(random.randint(1000000, 9999999))
     report_cache[web_id] = {"query": q, "results": api_results}
     web_link = f"{WEBHOOK_HOST}/report/{web_id}"
     
+    raw_id = str(random.randint(10000, 99999))
+    html_cache[raw_id] = json.dumps(api_results, indent=2, ensure_ascii=False)
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Веб-отчет", url=web_link)],
-        [InlineKeyboardButton(text="📄 HTML-файл", callback_data=f"html_{report_id}")]
+        [InlineKeyboardButton(text="📄 HTML-файл", callback_data=f"html_{report_id}")],
+        [InlineKeyboardButton(text="📝 Сырой JSON", callback_data=f"raw_{raw_id}")]
     ])
     
-    await note.edit_text(f"<b>Oasis Search</b>\n├ Запрос: {html.escape(q)}\n└ Тип: Nonfull\n\n{text_report}\n\n💰 Остаток: {bal}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb)
+    await note.edit_text(
+        f"<b>Oasis Search</b>\n"
+        f"├ Запрос: {html.escape(q)}\n"
+        f"└ Тип: Nonfull\n\n"
+        f"{text_report}\n\n"
+        f"💰 Остаток: {bal}", 
+        parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb
+    )
 
 @dp.message()
 async def auto_search(msg: Message, state: FSMContext):
@@ -653,6 +883,19 @@ async def send_html_file(cb: CallbackQuery):
     await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
     await note.delete()
 
+@dp.callback_query(F.data.startswith("raw_"))
+async def send_raw_json(cb: CallbackQuery):
+    raw_id = cb.data.replace("raw_", "")
+    raw_text = html_cache.get(raw_id)
+    if not raw_text:
+        return await cb.answer("Устарело", show_alert=True)
+    
+    if len(raw_text) > 3000:
+        raw_text = raw_text[:3000] + "\n\n... (обрезано)"
+        
+    await cb.message.answer(f"<pre>{html.escape(raw_text)}</pre>", parse_mode="HTML")
+    await cb.answer()
+
 async def on_startup(bot: Bot):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
@@ -666,7 +909,7 @@ def main():
     dp.startup.register(on_startup)
     app = web.Application()
     app.router.add_get("/", health_check)
-    app.router.add_get("/report/{report_id}", web_report_handler) # Новый путь для веб-отчетов
+    app.router.add_get("/report/{report_id}", web_report_handler)
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
