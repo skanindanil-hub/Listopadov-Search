@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Рабочий парсер + Обработка ошибок)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Чистый парсер + Админы + Текстовый отчет)
 import asyncio
 import json
 import html
@@ -61,6 +61,8 @@ class AdminStates(StatesGroup):
     give_reqs = State()
     take_reqs = State()
     promo_create = State()
+    add_admin = State()
+    del_admin = State()
 
 class PromoStates(StatesGroup):
     wait_code = State()
@@ -97,6 +99,18 @@ async def init_db():
                 PRIMARY KEY (user_id, code)
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY,
+                added_at INTEGER
+            )
+        """)
+
+async def is_admin(user_id):
+    if user_id == MAIN_ADMIN_ID: return True
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
+        return bool(row)
 
 async def add_user(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
@@ -109,13 +123,13 @@ async def add_user(user_id, username, referrer_id=None):
         return True
 
 async def get_balance(user_id) -> int:
-    if user_id == MAIN_ADMIN_ID: return 999999
+    if await is_admin(user_id): return 999999
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT requests_left FROM users WHERE user_id=$1", user_id)
         return row['requests_left'] if row else 0
 
 async def deduct_request(user_id) -> bool:
-    if user_id == MAIN_ADMIN_ID: return True
+    if await is_admin(user_id): return True
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT requests_left FROM users WHERE user_id=$1", user_id)
         if not row or row['requests_left'] <= 0: return False
@@ -173,7 +187,7 @@ def detect_type(query: str) -> str:
 
 async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
-    raw = "" # Инициализируем, чтобы не было ошибки
+    raw = ""
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params, headers=headers) as resp:
@@ -263,37 +277,40 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ПАРСЕР И РЕНДЕР ДЛЯ ТЕЛЕГРАМА ---
+# --- ОЧЕНЬ УМНЫЙ ПАРСЕР ---
 def render_text_results(api_results: list[dict]) -> str:
-    fio, genders, dates = set(), set(), set()
-    phones, emails, socials, docs, addresses, others = set(), set(), set(), set(), set(), set()
-
-    TRANSLATIONS = {
-        "surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", 
-        "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
-        "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
-        "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
-        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО"
-    }
+    fio, genders, dates, ages = set(), set(), set(), set()
+    phones, operators, regions, countries = set(), set(), set(), set()
+    emails, socials, docs, addresses, others = set(), set(), set(), set(), set()
 
     def extract_recursive(obj):
         if isinstance(obj, dict):
+            # Сначала обрабатываем словари с названиями (чтобы не было мусора)
             for k, v in obj.items():
                 k_lower = str(k).lower()
+                
+                # Пропускаем технический мусор
+                if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result"):
+                    continue
+                    
                 if isinstance(v, (str, int)):
                     val_str = str(v)
                     if not val_str.strip(): continue
                     
                     if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
                         if len(val_str) > 2: fio.add(val_str)
-                    elif k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
+                    elif k_lower in ("phone", "phone_2", "mobile", "number"): phones.add(val_str)
+                    elif k_lower == "operator": operators.add(val_str)
+                    elif k_lower == "region": regions.add(val_str)
+                    elif k_lower == "country": countries.add(val_str)
                     elif k_lower in ("email", "mail"): emails.add(val_str)
-                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
+                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
                     elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
+                    elif k_lower == "age": ages.add(val_str)
                     elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
-                    elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
-                    elif k_lower in ("address", "region"): addresses.add(val_str)
-                    else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
+                    elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number"): docs.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("address",): addresses.add(val_str)
+                    else: others.add(f"{k.capitalize()}: {val_str}")
                 else:
                     extract_recursive(v)
         elif isinstance(obj, list):
@@ -304,45 +321,73 @@ def render_text_results(api_results: list[dict]) -> str:
         extract_recursive(res.get("data", {}))
 
     lines = []
-    if fio or genders or dates:
-        lines.append("👤 <b>Основные данные</b>")
-        if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
-        if genders: lines.append(f"├ Пол: {', '.join(genders)}")
-        if dates: lines.append(f"├ Дата рождения: {', '.join(dates)}")
-        lines.append("")
-        
-    if phones or emails:
-        lines.append("📞 <b>Контакты</b>")
-        if phones: lines.append(f"├ Телефоны: {', '.join(phones)}")
-        if emails: lines.append(f"├ E-mail: {', '.join(emails)}")
+    
+    # Шапка
+    if fio or phones:
+        main_name = list(fio)[0] if fio else "Неизвестно"
+        lines.append(f"🪪 <b>{main_name}</b>")
+        if phones:
+            lines.append(f"<i>{list(phones)[0]}</i>")
         lines.append("")
 
+    # Блок связи
+    if phones or operators or regions:
+        lines.append("📱 <b>Связь</b>")
+        if phones: lines.append(f"├ Телефон: {', '.join(phones)}")
+        if operators: lines.append(f"├ Оператор: {', '.join(operators)}")
+        if regions: lines.append(f"├ Регион: {', '.join(regions)}")
+        if countries: lines.append(f"├ Страна: {', '.join(countries)}")
+        lines.append("")
+        
+    # Блок Основное
+    if fio or genders or dates or ages:
+        lines.append("👤 <b>Основные данные</b>")
+        if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
+        if dates: lines.append(f"├ Дата рождения: {', '.join(dates)}")
+        if ages: lines.append(f"├ Возраст: {', '.join(ages)}")
+        if genders: lines.append(f"├ Пол: {', '.join(genders)}")
+        lines.append("")
+
+    # Соцсети
     if socials:
         lines.append("🌐 <b>Социальные сети</b>")
         for s in socials: lines.append(f"├ {s}")
         lines.append("")
 
+    # Почта
+    if emails:
+        lines.append("📧 <b>E-mail</b>")
+        for e in emails: lines.append(f"├ {e}")
+        lines.append("")
+
+    # Документы
+    if docs:
+        lines.append("📄 <b>Документы</b>")
+        for d in docs: lines.append(f"├ {d}")
+        lines.append("")
+        
+    # Адреса
     if addresses:
         lines.append("🏠 <b>Адреса</b>")
         for a in addresses: lines.append(f"├ {a}")
         lines.append("")
 
-    if docs:
-        lines.append("📄 <b>Документы</b>")
-        for d in docs: lines.append(f"├ {d}")
-        lines.append("")
-
-    if others:
+    # Прочее (только если есть)
+    clean_others = [o for o in others if "Result" not in o and "Data" not in o]
+    if clean_others:
         lines.append("🗂 <b>Прочие данные</b>")
-        for o in others: lines.append(f"├ {o}")
+        for o in clean_others[:10]: lines.append(f"├ {o}")
+        if len(clean_others) > 10: lines.append(f"└ ... и еще {len(clean_others)-10}")
         lines.append("")
 
     if not lines: 
-        return "🔍 <b>Данных не найдено.</b>\nВ базах нет информации по этому запросу."
+        return "🔍 <b>Данных не найдено.</b>"
 
     return "\n".join(lines).strip()
 
+# --- HTML ОТЧЕТ (ОСТАВЛЯЕМ КРАСИВЫМ) ---
 def build_html_report(api_results: list[dict], query: str) -> str:
+    # (Здесь оставляем старую логику HTML, она нормально работает)
     all_items = []
     for res in api_results:
         data = clean_data(res["data"])
@@ -354,16 +399,11 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             if isinstance(inner, dict): all_items.append(inner)
             elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
 
-    fio, genders, dates = set(), set(), set()
-    phones, emails, socials, docs, addresses, others = set(), set(), set(), set(), set(), set()
+    fio, genders, dates, ages = set(), set(), set(), set()
+    phones, operators, regions, countries = set(), set(), set(), set()
+    emails, socials, docs, addresses, others = set(), set(), set(), set(), set()
 
-    TRANSLATIONS = {
-        "surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", 
-        "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", 
-        "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", 
-        "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", 
-        "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО"
-    }
+    TRANSLATIONS = {"surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО", "operator": "Оператор", "age": "Возраст"}
 
     for item in all_items:
         for k, v in item.items():
@@ -387,20 +427,24 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                 elif k_lower in ("email", "mail"): emails.add(val_str)
                 elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
                 elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
+                elif k_lower == "age": ages.add(val_str)
+                elif k_lower == "operator": operators.add(val_str)
+                elif k_lower == "region": regions.add(val_str)
+                elif k_lower == "country": countries.add(val_str)
                 elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
                 elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
                 elif k_lower in ("address", "region"): addresses.add(val_str)
                 else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
 
     def make_list(data_set, icon):
-        if not data_set:
-            return f'<div class="empty-state">Нет данных</div>'
+        if not data_set: return f'<div class="empty-state">Нет данных</div>'
         items_html = "".join([f'<div class="data-row"><span class="d-icon">{icon}</span><span class="d-val">{html.escape(str(val))}</span></div>' for val in data_set])
         return f'<div class="data-group">{items_html}</div>'
 
     main_name = list(fio)[0] if fio else query
     initial = main_name[0].upper() if main_name else "?"
-
+    
+    # Формируем HTML
     details_html = f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -485,24 +529,15 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     """
     return details_html
 
-# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
-async def web_report_handler(request):
-    report_id = request.match_info.get('report_id')
-    if report_id not in report_cache:
-        return web.Response(text="<h1>404 Отчет не найден или устарел</h1><p>Сгенерируйте новый в боте.</p>", content_type="text/html", status=404)
-    data = report_cache[report_id]
-    html_content = build_html_report(data["results"], data["query"])
-    return web.Response(text=html_content, content_type="text/html")
-
 # --- МЕНЮ ---
-def main_menu(user_id=None):
+def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
         [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎟 Промокод", callback_data="enter_promo")],
         [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
         [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
     ]
-    if user_id == MAIN_ADMIN_ID:
+    if is_admin:
         kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -516,6 +551,7 @@ def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
+        [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="adm_add_admin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
@@ -539,12 +575,13 @@ async def start(msg: Message, command: CommandStart):
         except: pass
 
     total_users = await get_total_users()
+    is_adm = await is_admin(msg.from_user.id)
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
-    await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+    await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID: 
+    if not await is_admin(cb.from_user.id): 
         return await cb.answer("⛔ Нет доступа", show_alert=True)
     await cb.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
@@ -555,7 +592,7 @@ async def cb_profile(cb: CallbackQuery):
     ref_count = await get_invited_count(cb.from_user.id)
     total_users = await get_total_users()
     uname = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
-    status = "👑 Админ" if cb.from_user.id == MAIN_ADMIN_ID else "👤 Юзер"
+    status = "👑 Админ" if await is_admin(cb.from_user.id) else "👤 Юзер"
     text = (f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n📛 Юзер: {uname}\n🎖 Статус: {status}\n💳 Баланс: <code>{bal}</code> запросов\n👥 Приглашено: <b>{ref_count}</b>\n\n📈 Всего в боте: <b>{total_users}</b> юзеров")
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
@@ -588,7 +625,8 @@ async def cb_terms(cb: CallbackQuery):
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu(cb.from_user.id))
+    is_adm = await is_admin(cb.from_user.id)
+    await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu(cb.from_user.id, is_adm))
     await cb.answer()
 
 @dp.callback_query(F.data == "buy_menu")
@@ -688,7 +726,7 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     if len(tx_hash) < 10:
         return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
         
-    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id))
+    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
     
     admin_text = (
         f"💰 <b>Новая заявка на оплату!</b>\n\n"
@@ -705,44 +743,64 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
 
 @dp.callback_query(F.data.startswith("appr_"))
 async def admin_approve(cb: CallbackQuery, bot: Bot):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     _, uid, amount = cb.data.split("_")
     await add_requests(int(uid), int(amount))
     await cb.message.edit_text(f"✅ Начислено {amount} запросов для {uid}.")
-    try: await bot.send_message(int(uid), f"✅ <b>Оплата подтверждена!</b>\nНачислено <b>+{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu(int(uid)))
+    try: await bot.send_message(int(uid), f"✅ <b>Оплата подтверждена!</b>\nНачислено <b>+{amount}</b> запросов.", parse_mode="HTML", reply_markup=main_menu(int(uid), False))
     except: pass
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("rej_"))
 async def admin_reject(cb: CallbackQuery, bot: Bot):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     _, uid = cb.data.split("_")
     await cb.message.edit_text(f"❌ Отклонено для {uid}.")
-    try: await bot.send_message(int(uid), "❌ Оплата отклонена. Свяжитесь с поддержкой.", reply_markup=main_menu(int(uid)))
+    try: await bot.send_message(int(uid), "❌ Оплата отклонена. Свяжитесь с поддержкой.", reply_markup=main_menu(int(uid), False))
     except: pass
     await cb.answer()
 
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
-    if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
+    if not await is_admin(msg.from_user.id): return await msg.answer("⛔ Нет доступа.")
     await msg.answer("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
 
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     await cb.message.edit_text("Введите <code>ID количество</code>:", parse_mode="HTML")
     await state.set_state(AdminStates.give_reqs)
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_take")
 async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML")
     await state.set_state(AdminStates.take_reqs)
     await cb.answer()
 
+@dp.callback_query(F.data == "adm_add_admin")
+async def cb_adm_add_admin(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Только главный админ может выдавать права", show_alert=True)
+    await cb.message.edit_text("Введите Telegram ID пользователя, чтобы сделать его админом:", parse_mode="HTML")
+    await state.set_state(AdminStates.add_admin)
+    await cb.answer()
+
+@dp.message(AdminStates.add_admin)
+async def process_add_admin(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    try:
+        uid = int(msg.text.strip())
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO admins (user_id, added_at) VALUES ($1, $2) ON CONFLICT DO NOTHING", uid, int(time.time()))
+        await msg.answer(f"✅ Пользователь {uid} теперь админ.", reply_markup=admin_menu())
+    except:
+        await msg.answer("❌ Ошибка формата.", reply_markup=admin_menu())
+    await state.clear()
+
 @dp.message(AdminStates.give_reqs)
 async def process_give(msg: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(msg.from_user.id): return
     try:
         parts = msg.text.strip().split()
         if len(parts) != 2: raise ValueError()
@@ -754,7 +812,7 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
         await msg.answer(f"✅ Выдано {amount} для {uid}. Новый баланс: {new_bal}", reply_markup=admin_menu())
         
         try: 
-            await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid))
+            await bot.send_message(uid, f"🎁 Вам начислено <b>+{amount}</b> запросов. Баланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(uid, False))
         except: 
             pass
     except Exception as e:
@@ -763,6 +821,7 @@ async def process_give(msg: Message, state: FSMContext, bot: Bot):
 
 @dp.message(AdminStates.take_reqs)
 async def process_take(msg: Message, state: FSMContext):
+    if not await is_admin(msg.from_user.id): return
     try:
         uid, amount = map(int, msg.text.split())
         await add_requests(uid, -amount)
@@ -795,23 +854,23 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
     async with db_pool.acquire() as conn:
         used = await conn.fetchrow("SELECT 1 FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
         if used:
-            return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id))
+            return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
             
         promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
         if not promo:
-            return await msg.answer(f"❌ Промокод <code>{html.escape(code)}</code> не найден.", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+            return await msg.answer(f"❌ Промокод <code>{html.escape(code)}</code> не найден.", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
             
         if promo['expires_at'] > 0 and promo['expires_at'] < int(time.time()):
-            return await msg.answer("❌ Срок действия истек.", reply_markup=main_menu(msg.from_user.id))
+            return await msg.answer("❌ Срок действия истек.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
         if promo['current_uses'] >= promo['max_uses']:
-            return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_menu(msg.from_user.id))
+            return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
             
         await add_requests(msg.from_user.id, promo['req_amount'])
         await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
         await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
     
     new_bal = await get_balance(msg.from_user.id)
-    await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nБаланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id))
+    await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nБаланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
     
     try:
         await bot.send_message(MAIN_ADMIN_ID, f"✅ <b>Успешная активация!</b>\nЮзер: {msg.from_user.id}\nКод: {code}\nНовый баланс: {new_bal}", parse_mode="HTML")
@@ -819,13 +878,13 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
 
 @dp.callback_query(F.data == "adm_promo")
 async def cb_adm_promo(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     await cb.message.edit_text("🎟 <b>Управление промокодами</b>", parse_mode="HTML", reply_markup=promo_menu())
     await cb.answer()
 
 @dp.callback_query(F.data == "promo_list")
 async def cb_promo_list(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     async with db_pool.acquire() as conn:
         promos = await conn.fetch("SELECT * FROM promocodes ORDER BY created_at DESC LIMIT 20")
     
@@ -843,14 +902,14 @@ async def cb_promo_list(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "promo_create")
 async def cb_promo_create(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     await cb.message.edit_text("Введи данные промокода в формате:\n<code>КОД КОЛВО_ЗАПРОСОВ ЛИМИТ_АКТИВАЦИЙ ДНЕЙ</code>\n\nПример:\n<code>OASIS 10 50 7</code>\n(Код OASIS, 10 запросов, 50 активаций, действует 7 дней)\n\n<i>Для бессрочного введи 0 в конце.</i>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_promo")]]))
     await state.set_state(AdminStates.promo_create)
     await cb.answer()
 
 @dp.message(AdminStates.promo_create)
 async def process_promo_create(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if not await is_admin(msg.from_user.id): return
     try:
         parts = msg.text.strip().split()
         if len(parts) != 4: raise ValueError()
@@ -879,7 +938,7 @@ async def process_promo_create(msg: Message, state: FSMContext):
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
 async def process_search(msg: Message, q: str, bot: Bot):
     if not await deduct_request(msg.from_user.id):
-        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id))
+        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
 
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
