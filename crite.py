@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Чистый парсер + Админы + Текстовый отчет)
+# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Чистый парсер + Монитор API + Система админов)
 import asyncio
 import json
 import html
@@ -62,7 +62,6 @@ class AdminStates(StatesGroup):
     take_reqs = State()
     promo_create = State()
     add_admin = State()
-    del_admin = State()
 
 class PromoStates(StatesGroup):
     wait_code = State()
@@ -277,7 +276,7 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ОЧЕНЬ УМНЫЙ ПАРСЕР ---
+# --- ОЧЕНЬ УМНЫЙ ПАРСЕР (Вырезает мусор) ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, genders, dates, ages = set(), set(), set(), set()
     phones, operators, regions, countries = set(), set(), set(), set()
@@ -285,14 +284,10 @@ def render_text_results(api_results: list[dict]) -> str:
 
     def extract_recursive(obj):
         if isinstance(obj, dict):
-            # Сначала обрабатываем словари с названиями (чтобы не было мусора)
             for k, v in obj.items():
                 k_lower = str(k).lower()
-                
-                # Пропускаем технический мусор
                 if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result"):
                     continue
-                    
                 if isinstance(v, (str, int)):
                     val_str = str(v)
                     if not val_str.strip(): continue
@@ -309,7 +304,7 @@ def render_text_results(api_results: list[dict]) -> str:
                     elif k_lower == "age": ages.add(val_str)
                     elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
                     elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number"): docs.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("address",): addresses.add(val_str)
+                    elif k_lower == "address": addresses.add(val_str)
                     else: others.add(f"{k.capitalize()}: {val_str}")
                 else:
                     extract_recursive(v)
@@ -321,16 +316,12 @@ def render_text_results(api_results: list[dict]) -> str:
         extract_recursive(res.get("data", {}))
 
     lines = []
-    
-    # Шапка
     if fio or phones:
         main_name = list(fio)[0] if fio else "Неизвестно"
         lines.append(f"🪪 <b>{main_name}</b>")
-        if phones:
-            lines.append(f"<i>{list(phones)[0]}</i>")
+        if phones: lines.append(f"<i>{list(phones)[0]}</i>")
         lines.append("")
 
-    # Блок связи
     if phones or operators or regions:
         lines.append("📱 <b>Связь</b>")
         if phones: lines.append(f"├ Телефон: {', '.join(phones)}")
@@ -339,7 +330,6 @@ def render_text_results(api_results: list[dict]) -> str:
         if countries: lines.append(f"├ Страна: {', '.join(countries)}")
         lines.append("")
         
-    # Блок Основное
     if fio or genders or dates or ages:
         lines.append("👤 <b>Основные данные</b>")
         if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
@@ -348,31 +338,26 @@ def render_text_results(api_results: list[dict]) -> str:
         if genders: lines.append(f"├ Пол: {', '.join(genders)}")
         lines.append("")
 
-    # Соцсети
     if socials:
         lines.append("🌐 <b>Социальные сети</b>")
         for s in socials: lines.append(f"├ {s}")
         lines.append("")
 
-    # Почта
     if emails:
         lines.append("📧 <b>E-mail</b>")
         for e in emails: lines.append(f"├ {e}")
         lines.append("")
 
-    # Документы
     if docs:
         lines.append("📄 <b>Документы</b>")
         for d in docs: lines.append(f"├ {d}")
         lines.append("")
         
-    # Адреса
     if addresses:
         lines.append("🏠 <b>Адреса</b>")
         for a in addresses: lines.append(f"├ {a}")
         lines.append("")
 
-    # Прочее (только если есть)
     clean_others = [o for o in others if "Result" not in o and "Data" not in o]
     if clean_others:
         lines.append("🗂 <b>Прочие данные</b>")
@@ -385,9 +370,7 @@ def render_text_results(api_results: list[dict]) -> str:
 
     return "\n".join(lines).strip()
 
-# --- HTML ОТЧЕТ (ОСТАВЛЯЕМ КРАСИВЫМ) ---
 def build_html_report(api_results: list[dict], query: str) -> str:
-    # (Здесь оставляем старую логику HTML, она нормально работает)
     all_items = []
     for res in api_results:
         data = clean_data(res["data"])
@@ -444,7 +427,6 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     main_name = list(fio)[0] if fio else query
     initial = main_name[0].upper() if main_name else "?"
     
-    # Формируем HTML
     details_html = f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -529,6 +511,15 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     """
     return details_html
 
+# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
+async def web_report_handler(request):
+    report_id = request.match_info.get('report_id')
+    if report_id not in report_cache:
+        return web.Response(text="<h1>404 Отчет не найден или устарел</h1><p>Сгенерируйте новый в боте.</p>", content_type="text/html", status=404)
+    data = report_cache[report_id]
+    html_content = build_html_report(data["results"], data["query"])
+    return web.Response(text=html_content, content_type="text/html")
+
 # --- МЕНЮ ---
 def main_menu(user_id=None, is_admin=False):
     kb = [
@@ -551,6 +542,7 @@ def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="adm_add_admin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
@@ -584,6 +576,36 @@ async def cb_admin_panel(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): 
         return await cb.answer("⛔ Нет доступа", show_alert=True)
     await cb.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "adm_api_status")
+async def cb_adm_api_status(cb: CallbackQuery):
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    
+    await cb.message.edit_text("📡 <b>Проверяю статус API...</b>\n<i>Это займет пару секунд.</i>", parse_mode="HTML")
+    
+    test_q = "79825207224"
+    statuses = []
+    
+    start = time.time()
+    succ_h, _ = await fetch_api(API_URL_2, {"q": test_q, "type": "phone", "key": API_KEY_2})
+    t_h = round(time.time() - start, 2)
+    statuses.append(f"{'🟢' if succ_h else '🔴'} <b>Hydra:</b> {'OK' if succ_h else 'Ошибка'} ({t_h}с)")
+    
+    start = time.time()
+    succ_m, _ = await fetch_api(API_URL_3, {"q": test_q}, headers={"X-API-Key": API_KEY_3})
+    t_m = round(time.time() - start, 2)
+    statuses.append(f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else 'Ошибка'} ({t_m}с)")
+    
+    start = time.time()
+    succ_k, _ = await fetch_kratos(test_q)
+    t_k = round(time.time() - start, 2)
+    statuses.append(f"{'🟢' if succ_k else '🔴'} <b>Kratos:</b> {'OK' if succ_k else 'Ошибка'} ({t_k}с)")
+    
+    text = "📡 <b>Статус API на текущий момент:</b>\n\n" + "\n".join(statuses)
+    text += "\n\n<i>🟢 - Отвечает. 🔴 - Лежит или неверный ключ.</i>"
+    
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
 
 @dp.callback_query(F.data == "profile")
@@ -937,14 +959,15 @@ async def process_promo_create(msg: Message, state: FSMContext):
 
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
 async def process_search(msg: Message, q: str, bot: Bot):
-    if not await deduct_request(msg.from_user.id):
-        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
+    is_adm = await is_admin(msg.from_user.id)
+    if not is_adm and not await deduct_request(msg.from_user.id):
+        return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id, is_adm))
 
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
     api_results = await query_all_apis(q)
     
     if not api_results:
-        await add_requests(msg.from_user.id, 1)
+        if not is_adm: await add_requests(msg.from_user.id, 1)
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
     
     text_report = render_text_results(api_results)
