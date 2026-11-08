@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius + Nebula)
+# OASIS SEARCH (Mobius + Nebula + Tech Break + Stars)
 import asyncio
 import json
 import html
@@ -23,7 +23,6 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
-# API Nebula
 API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
 API_KEY_NEBULA = "NEBULA-A11ACE72F6559A2E268CE1CBA39AA881"
 
@@ -32,11 +31,6 @@ BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 BOT_USERNAME = "searchosintlistopadov_bot"
 MAIN_ADMIN_ID = 8394631079
 DATABASE_URL = "postgresql://admin:RRxOapzxaKxIHvMAgyRTOwDZWaVAHXLX@dpg-dbltbtegekts73cc59fg-a/oasis_rl3m"
-
-# --- НАСТРОЙКИ ОПЛАТЫ ---
-CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
-PRICE_PER_REQ_TON = 0.03
-RATE_TON_TO_USDT = 6.5 
 
 # --- НАСТРОЙКИ RENDER ---
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://listopadov-search-1.onrender.com")
@@ -52,7 +46,6 @@ report_cache = {}
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
-    wait_currency = State()
     wait_hash = State()
 
 class AdminStates(StatesGroup):
@@ -102,12 +95,27 @@ async def init_db():
                 added_at INTEGER
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
 async def is_admin(user_id):
     if user_id == MAIN_ADMIN_ID: return True
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
         return bool(row)
+
+async def get_maintenance() -> bool:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM settings WHERE key='maintenance'")
+        return row and row['value'] == '1'
+
+async def set_maintenance(value: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO settings (key, value) VALUES ('maintenance', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", value)
 
 async def add_user(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
@@ -149,7 +157,7 @@ async def get_total_users() -> int:
         return await conn.fetchval("SELECT COUNT(*) FROM users")
 
 # --- ТЕКСТЫ ---
-WELCOME_TEXT = """ℹ️ <b>Примеры для ввода команд</b>
+WELCOME_TEXT = """ℹ️ <b>Oasis Search — Примеры команд</b>
 
 🕵️ <b>Личность:</b>
 <code>Фамилия Имя Отчество 01.01.1990</code>
@@ -232,13 +240,9 @@ async def query_all_apis(q: str) -> list[dict]:
     sources = ["Mobius", "Nebula"]
     
     for i, res in enumerate(results):
-        if isinstance(res, Exception):
-            continue
-            
+        if isinstance(res, Exception): continue
         success, data = res
-        if not success:
-            continue
-            
+        if not success: continue
         if isinstance(data, dict):
             combined.append({"source": sources[i], "data": data})
                 
@@ -250,8 +254,7 @@ def clean_data(obj):
         for k, v in obj.items():
             if k in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype"):
                 continue
-            if v is None or v == "" or v == {} or v == []:
-                continue
+            if v is None or v == "" or v == {} or v == []: continue
             res[k] = clean_data(v)
         return res
     elif isinstance(obj, list):
@@ -275,9 +278,7 @@ def render_text_results(api_results: list[dict]) -> str:
                 if isinstance(v, (str, int)):
                     val_str = str(v)
                     if not val_str.strip(): continue
-                    
-                    if any(word in val_str.lower() for word in IGNORE_WORDS):
-                        continue
+                    if any(word in val_str.lower() for word in IGNORE_WORDS): continue
                     
                     if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
                         if len(val_str) > 2: fio.add(val_str)
@@ -296,8 +297,7 @@ def render_text_results(api_results: list[dict]) -> str:
                 else:
                     extract_recursive(v)
         elif isinstance(obj, list):
-            for item in obj:
-                extract_recursive(item)
+            for item in obj: extract_recursive(item)
 
     for res in api_results:
         extract_recursive(res.get("data", {}))
@@ -305,60 +305,68 @@ def render_text_results(api_results: list[dict]) -> str:
     lines = []
     if fio or phones:
         main_name = list(fio)[0] if fio else "Неизвестно"
-        lines.append(f"🪪 <b>{main_name}</b>")
-        if phones: lines.append(f"<i>{list(phones)[0]}</i>")
-        lines.append("")
+        lines.append(f"🪪 <b>{main_name}</b>\n")
+        
+    lines.append("━━━━━━━━━━━━━━━")
 
     if phones or operators or regions:
-        lines.append("📱 <b>Связь</b>")
-        if phones: lines.append(f"├ Телефон: {', '.join(phones)}")
+        lines.append("📱 <b>Контакты</b>")
+        if phones: lines.append(f"├ Телефон: <code>{', '.join(phones)}</code>")
         if operators: lines.append(f"├ Оператор: {', '.join(operators)}")
-        if regions: lines.append(f"├ Регион: {', '.join(regions)}")
-        if countries: lines.append(f"├ Страна: {', '.join(countries)}")
+        if regions: lines.append(f"└ Регион: {', '.join(regions)}")
         lines.append("")
         
     if fio or genders or dates or ages:
-        lines.append("👤 <b>Основные данные</b>")
+        lines.append("👤 <b>Личные данные</b>")
         if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
         if dates: lines.append(f"├ Дата рождения: {', '.join(dates)}")
         if ages: lines.append(f"├ Возраст: {', '.join(ages)}")
-        if genders: lines.append(f"├ Пол: {', '.join(genders)}")
+        if genders: lines.append(f"└ Пол: {', '.join(genders)}")
         lines.append("")
 
     if socials:
-        lines.append("🌐 <b>Социальные сети</b>")
-        for s in socials: lines.append(f"├ {s}")
+        lines.append("🌐 <b>Соцсети</b>")
+        for i, s in enumerate(socials):
+            prefix = "└" if i == len(socials) - 1 else "├"
+            lines.append(f"{prefix} {s}")
         lines.append("")
 
     if emails:
         lines.append("📧 <b>E-mail</b>")
-        for e in emails: lines.append(f"├ {e}")
+        for i, e in enumerate(emails):
+            prefix = "└" if i == len(emails) - 1 else "├"
+            lines.append(f"{prefix} {e}")
         lines.append("")
 
     if docs:
         lines.append("📄 <b>Документы</b>")
-        for d in docs: lines.append(f"├ {d}")
+        for i, d in enumerate(docs):
+            prefix = "└" if i == len(docs) - 1 else "├"
+            lines.append(f"{prefix} {d}")
         lines.append("")
         
     if addresses:
         lines.append("🏠 <b>Адреса</b>")
-        for a in addresses: lines.append(f"├ {a}")
+        for i, a in enumerate(addresses):
+            prefix = "└" if i == len(addresses) - 1 else "├"
+            lines.append(f"{prefix} {a}")
         lines.append("")
 
     clean_others = [o for o in others if not any(word in o.lower() for word in IGNORE_WORDS)]
     if clean_others:
         lines.append("🗂 <b>Прочие данные</b>")
-        for o in clean_others[:10]: lines.append(f"├ {o}")
-        if len(clean_others) > 10: lines.append(f"└ ... и еще {len(clean_others)-10}")
+        for i, o in enumerate(clean_others[:10]):
+            prefix = "└" if i == len(clean_others[:10]) - 1 else "├"
+            lines.append(f"{prefix} {o}")
         lines.append("")
 
-    if not lines: 
+    if not lines or len(lines) < 3: 
         return "🔍 <b>Данных не найдено.</b>"
 
     return "\n".join(lines).strip()
 
+# --- HTML ОТЧЕТ ---
 def build_html_report(api_results: list[dict], query: str) -> str:
-    # (Та же логика HTML-отчета)
     all_items = []
     for res in api_results:
         data = clean_data(res["data"])
@@ -407,98 +415,70 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                 elif k_lower in ("address", "region"): addresses.add(val_str)
                 else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
 
-    def make_list(data_set, icon):
-        if not data_set: return f'<div class="empty-state">Нет данных</div>'
-        items_html = "".join([f'<div class="data-row"><span class="d-icon">{icon}</span><span class="d-val">{html.escape(str(val))}</span></div>' for val in data_set])
-        return f'<div class="data-group">{items_html}</div>'
-
     main_name = list(fio)[0] if fio else query
     initial = main_name[0].upper() if main_name else "?"
-    
+
+    def make_card(title, icon, data_set):
+        if not data_set: return ""
+        rows = "".join([f'<div class="data-row"><span class="d-icon">{icon}</span><span class="d-val">{html.escape(str(val))}</span></div>' for val in data_set])
+        return f"""
+        <div class="card">
+            <div class="card-header">{title}</div>
+            <div class="card-body">{rows}</div>
+        </div>"""
+
+    cards_html = ""
+    cards_html += make_card("Контакты", "📱", phones)
+    cards_html += make_card("Основные данные", "👤", [f"ФИО: {x}" for x in fio] + [f"ДР: {x}" for x in dates] + [f"Возраст: {x}" for x in ages])
+    cards_html += make_card("Соцсети", "🌐", socials)
+    cards_html += make_card("Почта", "📧", emails)
+    cards_html += make_card("Документы", "📄", docs)
+    cards_html += make_card("Адреса", "🏠", addresses)
+    cards_html += make_card("Прочее", "🗂", others)
+
     details_html = f"""
     <!DOCTYPE html>
     <html lang="ru">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Oasis Report: {html.escape(query)}</title>
+        <title>Oasis Search - {html.escape(query)}</title>
         <style>
-            :root {{ --bg: #0d1117; --card-bg: #161b22; --text: #c9d1d9; --accent: #58a6ff; --success: #238636; --border: #30363d; }}
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.5; }}
-            .container {{ max-width: 800px; margin: 0 auto; }}
-            .profile-header {{ display: flex; align-items: center; gap: 20px; background: var(--card-bg); border-radius: 16px; padding: 24px; border: 1px solid var(--border); margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
-            .avatar {{ width: 80px; height: 80px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), #a371f7); display: flex; justify-content: center; align-items: center; font-size: 32px; font-weight: bold; color: #fff; box-shadow: 0 0 15px rgba(88, 166, 255, 0.4); flex-shrink: 0; }}
-            .profile-info h1 {{ margin: 0 0 8px 0; font-size: 24px; color: #fff; }}
-            .tags {{ display: flex; gap: 8px; flex-wrap: wrap; }}
-            .tag {{ background: rgba(88, 166, 255, 0.1); color: var(--accent); padding: 4px 10px; border-radius: 20px; font-size: 13px; border: 1px solid rgba(88, 166, 255, 0.2); }}
-            .tabs {{ display: flex; gap: 8px; margin-bottom: 20px; overflow-x: auto; padding-bottom: 5px; }}
-            .tabs::-webkit-scrollbar {{ height: 6px; }}
-            .tabs::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
-            .tab {{ padding: 10px 20px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; color: var(--text); transition: all 0.2s; white-space: nowrap; user-select: none; }}
-            .tab:hover {{ background: #21262d; }}
-            .tab.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
-            .tab-content {{ display: none; }}
-            .tab-content.active {{ display: block; animation: fadeIn 0.3s ease-in-out; }}
-            @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(5px); }} to {{ opacity: 1; transform: translateY(0); }} }}
-            .data-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }}
-            .data-header {{ background: #1f242c; padding: 12px 20px; font-weight: 600; color: #fff; border-bottom: 1px solid var(--border); }}
-            .data-group {{ padding: 10px 20px; }}
-            .data-row {{ display: flex; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--border); }}
+            :root {{ --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --accent: #ffffff; --border: #333333; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.6; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .logo {{ font-size: 14px; letter-spacing: 2px; color: #888; text-transform: uppercase; margin-bottom: 10px; }}
+            .title {{ font-size: 28px; font-weight: 800; color: var(--accent); margin: 0; line-height: 1.2; }}
+            .query {{ font-size: 16px; color: #888; margin-top: 10px; font-family: monospace; }}
+            .avatar {{ width: 60px; height: 60px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; margin: 0 auto 15px auto; border: 2px solid #444; }}
+            .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 15px; overflow: hidden; }}
+            .card-header {{ background: #252525; padding: 12px 20px; font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #aaa; border-bottom: 1px solid var(--border); }}
+            .card-body {{ padding: 10px 20px; }}
+            .data-row {{ display: flex; align-items: flex-start; padding: 10px 0; border-bottom: 1px dashed #333; }}
             .data-row:last-child {{ border-bottom: none; }}
-            .d-icon {{ width: 24px; margin-right: 12px; opacity: 0.7; }}
-            .d-val {{ font-family: monospace; font-size: 14px; word-break: break-all; }}
-            .empty-state {{ padding: 20px; text-align: center; color: #8b949e; font-style: italic; }}
-            .footer {{ text-align: center; margin-top: 40px; color: #8b949e; font-size: 12px; }}
+            .d-icon {{ margin-right: 12px; opacity: 0.7; }}
+            .d-val {{ font-family: monospace; font-size: 14px; color: #fff; word-break: break-word; }}
+            .footer {{ text-align: center; margin-top: 30px; font-size: 12px; color: #555; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <div class="profile-header">
+            <div class="header">
+                <div class="logo">OASIS SEARCH</div>
                 <div class="avatar">{html.escape(initial)}</div>
-                <div class="profile-info">
-                    <h1>{html.escape(main_name)}</h1>
-                    <div class="tags">
-                        <span class="tag">🔍 Поиск: {html.escape(query)}</span>
-                        {f'<span class="tag">🎂 {html.escape(list(dates)[0])}</span>' if dates else ''}
-                        {f'<span class="tag">⚧ {html.escape(list(genders)[0])}</span>' if genders else ''}
-                    </div>
-                </div>
+                <h1 class="title">{html.escape(main_name)}</h1>
+                <div class="query">Запрос: {html.escape(query)}</div>
             </div>
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab(event, 'tab-main')">📞 Контакты</div>
-                <div class="tab" onclick="switchTab(event, 'tab-social')">🌐 Соцсети</div>
-                <div class="tab" onclick="switchTab(event, 'tab-docs')">📄 Документы</div>
-                <div class="tab" onclick="switchTab(event, 'tab-other')">🗂 Прочее</div>
-            </div>
-            <div id="tab-main" class="tab-content active">
-                <div class="data-card"><div class="data-header">📞 Телефоны</div>{make_list(phones, "📱")}</div>
-                <div class="data-card"><div class="data-header">📧 Почта</div>{make_list(emails, "✉️")}</div>
-                <div class="data-card"><div class="data-header">🏠 Адреса</div>{make_list(addresses, "📍")}</div>
-            </div>
-            <div id="tab-social" class="tab-content">
-                <div class="data-card"><div class="data-header">🌐 Социальные сети</div>{make_list(socials, "🔗")}</div>
-            </div>
-            <div id="tab-docs" class="tab-content">
-                <div class="data-card"><div class="data-header">📄 Документы</div>{make_list(docs, "🪪")}</div>
-            </div>
-            <div id="tab-other" class="tab-content">
-                <div class="data-card"><div class="data-header">🗂 Прочие данные</div>{make_list(others, "🔹")}</div>
-            </div>
-            <div class="footer">Oasis Search • Отчет сгенерирован автоматически • {len(api_results)} источников</div>
+            {cards_html}
+            <div class="footer">Сгенерировано автоматически &bull; {len(api_results)} источников</div>
         </div>
-        <script>
-            function switchTab(evt, tabId) {{
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                evt.currentTarget.classList.add('active');
-                document.getElementById(tabId).classList.add('active');
-            }}
-        </script>
     </body>
     </html>
     """
     return details_html
 
+# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
 async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
@@ -507,6 +487,7 @@ async def web_report_handler(request):
     html_content = build_html_report(data["results"], data["query"])
     return web.Response(text=html_content, content_type="text/html")
 
+# --- МЕНЮ ---
 def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
@@ -529,6 +510,7 @@ def admin_menu():
         [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
         [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="adm_add_admin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
@@ -540,6 +522,7 @@ def promo_menu():
         [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
     ])
 
+# --- ОБРАБОТЧИКИ ---
 @dp.message(CommandStart())
 async def start(msg: Message, command: CommandStart):
     referrer_id = None
@@ -562,6 +545,29 @@ async def cb_admin_panel(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): 
         return await cb.answer("⛔ Нет доступа", show_alert=True)
     await cb.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
+    await cb.answer()
+
+@dp.callback_query(F.data == "adm_maintenance")
+async def cb_adm_maintenance(cb: CallbackQuery):
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    
+    current_status = await get_maintenance()
+    new_status = "0" if current_status else "1"
+    await set_maintenance(new_status)
+    
+    status_text = "ВКЛЮЧЕН 🔴" if new_status == "1" else "ВЫКЛЮЧЕН 🟢"
+    btn_text = "Выключить (Разрешить поиск) 🟢" if new_status == "1" else "Включить (Заблокировать поиск) 🔴"
+    
+    await cb.message.edit_text(
+        f"🛠 <b>Технический перерыв</b>\n\n"
+        f"Текущий статус: <b>{status_text}</b>\n\n"
+        f"<i>Когда перерыв включен, обычные юзеры не могут делать запросы. У админов поиск работает всегда.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=btn_text, callback_data="adm_maintenance")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
+        ])
+    )
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_api_status")
@@ -632,6 +638,7 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu(cb.from_user.id, is_adm))
     await cb.answer()
 
+# --- ПОКУПКА ЗАПРОСОВ ---
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -647,15 +654,23 @@ async def cb_buy_menu(cb: CallbackQuery):
 async def cb_buy_package(cb: CallbackQuery, state: FSMContext):
     if cb.data == "buy_custom": return
     amount = int(cb.data.split("_")[1])
-    total_ton = amount * PRICE_PER_REQ_TON
-    await state.update_data(buy_amount=amount, total_ton=total_ton)
+    stars = amount * 7
+    await state.update_data(buy_amount=amount, stars=stars)
+    
+    text = (
+        f"💳 <b>Оплата: {amount} запросов</b>\n\n"
+        f"Вам нужно перевести <b>{stars} ⭐ (Telegram Stars)</b> пользователю @anodoxx.\n"
+        f"<i>(1 запрос = 7 звезд)</i>\n\n"
+        f"1. Откройте @anodoxx\n"
+        f"2. Отправьте {stars} звезд\n"
+        f"3. После перевода нажмите кнопку «✅ Я оплатил» и отправьте скриншот/чек."
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
-        [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid_stars_{amount}")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
     ])
-    await cb.message.edit_text(f"Вы выбрали <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту:", parse_mode="HTML", reply_markup=kb)
-    await state.set_state(BuyStates.wait_currency)
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
 @dp.callback_query(F.data == "buy_custom")
@@ -671,78 +686,63 @@ async def process_custom_amount(msg: Message, state: FSMContext):
         if amount <= 0: raise ValueError
     except ValueError:
         return await msg.answer("❌ Введите целое число.")
-    total_ton = amount * PRICE_PER_REQ_TON
-    await state.update_data(buy_amount=amount, total_ton=total_ton)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 TON", callback_data="curr_TON")],
-        [InlineKeyboardButton(text="💵 USDT (TRC-20)", callback_data="curr_USDT")],
-        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
-    ])
-    await msg.answer(f"Вы хотите купить <b>{amount}</b> запросов.\nК оплате: <b>{total_ton:.2f} TON</b>\n\nВыберите валюту:", parse_mode="HTML", reply_markup=kb)
-    await state.set_state(BuyStates.wait_currency)
-
-@dp.callback_query(BuyStates.wait_currency, F.data.startswith("curr_"))
-async def process_currency(cb: CallbackQuery, state: FSMContext):
-    currency = cb.data.split("_")[1]
-    data = await state.get_data()
-    amount = data.get("buy_amount")
-    total_ton = data.get("total_ton")
     
-    if currency == "TON":
-        curr_text = f"Сумма: <b>{total_ton:.2f} TON</b>"
-        nano_amount = int(total_ton * 1_000_000_000)
-        tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount={nano_amount}"
-    else:
-        curr_text = f"Сумма: <b>~{total_ton * 6.5:.2f} USDT</b>"
-        tonkeeper_link = f"ton://transfer/{CRYPTO_WALLET}?amount=0"
+    stars = amount * 7
+    await state.update_data(buy_amount=amount, stars=stars)
     
     text = (
         f"💳 <b>Оплата: {amount} запросов</b>\n\n"
-        f"Валюта: <b>{currency}</b>\n{curr_text}\n"
-        f"Кошелек: <code>{CRYPTO_WALLET}</code>\n\n"
-        f"1. Оплатите по кнопке ниже.\n"
-        f"2. Нажмите кнопку «Я оплатил» и отправьте хеш."
+        f"Вам нужно перевести <b>{stars} ⭐ (Telegram Stars)</b> пользователю @anodoxx.\n"
+        f"<i>(1 запрос = 7 звезд)</i>\n\n"
+        f"1. Откройте @anodoxx\n"
+        f"2. Отправьте {stars} звезд\n"
+        f"3. После перевода нажмите кнопку «✅ Я оплатил» и отправьте скриншот/чек."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Открыть TONKEEPER", url=tonkeeper_link)],
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid_{amount}_{total_ton}_{currency}")],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid_stars_{amount}")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
     ])
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+    await state.set_state(BuyStates.wait_hash)
 
 @dp.callback_query(F.data.startswith("paid_"))
 async def cb_paid(cb: CallbackQuery, state: FSMContext):
-    _, amount, total_ton, currency = cb.data.split("_")
-    await state.update_data(buy_amount=amount, total_ton=total_ton, currency=currency)
-    await cb.message.edit_text("📩 <b>Отправь хеш транзакции</b>\n\nСкопируй хеш перевода в кошельке и отправь его сюда одним сообщением.")
+    amount = int(cb.data.split("_")[2])
+    await state.update_data(buy_amount=amount, currency="STARS")
+    
+    await cb.message.edit_text(
+        "📩 <b>Отправь чек</b>\n\n"
+        "Пришли сюда скриншот перевода звезд пользователю @anodoxx одним сообщением."
+    )
     await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
 @dp.message(BuyStates.wait_hash)
 async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    amount, total_ton, currency = data.get("buy_amount"), data.get("total_ton"), data.get("currency", "TON")
-    tx_hash = msg.text.strip()
+    amount = data.get("buy_amount")
+    
     await state.clear()
     
-    if len(tx_hash) < 10:
-        return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
-        
-    await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
+    await msg.answer("⏳ Чек получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
     
     admin_text = (
         f"💰 <b>Новая заявка на оплату!</b>\n\n"
         f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
         f"📦 {amount} запросов\n"
-        f"💵 {float(total_ton):.2f} TON ({currency})\n"
-        f"🔗 <code>{html.escape(tx_hash)}</code>"
+        f"💵 Оплата: STARS ({amount * 7} ⭐)\n"
+        f"🔗 Сообщение с чеком переслано ниже."
     )
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"appr_{msg.from_user.id}_{amount}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{msg.from_user.id}")
     ]])
     await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
+    
+    try:
+        await bot.forward_message(chat_id=MAIN_ADMIN_ID, from_chat_id=msg.chat.id, message_id=msg.message_id)
+    except:
+        pass
 
 @dp.callback_query(F.data.startswith("appr_"))
 async def admin_approve(cb: CallbackQuery, bot: Bot):
@@ -941,6 +941,10 @@ async def process_promo_create(msg: Message, state: FSMContext):
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
 async def process_search(msg: Message, q: str, bot: Bot):
     is_adm = await is_admin(msg.from_user.id)
+    
+    if not is_adm and await get_maintenance():
+        return await msg.answer("🛠 <b>Бот на техническом перерыве.</b>\n\nМы обновляем базы данных. Пожалуйста, зайдите позже.", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
+
     if not is_adm and not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id, is_adm))
 
