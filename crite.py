@@ -1,4 +1,4 @@
-# crite.py — ФИНАЛЬНАЯ ВЕРСИЯ (Прокси + Статус API + Чистый парсер)
+# OASIS SEARCH (Mobius + Nebula)
 import asyncio
 import json
 import html
@@ -20,18 +20,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # --- НАСТРОЙКИ API ---
-API_URL_2 = "https://api.devhydra.info/v1/search"
-API_KEY_2 = "HYDRA-LordKEY-kkVS8I3FHeB7p9DmO8"
+API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
+API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 
-API_URL_3 = "https://mobiusnet.cc.cd/api/v1/search"
-API_KEY_3 = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
-
-API_URL_KRATOS = "https://api.getkratos.lol/search"
-API_KEY_KRATOS = "kOKHDjiFPImYYuFpyJkkFeBxIlqaRqIZ"
-
-# --- ПРОКСИ (опционально) ---
-# Если впишешь сюда прокси (например, http://user:pass@ip:port), все запросы пойдут через него
-PROXY_URL = os.getenv("PROXY_URL", None) 
+# API Nebula
+API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
+API_KEY_NEBULA = "NEBULA-A11ACE72F6559A2E268CE1CBA39AA881"
 
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
@@ -193,8 +187,7 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
     raw = ""
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Добавляем прокси, если он указан
-            async with session.get(url, params=params, headers=headers, proxy=PROXY_URL) as resp:
+            async with session.get(url, params=params, headers=headers) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
                     if "Just a moment" not in raw:
@@ -205,30 +198,14 @@ async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool,
     except Exception as e:
         return False, str(e)
 
-async def fetch_kratos(q: str) -> tuple[bool, dict | str]:
+async def fetch_nebula(q: str) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
-    headers = {
-        "Authorization": f"Bearer {API_KEY_KRATOS}",
-        "Content-Type": "application/json",
-        "User-Agent": "kratos-api/2.1+a7f3k9"
-    }
-    raw = ""
-    q_upper = q.strip().upper()
-    if re.match(r"^\+?\d{10,15}$", q):
-        k_type = "PHONE"
-    elif "@" in q:
-        k_type = "EMAIL"
-    elif q_upper.startswith("@"):
-        k_type = "TELEGRAM"
-    else:
-        k_type = "NAME"
-
-    payload = {"query": q, "type": k_type, "limit": 100}
-
+    headers = {"X-API-Key": API_KEY_NEBULA}
+    params = {"query": q}
+    
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            # Добавляем прокси, если он указан
-            async with session.post(API_URL_KRATOS, headers=headers, json=payload, proxy=PROXY_URL) as resp:
+            async with session.get(API_URL_NEBULA, params=params, headers=headers) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
                     return True, json.loads(raw)
@@ -242,9 +219,8 @@ async def query_all_apis(q: str) -> list[dict]:
     q_type = detect_type(q)
     
     tasks = [
-        fetch_api(API_URL_2, {"q": q, "type": q_type, "key": API_KEY_2}),
-        fetch_api(API_URL_3, {"q": q}, headers={"X-API-Key": API_KEY_3}),
-        fetch_kratos(q)
+        fetch_api(API_URL_MOBIUS, {"q": q}, headers={"X-API-Key": API_KEY_MOBIUS}),
+        fetch_nebula(q)
     ]
     
     try:
@@ -253,7 +229,7 @@ async def query_all_apis(q: str) -> list[dict]:
         return []
     
     combined = []
-    sources = ["Hydra", "Mobius", "Kratos"]
+    sources = ["Mobius", "Nebula"]
     
     for i, res in enumerate(results):
         if isinstance(res, Exception):
@@ -282,11 +258,13 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ОЧЕНЬ УМНЫЙ ПАРСЕР (Вырезает мусор) ---
+# --- ПАРСЕР ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, genders, dates, ages = set(), set(), set(), set()
     phones, operators, regions, countries = set(), set(), set(), set()
     emails, socials, docs, addresses, others = set(), set(), set(), set(), set()
+
+    IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target")
 
     def extract_recursive(obj):
         if isinstance(obj, dict):
@@ -297,6 +275,9 @@ def render_text_results(api_results: list[dict]) -> str:
                 if isinstance(v, (str, int)):
                     val_str = str(v)
                     if not val_str.strip(): continue
+                    
+                    if any(word in val_str.lower() for word in IGNORE_WORDS):
+                        continue
                     
                     if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
                         if len(val_str) > 2: fio.add(val_str)
@@ -364,7 +345,7 @@ def render_text_results(api_results: list[dict]) -> str:
         for a in addresses: lines.append(f"├ {a}")
         lines.append("")
 
-    clean_others = [o for o in others if "Result" not in o and "Data" not in o]
+    clean_others = [o for o in others if not any(word in o.lower() for word in IGNORE_WORDS)]
     if clean_others:
         lines.append("🗂 <b>Прочие данные</b>")
         for o in clean_others[:10]: lines.append(f"├ {o}")
@@ -377,6 +358,7 @@ def render_text_results(api_results: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 def build_html_report(api_results: list[dict], query: str) -> str:
+    # (Та же логика HTML-отчета)
     all_items = []
     for res in api_results:
         data = clean_data(res["data"])
@@ -517,7 +499,6 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     """
     return details_html
 
-# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
 async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
@@ -526,7 +507,6 @@ async def web_report_handler(request):
     html_content = build_html_report(data["results"], data["query"])
     return web.Response(text=html_content, content_type="text/html")
 
-# --- МЕНЮ ---
 def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
@@ -594,28 +574,14 @@ async def cb_adm_api_status(cb: CallbackQuery):
     statuses = []
     
     start = time.time()
-    succ_h, err_h = await fetch_api(API_URL_2, {"q": test_q, "type": "phone", "key": API_KEY_2})
-    t_h = round(time.time() - start, 2)
-    if succ_h:
-        statuses.append(f"🟢 <b>Hydra:</b> OK ({t_h}с)")
-    else:
-        statuses.append(f"🔴 <b>Hydra:</b> {html.escape(str(err_h))[:50]}")
-    
-    start = time.time()
-    succ_m, err_m = await fetch_api(API_URL_3, {"q": test_q}, headers={"X-API-Key": API_KEY_3})
+    succ_m, err_m = await fetch_api(API_URL_MOBIUS, {"q": test_q}, headers={"X-API-Key": API_KEY_MOBIUS})
     t_m = round(time.time() - start, 2)
-    if succ_m:
-        statuses.append(f"🟢 <b>Mobius:</b> OK ({t_m}с)")
-    else:
-        statuses.append(f"🔴 <b>Mobius:</b> {html.escape(str(err_m))[:50]}")
+    statuses.append(f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else html.escape(str(err_m))[:50]} ({t_m}с)")
     
     start = time.time()
-    succ_k, err_k = await fetch_kratos(test_q)
-    t_k = round(time.time() - start, 2)
-    if succ_k:
-        statuses.append(f"🟢 <b>Kratos:</b> OK ({t_k}с)")
-    else:
-        statuses.append(f"🔴 <b>Kratos:</b> {html.escape(str(err_k))[:50]}")
+    succ_n, err_n = await fetch_nebula(test_q)
+    t_n = round(time.time() - start, 2)
+    statuses.append(f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:50]} ({t_n}с)")
     
     text = "📡 <b>Статус API на текущий момент:</b>\n\n" + "\n".join(statuses)
     text += "\n\n<i>🟢 - Отвечает. 🔴 - Ошибка (в скобках причина).</i>"
