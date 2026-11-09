@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Correct Version)
+# OASIS SEARCH (Final Version with Promocodes)
 import asyncio
 import json
 import html
@@ -36,7 +36,6 @@ DATABASE_URL = "postgresql://admin:RRxOapzxaKxIHvMAgyRTOwDZWaVAHXLX@dpg-dbltbteg
 CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STARS_PRICE = 300
 CRYPTO_PRICE = 5.0
-PRICE_PER_REQ_TON = 0.03
 
 # --- НАСТРОЙКИ RENDER ---
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://listopadov-search-1.onrender.com")
@@ -309,7 +308,7 @@ def render_text_results(api_results: list[dict]) -> str:
     if phones or operators:
         lines.append("<b>📱 Связь:</b>")
         if phones:
-            lines.append(f"> Телефон: {', '.join(phones)}")
+            lines.append(f"> Телефон: <tg-spoiler>{', '.join(phones)}</tg-spoiler>")
         if operators:
             lines.append(f"> Оператор: {', '.join(operators)}")
         lines.append("")
@@ -317,25 +316,25 @@ def render_text_results(api_results: list[dict]) -> str:
     if others:
         lines.append("<b>👤 Основные данные:</b>")
         for o in list(others)[:6]:
-            lines.append(f"> {o}")
+            lines.append(f"> <tg-spoiler>{o}</tg-spoiler>")
         lines.append("")
 
     if emails:
         lines.append("<b>📧 E-mail:</b>")
         for e in emails:
-            lines.append(f"> {e}")
+            lines.append(f"> <tg-spoiler>{e}</tg-spoiler>")
         lines.append("")
 
     if docs:
         lines.append("<b>📄 Документы:</b>")
         for d in docs:
-            lines.append(f"> {d}")
+            lines.append(f"> <tg-spoiler>{d}</tg-spoiler>")
         lines.append("")
 
     if socials:
         lines.append("<b>🌐 Соцсети:</b>")
         for s in socials:
-            lines.append(f"> {s}")
+            lines.append(f"> <tg-spoiler>{s}</tg-spoiler>")
         lines.append("")
 
     if len(lines) <= 1: 
@@ -438,9 +437,10 @@ async def web_report_handler(request):
 def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
-        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎁 Бонус", callback_data="daily_bonus")],
+        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎟 Промокод", callback_data="enter_promo")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
         [InlineKeyboardButton(text="🔒 Скрыть данные (300⭐ / 5$)", callback_data="hide_data_menu")],
+        [InlineKeyboardButton(text="🎁 Бонус", callback_data="daily_bonus")],
     ]
     if is_admin:
         kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
@@ -452,7 +452,15 @@ def admin_menu():
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
+        [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="adm_add_admin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+    ])
+
+def promo_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="promo_create")],
+        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="promo_list")],
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
     ])
 
 def buy_menu():
@@ -519,7 +527,6 @@ async def cb_stars_sent(cb: CallbackQuery, state: FSMContext, bot: Bot):
     await state.clear()
     
     temp_report_id = str(random.randint(1000000, 9999999))
-    # Сохраняем "пустышку", чтобы unlock не упал
     report_cache[temp_report_id] = {"text_report": "Данные не были найдены или устарели."} 
     
     await cb.message.edit_text("⏳ Заявка отправлена админу на проверку. Ожидайте.", reply_markup=main_menu(cb.from_user.id, False))
@@ -802,28 +809,31 @@ async def cb_paid(cb: CallbackQuery, state: FSMContext):
 async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     amount = data.get("buy_amount")
+    pay_type = data.get("pay_type")
     
-    await state.clear()
-    
-    await msg.answer("⏳ Чек получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
-    
-    admin_text = (
-        f"💰 <b>Новая заявка на оплату!</b>\n\n"
-        f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
-        f"📦 {amount} запросов\n"
-        f"💵 Оплата: STARS ({amount * 7} ⭐)\n"
-        f"🔗 Сообщение с чеком переслано ниже."
-    )
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"appr_{msg.from_user.id}_{amount}"),
-        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{msg.from_user.id}")
-    ]])
-    await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
-    
-    try:
-        await bot.forward_message(chat_id=MAIN_ADMIN_ID, from_chat_id=msg.chat.id, message_id=msg.message_id)
-    except:
-        pass
+    # Обработка возврата к оплате запросов (если это не hide_crypto)
+    if pay_type != "hide_crypto":
+        await state.clear()
+        
+        await msg.answer("⏳ Чек получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
+        
+        admin_text = (
+            f"💰 <b>Новая заявка на оплату!</b>\n\n"
+            f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
+            f"📦 {amount} запросов\n"
+            f"💵 Оплата: STARS ({amount * 7} ⭐)\n"
+            f"🔗 Сообщение с чеком переслано ниже."
+        )
+        admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"appr_{msg.from_user.id}_{amount}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej_{msg.from_user.id}")
+        ]])
+        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
+        
+        try:
+            await bot.forward_message(chat_id=MAIN_ADMIN_ID, from_chat_id=msg.chat.id, message_id=msg.message_id)
+        except:
+            pass
 
 @dp.callback_query(F.data.startswith("appr_"))
 async def admin_approve(cb: CallbackQuery, bot: Bot):
