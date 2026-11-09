@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius + Nebula + Daily Bonus)
+# OASIS SEARCH (Mobius POST + Nebula GET + Types)
 import asyncio
 import json
 import html
@@ -57,6 +57,9 @@ class AdminStates(StatesGroup):
 
 class PromoStates(StatesGroup):
     wait_code = State()
+
+class SearchStates(StatesGroup):
+    wait_query = State()
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
@@ -173,30 +176,40 @@ def detect_type(query: str) -> str:
     q = query.strip()
     if re.match(r"^\+?\d{10,15}$", q): return "phone"
     if "@" in q and "." in q.split("@")[-1]: return "email"
-    if q.startswith("@") or q.startswith("t.me/") or q.startswith("https://t.me/"): return "telegram"
+    if q.startswith("@") or q.startswith("t.me/") or q.startswith("https://t.me/"): return "tg"
     if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
-    return "name"
+    return "fio"
 
-async def fetch_api(url: str, params: dict, headers: dict = None) -> tuple[bool, dict | str]:
+# --- ЗАПРОСЫ К API ---
+async def fetch_mobius(q: str, q_type: str) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
-    raw = ""
+    headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
+    payload = {"query": q, "type": q_type}
+    
     try:
+        # Пауза 2 секунды, чтобы не получить 429 Too Many Requests
+        await asyncio.sleep(2)
+        
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params, headers=headers) as resp:
+            async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     raw = await resp.text()
-                    if "Just a moment" not in raw:
-                        return True, json.loads(raw)
+                    return True, json.loads(raw)
                 return False, f"HTTP {resp.status} - {raw[:100]}"
     except asyncio.TimeoutError:
         return False, "Таймаут"
     except Exception as e:
         return False, str(e)
 
-async def fetch_nebula(q: str) -> tuple[bool, dict | str]:
+async def fetch_nebula(q: str, q_type: str) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
     headers = {"X-API-Key": API_KEY_NEBULA}
-    params = {"query": q}
+    
+    # Nebula принимает type: auto, phone, tg, email, fio
+    if q_type == "fio": n_type = "auto"
+    else: n_type = q_type
+        
+    params = {"query": q, "type": n_type}
     
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -210,10 +223,10 @@ async def fetch_nebula(q: str) -> tuple[bool, dict | str]:
     except Exception as e:
         return False, str(e)
 
-async def query_all_apis(q: str) -> list[dict]:
+async def query_all_apis(q: str, q_type: str) -> list[dict]:
     tasks = [
-        fetch_api(API_URL_MOBIUS, {"q": q}, headers={"X-API-Key": API_KEY_MOBIUS}),
-        fetch_nebula(q)
+        fetch_mobius(q, q_type),
+        fetch_nebula(q, q_type)
     ]
     
     try:
@@ -227,7 +240,9 @@ async def query_all_apis(q: str) -> list[dict]:
     for i, res in enumerate(results):
         if isinstance(res, Exception): continue
         success, data = res
-        if not success: continue
+        if not success: 
+            logging.warning(f"API {sources[i]} ошибка: {data}")
+            continue
         if isinstance(data, dict):
             combined.append({"source": sources[i], "data": data})
                 
@@ -265,23 +280,23 @@ def render_text_results(api_results: list[dict]) -> str:
                     if not val_str.strip(): continue
                     if any(word in val_str.lower() for word in IGNORE_WORDS): continue
                     
-                    if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
+                    if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
                         if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
-                    elif k_lower in ("phone", "phone_2", "mobile", "number"): phones.add(val_str)
-                    elif k_lower == "operator": operators.add(val_str)
-                    elif k_lower == "region": regions.add(val_str)
-                    elif k_lower == "country": countries.add(val_str)
-                    elif k_lower in ("email", "mail"): emails.add(val_str)
+                    elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): phones.add(val_str)
+                    elif k_lower in ("operator", "оператор"): operators.add(val_str)
+                    elif k_lower in ("region", "регион", "город", "city"): regions.add(val_str)
+                    elif k_lower in ("country", "страна"): countries.add(val_str)
+                    elif k_lower in ("email", "mail", "почта"): emails.add(val_str)
                     elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("birthday", "birth_date", "date", "dob"): 
+                    elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"): 
                         if "T" in val_str:
                             parts = val_str.split("T")[0].split("-")
                             if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
                         dates.add(val_str)
-                    elif k_lower == "age": ages.add(val_str)
-                    elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
-                    elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number"): docs.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower == "address": addresses.add(val_str)
+                    elif k_lower in ("age", "возраст"): ages.add(val_str)
+                    elif k_lower in ("gender", "sex", "пол"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
+                    elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number", "инн", "снилс", "паспорт"): docs.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("address", "адрес"): addresses.add(val_str)
                     else: others.add(f"{k.capitalize()}: {val_str}")
                 else:
                     extract_recursive(v)
@@ -581,10 +596,13 @@ def main_menu(user_id=None, is_admin=False):
         kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def search_menu():
+def search_type_menu(query: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Обычный поиск", callback_data="search_normal")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
+        [InlineKeyboardButton(text="ИНН (юр. лицо)", callback_data=f"stype_inn_{query}")],
+        [InlineKeyboardButton(text="Паспорт", callback_data=f"stype_passport_{query}")],
+        [InlineKeyboardButton(text="СНИЛС", callback_data=f"stype_snils_{query}")],
+        [InlineKeyboardButton(text="ВКонтакте", callback_data=f"stype_vk_{query}"), InlineKeyboardButton(text="Telegram", callback_data=f"stype_tg_{query}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
     ])
 
 def admin_menu():
@@ -687,13 +705,15 @@ async def cb_adm_api_status(cb: CallbackQuery):
     test_q = "79825207224"
     statuses = []
     
+    # Проверка Mobius
     start = time.time()
-    succ_m, err_m = await fetch_api(API_URL_MOBIUS, {"q": test_q}, headers={"X-API-Key": API_KEY_MOBIUS})
+    succ_m, err_m = await fetch_mobius(test_q, "phone")
     t_m = round(time.time() - start, 2)
     statuses.append(f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else html.escape(str(err_m))[:50]} ({t_m}с)")
     
+    # Проверка Nebula
     start = time.time()
-    succ_n, err_n = await fetch_nebula(test_q)
+    succ_n, err_n = await fetch_nebula(test_q, "phone")
     t_n = round(time.time() - start, 2)
     statuses.append(f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:50]} ({t_n}с)")
     
@@ -716,13 +736,44 @@ async def cb_profile(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "search_menu")
 async def cb_search_menu(cb: CallbackQuery):
-    await cb.message.edit_text("Выберите тип поиска:", reply_markup=search_menu())
+    await cb.message.edit_text("Выберите тип поиска:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Обычный поиск", callback_data="search_normal")],
+        [InlineKeyboardButton(text="📄 По документам", callback_data="search_docs")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
+    ]))
     await cb.answer()
 
 @dp.callback_query(F.data == "search_normal")
 async def cb_search_normal(cb: CallbackQuery):
     await cb.message.edit_text("🔍 Отправь запрос в чат (номер, email, ФИО и т.д.)", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
+
+@dp.callback_query(F.data == "search_docs")
+async def cb_search_docs(cb: CallbackQuery):
+    await cb.message.edit_text("📄 Выберите тип документа:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Паспорт РФ", callback_data="doc_passport")],
+        [InlineKeyboardButton(text="СНИЛС", callback_data="doc_snils")],
+        [InlineKeyboardButton(text="ИНН", callback_data="doc_inn")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="search_menu")],
+    ]))
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("doc_"))
+async def cb_doc_selected(cb: CallbackQuery, state: FSMContext):
+    doc_type = cb.data.replace("doc_", "")
+    await state.update_data(doc_type=doc_type)
+    await cb.message.edit_text(f"Введите данные документа ({doc_type}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]]))
+    await state.set_state(SearchStates.wait_query)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_query)
+async def process_doc_search(msg: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    doc_type = data.get("doc_type", "auto")
+    await state.clear()
+    
+    # Запускаем поиск с принудительным типом
+    await process_search(msg, msg.text.strip(), bot, forced_type=doc_type)
 
 @dp.callback_query(F.data == "ref_link")
 async def cb_ref_link(cb: CallbackQuery):
@@ -1047,7 +1098,7 @@ async def process_promo_create(msg: Message, state: FSMContext):
     await state.clear()
 
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
-async def process_search(msg: Message, q: str, bot: Bot):
+async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None):
     is_adm = await is_admin(msg.from_user.id)
     
     if not is_adm and IS_MAINTENANCE:
@@ -1056,8 +1107,10 @@ async def process_search(msg: Message, q: str, bot: Bot):
     if not is_adm and not await deduct_request(msg.from_user.id):
         return await msg.answer("❌ Закончились запросы. Купите в меню.", reply_markup=main_menu(msg.from_user.id, is_adm))
 
-    note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы...</i>", parse_mode="HTML")
-    api_results = await query_all_apis(q)
+    q_type = forced_type if forced_type else detect_type(q)
+    note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы (Тип: {q_type})...</i>", parse_mode="HTML")
+    
+    api_results = await query_all_apis(q, q_type)
     
     if not api_results:
         if not is_adm: await add_requests(msg.from_user.id, 1)
@@ -1085,7 +1138,7 @@ async def process_search(msg: Message, q: str, bot: Bot):
     await note.edit_text(
         f"<b>Oasis Search</b>\n"
         f"├ Запрос: {html.escape(q)}\n"
-        f"└ Тип: Nonfull\n\n"
+        f"└ Тип: {q_type}\n\n"
         f"{text_report}\n\n"
         f"💰 Остаток: {bal}", 
         parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb
@@ -1115,7 +1168,7 @@ async def send_html_file(cb: CallbackQuery):
         
     await cb.answer("Генерирую...")
     note = await cb.message.reply("⏳ Собираю...")
-    api_results = await query_all_apis(q)
+    api_results = await query_all_apis(q, "auto") # При повторной генерации используем авто
     if not api_results: return await note.edit_text("❌ Данные устарели или ошибка.")
     file = BufferedInputFile(build_html_report(api_results, q).encode('utf-8'), filename=f"oasis_{q[:10]}.html")
     await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
