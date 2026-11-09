@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Version with Promocodes)
+# OASIS SEARCH (Final Version)
 import asyncio
 import json
 import html
@@ -811,7 +811,6 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     amount = data.get("buy_amount")
     pay_type = data.get("pay_type")
     
-    # Обработка возврата к оплате запросов (если это не hide_crypto)
     if pay_type != "hide_crypto":
         await state.clear()
         
