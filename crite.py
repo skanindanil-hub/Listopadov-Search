@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Full Version)
+# OASIS SEARCH (Final Clean Version)
 import asyncio
 import json
 import html
@@ -49,7 +49,7 @@ db_pool = None
 html_cache = {} 
 report_cache = {} 
 unlocked_reports = set()
-IS_MAINTENANCE = False # Глобальный флаг тех. перерыва
+IS_MAINTENANCE = False 
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -254,28 +254,26 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
 # --- ПАРСЕР ТЕКСТА ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
-    operators, tg_data, gifts, history, phone_book = set(), set(), set(), set(), set()
+    operators, tg_data = set(), set()
 
-    IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target")
+    IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target", "limit", "cache", "remaining", "cached", "used", "is_premium", "search_id", "report_url")
 
     def extract_recursive(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 k_lower = str(k).lower()
-                if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result"):
+                if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result", "groups", "records"):
                     continue
-                if isinstance(v, (str, int)):
+                if isinstance(v, (str, int, bool)):
                     val_str = str(v)
                     if not val_str.strip(): continue
-                    if any(word in val_str.lower() for word in IGNORE_WORDS): continue
+                    if any(word in k_lower for word in IGNORE_WORDS): continue 
+                    if any(word in val_str.lower() for word in IGNORE_WORDS): continue 
                     
                     if k_lower in ("username", "tg_username", "telegram", "tg", "tg_id"):
                         if len(val_str) > 1 and val_str != "None": 
                             if k_lower == "username" and not val_str.startswith("@"): val_str = f"@{val_str}"
                             tg_data.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("gift", "gifts", "подарки"): gifts.add(val_str)
-                    elif k_lower in ("history", "name_history", "история"): history.add(val_str)
-                    elif k_lower in ("phone_book", "contacts", "телефонная книга"): phone_book.add(val_str)
                     elif k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
                         if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
                     elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): 
@@ -320,21 +318,6 @@ def render_text_results(api_results: list[dict]) -> str:
         lines.append("<b>📱 Связь:</b>")
         if phones: lines.append(f"> Телефон: <tg-spoiler>{', '.join(phones)}</tg-spoiler>")
         if operators: lines.append(f"> Оператор: {', '.join(operators)}")
-        lines.append("")
-
-    if phone_book:
-        lines.append("<b>📖 Телефонная книга:</b>")
-        for pb in list(phone_book)[:5]: lines.append(f"> <tg-spoiler>{pb}</tg-spoiler>")
-        lines.append("")
-
-    if gifts:
-        lines.append("<b>🎁 Подарки:</b>")
-        for g in list(gifts)[:5]: lines.append(f"> <tg-spoiler>{g}</tg-spoiler>")
-        lines.append("")
-
-    if history:
-        lines.append("<b>📜 История имен:</b>")
-        for h in list(history)[:5]: lines.append(f"> <tg-spoiler>{h}</tg-spoiler>")
         lines.append("")
         
     if others:
@@ -447,8 +430,10 @@ async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
         return web.Response(text="<h1>404 Отчет не найден</h1>", content_type="text/html", status=404)
+    
     data = report_cache[report_id]
     is_locked = data.get("locked", False) and (report_id not in unlocked_reports)
+    
     html_content = build_html_report(data["results"], data["query"], is_locked=is_locked, report_id=report_id)
     return web.Response(text=html_content, content_type="text/html")
 
@@ -1080,7 +1065,7 @@ async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None
     html_cache[report_id] = q
     
     web_id = str(random.randint(1000000, 9999999))
-    report_cache[web_id] = {"query": q, "results": api_results, "locked": True, "text_report": text_report}
+    report_cache[web_id] = {"query": q, "results": api_results, "locked": False, "text_report": text_report}
     web_link = f"{WEBHOOK_HOST}/report/{web_id}"
     
     raw_id = str(random.randint(10000, 99999))
