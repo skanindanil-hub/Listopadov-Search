@@ -512,7 +512,7 @@ async def cb_pay_hide_stars(cb: CallbackQuery, state: FSMContext):
     await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
-@dp.callback_query(F.data == "stars_sent", FSM=BuyStates.wait_hash)
+@dp.callback_query(F.data == "stars_sent",BuyStates.wait_hash)
 async def cb_stars_sent(cb: CallbackQuery, state: FSMContext, bot: Bot):
     await state.clear()
     
