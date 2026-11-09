@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius + Nebula + Dark HTML Grid)
+# OASIS SEARCH (Mobius + Nebula + Daily Bonus)
 import asyncio
 import json
 import html
@@ -43,6 +43,7 @@ dp = Dispatcher(storage=MemoryStorage())
 db_pool = None
 html_cache = {} 
 report_cache = {} 
+IS_MAINTENANCE = False 
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -68,7 +69,8 @@ async def init_db():
                 username TEXT,
                 requests_left INTEGER DEFAULT 3,
                 referrer_id BIGINT,
-                joined_at INTEGER
+                joined_at INTEGER,
+                last_bonus_time BIGINT DEFAULT 0
             )
         """)
         await conn.execute("""
@@ -95,27 +97,12 @@ async def init_db():
                 added_at INTEGER
             )
         """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
 
 async def is_admin(user_id):
     if user_id == MAIN_ADMIN_ID: return True
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id FROM admins WHERE user_id=$1", user_id)
         return bool(row)
-
-async def get_maintenance() -> bool:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT value FROM settings WHERE key='maintenance'")
-        return row and row['value'] == '1'
-
-async def set_maintenance(value: str):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO settings (key, value) VALUES ('maintenance', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", value)
 
 async def add_user(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
@@ -224,8 +211,6 @@ async def fetch_nebula(q: str) -> tuple[bool, dict | str]:
         return False, str(e)
 
 async def query_all_apis(q: str) -> list[dict]:
-    q_type = detect_type(q)
-    
     tasks = [
         fetch_api(API_URL_MOBIUS, {"q": q}, headers={"X-API-Key": API_KEY_MOBIUS}),
         fetch_nebula(q)
@@ -261,7 +246,7 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ПАРСЕР (Карточка профиля) ---
+# --- ПАРСЕР ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, genders, dates, ages = set(), set(), set(), set()
     phones, operators, regions, countries = set(), set(), set(), set()
@@ -281,14 +266,18 @@ def render_text_results(api_results: list[dict]) -> str:
                     if any(word in val_str.lower() for word in IGNORE_WORDS): continue
                     
                     if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
-                        if len(val_str) > 2: fio.add(val_str)
+                        if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
                     elif k_lower in ("phone", "phone_2", "mobile", "number"): phones.add(val_str)
                     elif k_lower == "operator": operators.add(val_str)
                     elif k_lower == "region": regions.add(val_str)
                     elif k_lower == "country": countries.add(val_str)
                     elif k_lower in ("email", "mail"): emails.add(val_str)
                     elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
+                    elif k_lower in ("birthday", "birth_date", "date", "dob"): 
+                        if "T" in val_str:
+                            parts = val_str.split("T")[0].split("-")
+                            if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
+                        dates.add(val_str)
                     elif k_lower == "age": ages.add(val_str)
                     elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
                     elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number"): docs.add(f"{k.capitalize()}: {val_str}")
@@ -365,7 +354,7 @@ def render_text_results(api_results: list[dict]) -> str:
 
     return "\n".join(lines).strip()
 
-# --- HTML ОТЧЕТ (Дизайн как на скрине) ---
+# --- HTML ОТЧЕТ ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     all_items = []
     for res in api_results:
@@ -400,12 +389,20 @@ def build_html_report(api_results: list[dict], query: str) -> str:
             else:
                 if v is None or v == "": continue
                 val_str = str(v)
+                
+                if k_lower in ("birthday", "birth_date", "date", "dob"):
+                    if "T" in val_str:
+                        parts = val_str.split("T")[0].split("-")
+                        if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
+                    dates.add(val_str)
+                    continue
+
                 if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
-                    if len(val_str) > 2: fio.add(val_str)
+                    if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str):
+                        fio.add(val_str)
                 elif k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
                 elif k_lower in ("email", "mail"): emails.add(val_str)
                 elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
-                elif k_lower in ("birthday", "birth_date", "date", "dob"): dates.add(val_str)
                 elif k_lower == "age": ages.add(val_str)
                 elif k_lower == "operator": operators.add(val_str)
                 elif k_lower == "region": regions.add(val_str)
@@ -546,10 +543,8 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     <body>
         <div class="container">
             <div class="header">
-                <div class="version-badge">V.2026</div>
-                <h1 class="main-title">OSINT — Полная база</h1>
-                <div class="subtitle">Обучение · методы · инструменты · код</div>
-                <div class="subtitle" style="color: #fff; font-weight: bold; margin-top: -10px;">ОТ OASIS SEARCH</div>
+                <div class="version-badge">OASIS SEARCH</div>
+                <h1 class="main-title">ОТЧЕТ ПО БАЗЕ</h1>
             </div>
 
             <div class="query-text">{html.escape(main_name)}</div>
@@ -578,7 +573,7 @@ async def web_report_handler(request):
 def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
-        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎟 Промокод", callback_data="enter_promo")],
+        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎁 Бонус", callback_data="daily_bonus")],
         [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
         [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
     ]
@@ -627,6 +622,33 @@ async def start(msg: Message, command: CommandStart):
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
+@dp.callback_query(F.data == "daily_bonus")
+async def cb_daily_bonus(cb: CallbackQuery):
+    user_id = cb.from_user.id
+    if await is_admin(user_id):
+        return await cb.answer("У админов безлимит.", show_alert=True)
+        
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT last_bonus_time FROM users WHERE user_id=$1", user_id)
+        last_time = row['last_bonus_time'] if row else 0
+        
+    now = int(time.time())
+    if now - last_time < 86400:
+        remaining = 86400 - (now - last_time)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        return await cb.answer(f"❌ Лимит исчерпан. Новый бонус через {hours} ч. {minutes} мин.", show_alert=True)
+        
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_bonus_time=$1 WHERE user_id=$2", now, user_id)
+        
+    await add_requests(user_id, 2)
+    await cb.answer("🎁 Вам начислено +2 запроса!", show_alert=True)
+    await cb.message.edit_text(
+        "✅ <b>Бонус получен!</b>\nВы получили <b>+2 запроса</b>.\nВозвращайтесь через 24 часа за новым бонусом.",
+        parse_mode="HTML", reply_markup=main_menu(user_id, False)
+    )
+
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): 
@@ -636,14 +658,13 @@ async def cb_admin_panel(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "adm_maintenance")
 async def cb_adm_maintenance(cb: CallbackQuery):
+    global IS_MAINTENANCE
     if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
     
-    current_status = await get_maintenance()
-    new_status = "0" if current_status else "1"
-    await set_maintenance(new_status)
+    IS_MAINTENANCE = not IS_MAINTENANCE
     
-    status_text = "ВКЛЮЧЕН 🔴" if new_status == "1" else "ВЫКЛЮЧЕН 🟢"
-    btn_text = "Выключить (Разрешить поиск) 🟢" if new_status == "1" else "Включить (Заблокировать поиск) 🔴"
+    status_text = "ВКЛЮЧЕН 🔴" if IS_MAINTENANCE else "ВЫКЛЮЧЕН 🟢"
+    btn_text = "Выключить (Разрешить поиск) 🟢" if IS_MAINTENANCE else "Включить (Заблокировать поиск) 🔴"
     
     await cb.message.edit_text(
         f"🛠 <b>Технический перерыв</b>\n\n"
@@ -1029,7 +1050,7 @@ async def process_promo_create(msg: Message, state: FSMContext):
 async def process_search(msg: Message, q: str, bot: Bot):
     is_adm = await is_admin(msg.from_user.id)
     
-    if not is_adm and await get_maintenance():
+    if not is_adm and IS_MAINTENANCE:
         return await msg.answer("🛠 <b>Бот на техническом перерыве.</b>\n\nМы обновляем базы данных. Пожалуйста, зайдите позже.", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
     if not is_adm and not await deduct_request(msg.from_user.id):
