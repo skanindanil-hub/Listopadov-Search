@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Version)
+# OASIS SEARCH (Final Correct Version)
 import asyncio
 import json
 import html
@@ -36,6 +36,7 @@ DATABASE_URL = "postgresql://admin:RRxOapzxaKxIHvMAgyRTOwDZWaVAHXLX@dpg-dbltbteg
 CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STARS_PRICE = 300
 CRYPTO_PRICE = 5.0
+PRICE_PER_REQ_TON = 0.03
 
 # --- НАСТРОЙКИ RENDER ---
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://listopadov-search-1.onrender.com")
@@ -489,7 +490,7 @@ async def start(msg: Message, command: CommandStart):
 async def cb_hide_data_menu(cb: CallbackQuery):
     await cb.message.edit_text(
         "🔒 <b>Скрытие данных</b>\n\n"
-        "Эта функция позволяет скрыть все данные в веб-отчете. Вы сможете отправить ссылку кому угодно, но без оплаты они увидят только заглушку «Данные скрыты».\n\n"
+        "Эта функция позволяет скрыть данные. После оплаты бот пришлет вам отчет в чат.\n\n"
         "Выберите способ оплаты:",
         parse_mode="HTML", reply_markup=hide_data_menu()
     )
@@ -512,11 +513,14 @@ async def cb_pay_hide_stars(cb: CallbackQuery, state: FSMContext):
     await state.set_state(BuyStates.wait_hash)
     await cb.answer()
 
-@dp.callback_query(F.data == "stars_sent",BuyStates.wait_hash)
+@dp.callback_query(F.data == "stars_sent", BuyStates.wait_hash)
 async def cb_stars_sent(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
     await state.clear()
     
     temp_report_id = str(random.randint(1000000, 9999999))
+    # Сохраняем "пустышку", чтобы unlock не упал
+    report_cache[temp_report_id] = {"text_report": "Данные не были найдены или устарели."} 
     
     await cb.message.edit_text("⏳ Заявка отправлена админу на проверку. Ожидайте.", reply_markup=main_menu(cb.from_user.id, False))
     
@@ -524,12 +528,11 @@ async def cb_stars_sent(cb: CallbackQuery, state: FSMContext, bot: Bot):
         f"🎁 <b>Заявка на подписку (Stars)!</b>\n\n"
         f"👤 @{cb.from_user.username} (ID: <code>{cb.from_user.id}</code>)\n"
         f"💵 Тип: Подарок 300⭐\n"
-        f"🆔 ID отчета: <code>{temp_report_id}</code>\n\n"
         f"<i>Проверьте подарки в профиле @anodoxx.</i>"
     )
     
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{temp_report_id}"),
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{cb.from_user.id}_{temp_report_id}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data="rej_hide")
     ]])
     
@@ -562,18 +565,19 @@ async def process_crypto_hash(msg: Message, state: FSMContext, bot: Bot):
         if len(tx_hash) < 10:
             return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
             
+        report_cache[temp_report_id] = {"text_report": "Данные не были найдены или устарели."}
+            
         await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
         
         admin_text = (
             f"💰 <b>Заявка на подписку (Crypto)!</b>\n\n"
             f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
             f"💵 Тип: 5$ (TON)\n"
-            f"🆔 ID отчета: <code>{temp_report_id}</code>\n"
             f"🔗 <code>{html.escape(tx_hash)}</code>"
         )
         
         admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{temp_report_id}"),
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{msg.from_user.id}_{temp_report_id}"),
             InlineKeyboardButton(text="❌ Отклонить", callback_data="rej_hide")
         ]])
         
@@ -582,11 +586,26 @@ async def process_crypto_hash(msg: Message, state: FSMContext, bot: Bot):
 @dp.callback_query(F.data.startswith("unlock_"))
 async def admin_unlock(cb: CallbackQuery, bot: Bot):
     if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
-    _, report_id = cb.data.split("_")
+    
+    parts = cb.data.split("_")
+    uid = int(parts[1])
+    report_id = parts[2]
+    
+    report_data = report_cache.get(report_id)
+    
+    if not report_data:
+        return await cb.answer("Отчет не найден (устарел)", show_alert=True)
+        
+    try:
+        await bot.send_message(
+            uid, 
+            f"✅ <b>Оплата подтверждена!</b>\n\nВаш отчет:\n\n{report_data.get('text_report', 'Данные устарели')}", 
+            parse_mode="HTML"
+        )
+    except: pass
     
     unlocked_reports.add(report_id)
-    
-    await cb.message.edit_text(f"✅ Доступ к отчету <code>{report_id}</code> разблокирован.")
+    await cb.message.edit_text(f"✅ Доступ для <code>{uid}</code> разблокирован и отправлен в чат.")
     await cb.answer()
 
 @dp.callback_query(F.data == "rej_hide")
@@ -1026,7 +1045,7 @@ async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None
     html_cache[report_id] = q
     
     web_id = str(random.randint(1000000, 9999999))
-    report_cache[web_id] = {"query": q, "results": api_results, "locked": True}
+    report_cache[web_id] = {"query": q, "results": api_results, "locked": True, "text_report": text_report}
     web_link = f"{WEBHOOK_HOST}/report/{web_id}"
     
     raw_id = str(random.randint(10000, 99999))
