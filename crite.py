@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius + Nebula + Tech Break + Stars)
+# OASIS SEARCH (Mobius + Nebula + Clean Parser + Dark HTML)
 import asyncio
 import json
 import html
@@ -261,7 +261,7 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ПАРСЕР ---
+# --- ПАРСЕР (Вариант 1: Карточка профиля) ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, genders, dates, ages = set(), set(), set(), set()
     phones, operators, regions, countries = set(), set(), set(), set()
@@ -365,7 +365,7 @@ def render_text_results(api_results: list[dict]) -> str:
 
     return "\n".join(lines).strip()
 
-# --- HTML ОТЧЕТ ---
+# --- HTML ОТЧЕТ (Темный дизайн со скрина) ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     all_items = []
     for res in api_results:
