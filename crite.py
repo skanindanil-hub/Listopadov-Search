@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius POST + Nebula GET + Types)
+# OASIS SEARCH (Final Version)
 import asyncio
 import json
 import html
@@ -32,6 +32,11 @@ BOT_USERNAME = "searchosintlistopadov_bot"
 MAIN_ADMIN_ID = 8394631079
 DATABASE_URL = "postgresql://admin:RRxOapzxaKxIHvMAgyRTOwDZWaVAHXLX@dpg-dbltbtegekts73cc59fg-a/oasis_rl3m"
 
+# --- НАСТРОЙКИ ОПЛАТЫ ---
+CRYPTO_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
+STARS_PRICE = 300
+CRYPTO_PRICE = 5.0
+
 # --- НАСТРОЙКИ RENDER ---
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://listopadov-search-1.onrender.com")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
@@ -43,6 +48,7 @@ dp = Dispatcher(storage=MemoryStorage())
 db_pool = None
 html_cache = {} 
 report_cache = {} 
+unlocked_reports = set()
 IS_MAINTENANCE = False 
 
 class BuyStates(StatesGroup):
@@ -180,59 +186,59 @@ def detect_type(query: str) -> str:
     if re.match(r"^[А-ЯA-Z]\d{3}[А-ЯA-Z]{2}\d{2,3}$", q.upper()): return "auto"
     return "fio"
 
-# --- ЗАПРОСЫ К API ---
+def get_operator(phone: str) -> str:
+    clean_phone = re.sub(r'\D', '', phone)
+    if len(clean_phone) == 11 and clean_phone.startswith('8'):
+        clean_phone = '7' + clean_phone[1:]
+    elif len(clean_phone) == 10:
+        clean_phone = '7' + clean_phone
+
+    if len(clean_phone) != 11 or not clean_phone.startswith('7'):
+        return ""
+
+    prefix = clean_phone[1:4]
+    
+    if prefix in ['910', '911', '912', '913', '914', '915', '916', '917', '918', '919', '980', '981', '982', '983', '984', '985', '986', '987', '988', '989', '901', '903']: return "МТС"
+    if prefix in ['905', '906', '909', '962', '963', '964', '965', '966', '967', '968', '969']: return "Билайн"
+    if prefix in ['902', '904', '908', '950', '951', '952', '953', '955', '956', '958', '960', '961']: return "МегаФон"
+    if prefix in ['900', '901', '902', '904', '908', '950', '951', '952', '953', '958', '977', '991', '992', '993', '994', '995', '996', '997', '999']: return "Т2 (Tele2)"
+    
+    return ""
+
+# --- API ЗАПРОСЫ ---
 async def fetch_mobius(q: str, q_type: str) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
     headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
     payload = {"query": q, "type": q_type}
     
     try:
-        # Пауза 2 секунды, чтобы не получить 429 Too Many Requests
-        await asyncio.sleep(2)
-        
+        await asyncio.sleep(2) 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
                 if resp.status == 200:
-                    raw = await resp.text()
-                    return True, json.loads(raw)
-                return False, f"HTTP {resp.status} - {raw[:100]}"
-    except asyncio.TimeoutError:
-        return False, "Таймаут"
+                    return True, json.loads(await resp.text())
+                return False, f"HTTP {resp.status}"
     except Exception as e:
         return False, str(e)
 
 async def fetch_nebula(q: str, q_type: str) -> tuple[bool, dict | str]:
     timeout = aiohttp.ClientTimeout(total=25)
     headers = {"X-API-Key": API_KEY_NEBULA}
-    
-    # Nebula принимает type: auto, phone, tg, email, fio
-    if q_type == "fio": n_type = "auto"
-    else: n_type = q_type
-        
+    n_type = "auto" if q_type == "fio" else q_type
     params = {"query": q, "type": n_type}
     
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(API_URL_NEBULA, params=params, headers=headers) as resp:
                 if resp.status == 200:
-                    raw = await resp.text()
-                    return True, json.loads(raw)
-                return False, f"HTTP {resp.status} - {raw[:100]}"
-    except asyncio.TimeoutError:
-        return False, "Таймаут"
+                    return True, json.loads(await resp.text())
+                return False, f"HTTP {resp.status}"
     except Exception as e:
         return False, str(e)
 
 async def query_all_apis(q: str, q_type: str) -> list[dict]:
-    tasks = [
-        fetch_mobius(q, q_type),
-        fetch_nebula(q, q_type)
-    ]
-    
-    try:
-        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30)
-    except asyncio.TimeoutError:
-        return []
+    tasks = [fetch_mobius(q, q_type), fetch_nebula(q, q_type)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     
     combined = []
     sources = ["Mobius", "Nebula"]
@@ -240,32 +246,15 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
     for i, res in enumerate(results):
         if isinstance(res, Exception): continue
         success, data = res
-        if not success: 
-            logging.warning(f"API {sources[i]} ошибка: {data}")
-            continue
-        if isinstance(data, dict):
+        if success and isinstance(data, dict):
             combined.append({"source": sources[i], "data": data})
                 
     return combined
 
-def clean_data(obj):
-    if isinstance(obj, dict):
-        res = {}
-        for k, v in obj.items():
-            if k in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype"):
-                continue
-            if v is None or v == "" or v == {} or v == []: continue
-            res[k] = clean_data(v)
-        return res
-    elif isinstance(obj, list):
-        return [clean_data(v) for v in obj if v]
-    return obj
-
-# --- ПАРСЕР ---
+# --- ПАРСЕР ТЕКСТА ---
 def render_text_results(api_results: list[dict]) -> str:
-    fio, genders, dates, ages = set(), set(), set(), set()
-    phones, operators, regions, countries = set(), set(), set(), set()
-    emails, socials, docs, addresses, others = set(), set(), set(), set(), set()
+    fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
+    operators = set()
 
     IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target")
 
@@ -282,21 +271,25 @@ def render_text_results(api_results: list[dict]) -> str:
                     
                     if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
                         if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
-                    elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): phones.add(val_str)
-                    elif k_lower in ("operator", "оператор"): operators.add(val_str)
-                    elif k_lower in ("region", "регион", "город", "city"): regions.add(val_str)
-                    elif k_lower in ("country", "страна"): countries.add(val_str)
+                    elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): 
+                        phones.add(val_str)
+                        op = get_operator(val_str)
+                        if op: operators.add(op)
+                    elif k_lower in ("operator", "оператор"): 
+                        if val_str.lower() not in ("мтс", "билайн", "мегафон", "т2"): operators.add(val_str)
+                    elif k_lower in ("region", "регион", "город", "city"): others.add(f"Регион: {val_str}")
+                    elif k_lower in ("country", "страна"): others.add(f"Страна: {val_str}")
                     elif k_lower in ("email", "mail", "почта"): emails.add(val_str)
                     elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
                     elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"): 
                         if "T" in val_str:
                             parts = val_str.split("T")[0].split("-")
                             if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
-                        dates.add(val_str)
-                    elif k_lower in ("age", "возраст"): ages.add(val_str)
-                    elif k_lower in ("gender", "sex", "пол"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
+                        others.add(f"Дата рождения: {val_str}")
+                    elif k_lower in ("age", "возраст"): others.add(f"Возраст: {val_str}")
+                    elif k_lower in ("gender", "sex", "пол"): others.add(f"Пол: {'Мужской' if val_str.lower() in ('m', 'male', 'мужской', 'м') else 'Женский'}")
                     elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number", "инн", "снилс", "паспорт"): docs.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("address", "адрес"): addresses.add(val_str)
+                    elif k_lower in ("address", "адрес"): others.add(f"Адрес: {val_str}")
                     else: others.add(f"{k.capitalize()}: {val_str}")
                 else:
                     extract_recursive(v)
@@ -307,150 +300,91 @@ def render_text_results(api_results: list[dict]) -> str:
         extract_recursive(res.get("data", {}))
 
     lines = []
-    if fio or phones:
-        main_name = list(fio)[0] if fio else "Неизвестно"
-        lines.append(f"🪪 <b>{main_name}</b>\n")
-        
-    lines.append("━━━━━━━━━━━━━━━")
-
-    if phones or operators or regions:
-        lines.append("📱 <b>Контакты</b>")
-        if phones: lines.append(f"├ Телефон: <code>{', '.join(phones)}</code>")
-        if operators: lines.append(f"├ Оператор: {', '.join(operators)}")
-        if regions: lines.append(f"└ Регион: {', '.join(regions)}")
+    if fio:
+        main_name = list(fio)[0]
+        lines.append(f"<b>🪪 {main_name}</b>")
+        lines.append("")
+    
+    if phones or operators:
+        lines.append("<b>📱 Связь:</b>")
+        if phones:
+            lines.append(f"> Телефон: {', '.join(phones)}")
+        if operators:
+            lines.append(f"> Оператор: {', '.join(operators)}")
         lines.append("")
         
-    if fio or genders or dates or ages:
-        lines.append("👤 <b>Личные данные</b>")
-        if fio: lines.append(f"├ ФИО: {', '.join(fio)}")
-        if dates: lines.append(f"├ Дата рождения: {', '.join(dates)}")
-        if ages: lines.append(f"├ Возраст: {', '.join(ages)}")
-        if genders: lines.append(f"└ Пол: {', '.join(genders)}")
-        lines.append("")
-
-    if socials:
-        lines.append("🌐 <b>Соцсети</b>")
-        for i, s in enumerate(socials):
-            prefix = "└" if i == len(socials) - 1 else "├"
-            lines.append(f"{prefix} {s}")
+    if others:
+        lines.append("<b>👤 Основные данные:</b>")
+        for o in list(others)[:6]:
+            lines.append(f"> {o}")
         lines.append("")
 
     if emails:
-        lines.append("📧 <b>E-mail</b>")
-        for i, e in enumerate(emails):
-            prefix = "└" if i == len(emails) - 1 else "├"
-            lines.append(f"{prefix} {e}")
+        lines.append("<b>📧 E-mail:</b>")
+        for e in emails:
+            lines.append(f"> {e}")
         lines.append("")
 
     if docs:
-        lines.append("📄 <b>Документы</b>")
-        for i, d in enumerate(docs):
-            prefix = "└" if i == len(docs) - 1 else "├"
-            lines.append(f"{prefix} {d}")
-        lines.append("")
-        
-    if addresses:
-        lines.append("🏠 <b>Адреса</b>")
-        for i, a in enumerate(addresses):
-            prefix = "└" if i == len(addresses) - 1 else "├"
-            lines.append(f"{prefix} {a}")
+        lines.append("<b>📄 Документы:</b>")
+        for d in docs:
+            lines.append(f"> {d}")
         lines.append("")
 
-    clean_others = [o for o in others if not any(word in o.lower() for word in IGNORE_WORDS)]
-    if clean_others:
-        lines.append("🗂 <b>Прочие данные</b>")
-        for i, o in enumerate(clean_others[:10]):
-            prefix = "└" if i == len(clean_others[:10]) - 1 else "├"
-            lines.append(f"{prefix} {o}")
+    if socials:
+        lines.append("<b>🌐 Соцсети:</b>")
+        for s in socials:
+            lines.append(f"> {s}")
         lines.append("")
 
-    if not lines or len(lines) < 3: 
+    if len(lines) <= 1: 
         return "🔍 <b>Данных не найдено.</b>"
 
     return "\n".join(lines).strip()
 
 # --- HTML ОТЧЕТ ---
-def build_html_report(api_results: list[dict], query: str) -> str:
-    all_items = []
-    for res in api_results:
-        data = clean_data(res["data"])
-        results_dict = data.get("results", {})
-        items = results_dict if isinstance(results_dict, list) else list(results_dict.values()) if isinstance(results_dict, dict) else []
-        for src_data in items:
-            if not isinstance(src_data, dict): continue
-            inner = src_data.get("result", {}).get("data", {}).get("results", {})
-            if isinstance(inner, dict): all_items.append(inner)
-            elif isinstance(inner, list): all_items.extend([i for i in inner if isinstance(i, dict)])
+def build_html_report(api_results: list[dict], query: str, is_locked: bool = False, report_id: str = None) -> str:
+    fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
+    
+    def extract(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(v, str) and len(v) > 2:
+                    k_l = k.lower()
+                    if k_l in ("name", "fio", "фио"): fio.add(v)
+                    elif k_l in ("phone", "телефон"): phones.add(v)
+                    elif k_l in ("email", "почта"): emails.add(v)
+                    elif k_l in ("passport", "snils", "inn", "паспорт", "снилс", "инн"): docs.add(f"{k}: {v}")
+                    else: others.add(f"{k.capitalize()}: {v}")
+                elif isinstance(v, (dict, list)): extract(v)
+        elif isinstance(obj, list):
+            for i in obj: extract(i)
+            
+    for r in api_results: extract(r.get("data", {}))
+    
+    def make_sec(title, data):
+        if not data: return ""
+        rows = "".join([f'<div class="list-item">{html.escape(str(x))}</div>' for x in data])
+        return f'<div class="section-card"><div class="section-title"><span class="dot"></span>{title}</div><div class="section-content">{rows}</div></div>'
 
-    fio, genders, dates, ages = set(), set(), set(), set()
-    phones, operators, regions, countries = set(), set(), set(), set()
-    emails, socials, docs, addresses, others = set(), set(), set(), set(), set()
+    if is_locked:
+        content_html = f"""
+        <div style="text-align: center; padding: 50px 20px;">
+            <h2 style="color: #ff4444;">🔒 ДАННЫЕ СКРЫТЫ</h2>
+            <p style="color: #888; margin-top: 20px;">Этот отчет защищен. Чтобы получить доступ к данным, свяжитесь с администратором: <b>@anodoxx</b></p>
+            <p style="color: #555; font-size: 12px; margin-top: 40px;">ID отчета: {report_id}</p>
+        </div>
+        """
+    else:
+        content_html = f"""
+        {make_sec("1. Основные данные", fio)}
+        {make_sec("2. Контакты", list(phones) + list(emails))}
+        {make_sec("3. Документы", docs)}
+        {make_sec("4. Соцсети", socials)}
+        {make_sec("5. Прочее", list(others)[:10])}
+        """
 
-    TRANSLATIONS = {"surname": "Фамилия", "name": "Имя", "fathername": "Отчество", "first_name": "Имя", "last_name": "Фамилия", "middle_name": "Отчество", "phone": "Телефон", "phone_2": "Доп. телефон", "birthday": "Дата рождения", "birth_date": "Дата рождения", "address": "Адрес", "login": "Логин", "region": "Регион", "snils": "СНИЛС", "inn": "ИНН", "passport": "Паспорт", "email": "Email", "date": "Дата", "password": "Пароль", "hash": "Хэш", "full_name": "ФИО", "operator": "Оператор", "age": "Возраст"}
-
-    for item in all_items:
-        for k, v in item.items():
-            k_lower = k.lower()
-            if isinstance(v, list):
-                for i in v:
-                    val_str = str(i)
-                    if k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
-                    elif k_lower in ("email", "mail"): emails.add(val_str)
-                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
-                    elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
-                    elif k_lower in ("address", "region"): addresses.add(val_str)
-                    else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
-            elif isinstance(v, dict): continue
-            else:
-                if v is None or v == "": continue
-                val_str = str(v)
-                
-                if k_lower in ("birthday", "birth_date", "date", "dob"):
-                    if "T" in val_str:
-                        parts = val_str.split("T")[0].split("-")
-                        if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
-                    dates.add(val_str)
-                    continue
-
-                if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name"): 
-                    if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str):
-                        fio.add(val_str)
-                elif k_lower in ("phone", "phone_2", "mobile"): phones.add(val_str)
-                elif k_lower in ("email", "mail"): emails.add(val_str)
-                elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{TRANSLATIONS.get(k_lower, k_lower).capitalize()}: {val_str}")
-                elif k_lower == "age": ages.add(val_str)
-                elif k_lower == "operator": operators.add(val_str)
-                elif k_lower == "region": regions.add(val_str)
-                elif k_lower == "country": countries.add(val_str)
-                elif k_lower in ("gender", "sex"): genders.add("Мужской" if val_str.lower() in ("m", "male", "мужской", "м") else "Женский")
-                elif k_lower in ("inn", "snils", "passport", "ogrn"): docs.add(f"{TRANSLATIONS.get(k_lower, k_lower)}: {val_str}")
-                elif k_lower in ("address", "region"): addresses.add(val_str)
-                else: others.add(f"{TRANSLATIONS.get(k_lower, k.capitalize())}: {val_str}")
-
-    main_name = list(fio)[0] if fio else query
-    initial = main_name[0].upper() if main_name else "?"
-
-    def make_section(title, items_list):
-        if not items_list: return ""
-        rows = "".join([f'<div class="list-item">{html.escape(str(val))}</div>' for val in items_list])
-        return f"""
-        <div class="section-card">
-            <div class="section-title"><span class="dot"></span>{title}</div>
-            <div class="section-content">
-                {rows}
-            </div>
-        </div>"""
-
-    sections_html = ""
-    sections_html += make_section("1. Основные данные", [f"ФИО: {x}" for x in fio] + [f"Дата рождения: {x}" for x in dates] + [f"Возраст: {x}" for x in ages] + [f"Пол: {x}" for x in genders])
-    sections_html += make_section("2. Контакты", [f"Телефон: {x}" for x in phones] + [f"Оператор: {x}" for x in operators] + [f"Регион: {x}" for x in regions])
-    sections_html += make_section("3. Социальные сети", list(socials))
-    sections_html += make_section("4. Почта", list(emails))
-    sections_html += make_section("5. Документы", list(docs))
-    sections_html += make_section("6. Адреса", list(addresses))
-    sections_html += make_section("7. Прочие данные", list(others)[:10])
-
-    details_html = f"""
+    html_content = f"""
     <!DOCTYPE html>
     <html lang="ru">
     <head>
@@ -459,99 +393,18 @@ def build_html_report(api_results: list[dict], query: str) -> str:
         <title>Oasis Search - {html.escape(query)}</title>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
-            
-            :root {{ 
-                --bg: #0a0a0a; 
-                --card: #111111; 
-                --text: #ffffff; 
-                --muted: #888888; 
-                --border: #222222; 
-            }}
-            
-            body {{ 
-                font-family: 'Inter', sans-serif; 
-                background-color: var(--bg); 
-                color: var(--text); 
-                margin: 0; 
-                padding: 20px; 
-                line-height: 1.6; 
-                background-image: 
-                    linear-gradient(var(--border) 1px, transparent 1px),
-                    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-                background-size: 50px 50px;
-                background-position: center top;
-            }}
-            
+            :root {{ --bg: #0a0a0a; --card: #111111; --text: #ffffff; --muted: #888888; --border: #222222; }}
+            body {{ font-family: 'Inter', sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.6; background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px); background-size: 50px 50px; background-position: center top; }}
             .container {{ max-width: 600px; margin: 0 auto; position: relative; }}
-            
             .header {{ text-align: center; margin-bottom: 40px; padding-top: 20px; }}
-            .version-badge {{ 
-                display: inline-block; 
-                border: 1px solid var(--border); 
-                border-radius: 20px; 
-                padding: 4px 12px; 
-                font-family: 'JetBrains Mono', monospace; 
-                font-size: 12px; 
-                color: var(--muted); 
-                letter-spacing: 2px; 
-                margin-bottom: 20px;
-            }}
-            .main-title {{ 
-                font-size: 32px; 
-                font-weight: 800; 
-                text-transform: uppercase; 
-                letter-spacing: 1px; 
-                margin: 0 0 10px 0; 
-                line-height: 1.1;
-            }}
-            .subtitle {{ 
-                font-family: 'JetBrains Mono', monospace; 
-                font-size: 14px; 
-                color: var(--muted); 
-                margin-bottom: 20px; 
-            }}
-            .query-text {{ 
-                font-size: 24px; 
-                font-weight: 800; 
-                margin-bottom: 20px;
-            }}
-            
-            .section-card {{ 
-                background-color: var(--card); 
-                border: 1px solid var(--border); 
-                border-radius: 12px; 
-                margin-bottom: 20px; 
-                overflow: hidden;
-            }}
-            .section-title {{ 
-                padding: 16px 20px; 
-                font-size: 18px; 
-                font-weight: 700; 
-                display: flex; 
-                align-items: center;
-                border-bottom: 1px solid var(--border);
-            }}
-            .dot {{ 
-                width: 8px; 
-                height: 8px; 
-                background-color: var(--text); 
-                border-radius: 50%; 
-                display: inline-block; 
-                margin-right: 12px; 
-            }}
-            .section-content {{ 
-                padding: 10px 20px; 
-            }}
-            .list-item {{ 
-                font-family: 'JetBrains Mono', monospace; 
-                font-size: 14px; 
-                padding: 8px 0; 
-                border-bottom: 1px solid #1a1a1a; 
-                color: #dddddd;
-                word-break: break-word;
-            }}
-            .list-item:last-child {{ border-bottom: none; }}
-            
+            .version-badge {{ display: inline-block; border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); letter-spacing: 2px; margin-bottom: 20px; }}
+            .main-title {{ font-size: 32px; font-weight: 800; text-transform: uppercase; margin: 0 0 10px 0; line-height: 1.1; }}
+            .query-text {{ font-size: 24px; font-weight: 800; margin-bottom: 20px; }}
+            .section-card {{ background-color: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }}
+            .section-title {{ padding: 16px 20px; font-size: 18px; font-weight: 700; display: flex; align-items: center; border-bottom: 1px solid var(--border); }}
+            .dot {{ width: 8px; height: 8px; background-color: var(--text); border-radius: 50%; display: inline-block; margin-right: 12px; }}
+            .section-content {{ padding: 10px 20px; }}
+            .list-item {{ font-family: 'JetBrains Mono', monospace; font-size: 14px; padding: 8px 0; border-bottom: 1px solid #1a1a1a; color: #dddddd; word-break: break-word; }}
             .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }}
         </style>
     </head>
@@ -561,65 +414,59 @@ def build_html_report(api_results: list[dict], query: str) -> str:
                 <div class="version-badge">OASIS SEARCH</div>
                 <h1 class="main-title">ОТЧЕТ ПО БАЗЕ</h1>
             </div>
-
-            <div class="query-text">{html.escape(main_name)}</div>
-
-            {sections_html}
-            
-            <div class="footer">
-                Сгенерировано автоматически &bull; {len(api_results)} источников
-            </div>
+            <div class="query-text">{html.escape(query)}</div>
+            {content_html}
+            <div class="footer">Сгенерировано автоматически &bull; {len(api_results)} источников</div>
         </div>
     </body>
     </html>
     """
-    return details_html
+    return html_content
 
-# --- ВЕБ-ХЕНДЛЕР ДЛЯ ОТЧЕТОВ ---
+# --- ВЕБ-ХЕНДЛЕР ---
 async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
-        return web.Response(text="<h1>404 Отчет не найден или устарел</h1><p>Сгенерируйте новый в боте.</p>", content_type="text/html", status=404)
+        return web.Response(text="<h1>404 Отчет не найден</h1>", content_type="text/html", status=404)
     data = report_cache[report_id]
-    html_content = build_html_report(data["results"], data["query"])
+    is_locked = data.get("locked", False) and (report_id not in unlocked_reports)
+    html_content = build_html_report(data["results"], data["query"], is_locked=is_locked, report_id=report_id)
     return web.Response(text=html_content, content_type="text/html")
 
 # --- МЕНЮ ---
 def main_menu(user_id=None, is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🔍 Search", callback_data="search_menu")],
-        [InlineKeyboardButton(text="💎 Приобрести запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎁 Бонус", callback_data="daily_bonus")],
-        [InlineKeyboardButton(text="👤 Мой аккаунт", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
-        [InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="📄 Условия", callback_data="terms")],
+        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_menu"), InlineKeyboardButton(text="🎁 Бонус", callback_data="daily_bonus")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"), InlineKeyboardButton(text="🆘 Поддержка", url="https://t.me/anodoxx")],
+        [InlineKeyboardButton(text="🔒 Скрыть данные (300⭐ / 5$)", callback_data="hide_data_menu")],
     ]
     if is_admin:
         kb.append([InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def search_type_menu(query: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ИНН (юр. лицо)", callback_data=f"stype_inn_{query}")],
-        [InlineKeyboardButton(text="Паспорт", callback_data=f"stype_passport_{query}")],
-        [InlineKeyboardButton(text="СНИЛС", callback_data=f"stype_snils_{query}")],
-        [InlineKeyboardButton(text="ВКонтакте", callback_data=f"stype_vk_{query}"), InlineKeyboardButton(text="Telegram", callback_data=f"stype_tg_{query}")],
-        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
-    ])
-
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
-        [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="adm_add_admin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
-def promo_menu():
+def buy_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="promo_create")],
-        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="promo_list")],
-        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
+        [InlineKeyboardButton(text="10 запросов", callback_data="buy_10"), InlineKeyboardButton(text="50 запросов", callback_data="buy_50")],
+        [InlineKeyboardButton(text="100 запросов", callback_data="buy_100"), InlineKeyboardButton(text="1000 запросов", callback_data="buy_1000")],
+        [InlineKeyboardButton(text="✏️ Свое количество", callback_data="buy_custom")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
+    ])
+
+def hide_data_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Оплатить 300 Stars", callback_data="pay_hide_stars")],
+        [InlineKeyboardButton(text="💎 Оплатить 5$ (Crypto)", callback_data="pay_hide_crypto")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
     ])
 
 # --- ОБРАБОТЧИКИ ---
@@ -632,120 +479,199 @@ async def start(msg: Message, command: CommandStart):
     is_new = await add_user(msg.from_user.id, msg.from_user.username, referrer_id)
     if is_new and referrer_id:
         await add_requests(referrer_id, 2) 
-        try: await msg.bot.send_message(referrer_id, f"🎉 По вашей ссылке пришел новый пользователь! Вам начислено <b>+2 запроса</b>.", parse_mode="HTML")
-        except: pass
 
     total_users = await get_total_users()
     is_adm = await is_admin(msg.from_user.id)
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
-@dp.callback_query(F.data == "daily_bonus")
-async def cb_daily_bonus(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    if await is_admin(user_id):
-        return await cb.answer("У админов безлимит.", show_alert=True)
-        
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT last_bonus_time FROM users WHERE user_id=$1", user_id)
-        last_time = row['last_bonus_time'] if row else 0
-        
-    now = int(time.time())
-    if now - last_time < 86400:
-        remaining = 86400 - (now - last_time)
-        hours = remaining // 3600
-        minutes = (remaining % 3600) // 60
-        return await cb.answer(f"❌ Лимит исчерпан. Новый бонус через {hours} ч. {minutes} мин.", show_alert=True)
-        
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE users SET last_bonus_time=$1 WHERE user_id=$2", now, user_id)
-        
-    await add_requests(user_id, 2)
-    await cb.answer("🎁 Вам начислено +2 запроса!", show_alert=True)
+@dp.callback_query(F.data == "hide_data_menu")
+async def cb_hide_data_menu(cb: CallbackQuery):
     await cb.message.edit_text(
-        "✅ <b>Бонус получен!</b>\nВы получили <b>+2 запроса</b>.\nВозвращайтесь через 24 часа за новым бонусом.",
-        parse_mode="HTML", reply_markup=main_menu(user_id, False)
+        "🔒 <b>Скрытие данных</b>\n\n"
+        "Эта функция позволяет скрыть все данные в веб-отчете. Вы сможете отправить ссылку кому угодно, но без оплаты они увидят только заглушку «Данные скрыты».\n\n"
+        "Выберите способ оплаты:",
+        parse_mode="HTML", reply_markup=hide_data_menu()
     )
+    await cb.answer()
+
+@dp.callback_query(F.data == "pay_hide_stars")
+async def cb_pay_hide_stars(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(pay_type="hide_stars")
+    await cb.message.edit_text(
+        f"⭐ <b>Оплата подписки звездами</b>\n\n"
+        f"1. Нажмите на кнопку ниже, чтобы отправить подарок (Gift) на 300⭐ пользователю @anodoxx.\n"
+        f"2. После отправки вернитесь сюда и нажмите «✅ Я отправил».",
+        parse_mode="HTML", 
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Отправить подарок 300⭐", url="https://t.me/anodoxx")],
+            [InlineKeyboardButton(text="✅ Я отправил", callback_data="stars_sent")],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]
+        ])
+    )
+    await state.set_state(BuyStates.wait_hash)
+    await cb.answer()
+
+@dp.callback_query(F.data == "stars_sent", FSM=BuyStates.wait_hash)
+async def cb_stars_sent(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    await state.clear()
+    
+    temp_report_id = str(random.randint(1000000, 9999999))
+    
+    await cb.message.edit_text("⏳ Заявка отправлена админу на проверку. Ожидайте.", reply_markup=main_menu(cb.from_user.id, False))
+    
+    admin_text = (
+        f"🎁 <b>Заявка на подписку (Stars)!</b>\n\n"
+        f"👤 @{cb.from_user.username} (ID: <code>{cb.from_user.id}</code>)\n"
+        f"💵 Тип: Подарок 300⭐\n"
+        f"🆔 ID отчета: <code>{temp_report_id}</code>\n\n"
+        f"<i>Проверьте подарки в профиле @anodoxx.</i>"
+    )
+    
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{temp_report_id}"),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data="rej_hide")
+    ]])
+    
+    await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
+    await cb.answer()
+
+@dp.callback_query(F.data == "pay_hide_crypto")
+async def cb_pay_hide_crypto(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(pay_type="hide_crypto")
+    await cb.message.edit_text(
+        f"💎 <b>Оплата Crypto (TON)</b>\n\n"
+        f"Переведите <b>{CRYPTO_PRICE} TON</b> на кошелек:\n"
+        f"<code>{CRYPTO_WALLET}</code>\n\n"
+        f"После перевода отправьте <b>хеш транзакции</b> в этот чат.",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_menu")]])
+    )
+    await state.set_state(BuyStates.wait_hash)
+    await cb.answer()
+
+@dp.message(BuyStates.wait_hash)
+async def process_crypto_hash(msg: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    pay_type = data.get("pay_type")
+    
+    if pay_type == "hide_crypto":
+        await state.clear()
+        temp_report_id = str(random.randint(1000000, 9999999))
+        tx_hash = msg.text.strip()
+        
+        if len(tx_hash) < 10:
+            return await msg.answer("❌ Это не похоже на хеш. Попробуйте снова.")
+            
+        await msg.answer("⏳ Хеш получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
+        
+        admin_text = (
+            f"💰 <b>Заявка на подписку (Crypto)!</b>\n\n"
+            f"👤 @{msg.from_user.username} (ID: <code>{msg.from_user.id}</code>)\n"
+            f"💵 Тип: 5$ (TON)\n"
+            f"🆔 ID отчета: <code>{temp_report_id}</code>\n"
+            f"🔗 <code>{html.escape(tx_hash)}</code>"
+        )
+        
+        admin_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"unlock_{temp_report_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data="rej_hide")
+        ]])
+        
+        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML", reply_markup=admin_kb)
+
+@dp.callback_query(F.data.startswith("unlock_"))
+async def admin_unlock(cb: CallbackQuery, bot: Bot):
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    _, report_id = cb.data.split("_")
+    
+    unlocked_reports.add(report_id)
+    
+    await cb.message.edit_text(f"✅ Доступ к отчету <code>{report_id}</code> разблокирован.")
+    await cb.answer()
+
+@dp.callback_query(F.data == "rej_hide")
+async def admin_reject_hide(cb: CallbackQuery):
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("❌ Заявка на скрытие отклонена.")
+    await cb.answer()
 
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id): 
-        return await cb.answer("⛔ Нет доступа", show_alert=True)
-    await cb.message.edit_text("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu())
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_maintenance")
 async def cb_adm_maintenance(cb: CallbackQuery):
     global IS_MAINTENANCE
     if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
-    
     IS_MAINTENANCE = not IS_MAINTENANCE
-    
     status_text = "ВКЛЮЧЕН 🔴" if IS_MAINTENANCE else "ВЫКЛЮЧЕН 🟢"
-    btn_text = "Выключить (Разрешить поиск) 🟢" if IS_MAINTENANCE else "Включить (Заблокировать поиск) 🔴"
-    
-    await cb.message.edit_text(
-        f"🛠 <b>Технический перерыв</b>\n\n"
-        f"Текущий статус: <b>{status_text}</b>\n\n"
-        f"<i>Когда перерыв включен, обычные юзеры не могут делать запросы. У админов поиск работает всегда.</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=btn_text, callback_data="adm_maintenance")],
-            [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
-        ])
-    )
+    btn_text = "Выключить 🟢" if IS_MAINTENANCE else "Включить 🔴"
+    await cb.message.edit_text(f"🛠 <b>Тех. перерыв:</b> {status_text}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=btn_text, callback_data="adm_maintenance")],
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
+    ]))
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_api_status")
 async def cb_adm_api_status(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
     
-    await cb.message.edit_text("📡 <b>Проверяю статус API...</b>\n<i>Это займет пару секунд.</i>", parse_mode="HTML")
-    
-    test_q = "79825207224"
-    statuses = []
-    
-    # Проверка Mobius
     start = time.time()
-    succ_m, err_m = await fetch_mobius(test_q, "phone")
+    succ_m, err_m = await fetch_mobius("79825207224", "phone")
     t_m = round(time.time() - start, 2)
-    statuses.append(f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else html.escape(str(err_m))[:50]} ({t_m}с)")
     
-    # Проверка Nebula
     start = time.time()
-    succ_n, err_n = await fetch_nebula(test_q, "phone")
+    succ_n, err_n = await fetch_nebula("79825207224", "phone")
     t_n = round(time.time() - start, 2)
-    statuses.append(f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:50]} ({t_n}с)")
     
-    text = "📡 <b>Статус API на текущий момент:</b>\n\n" + "\n".join(statuses)
-    text += "\n\n<i>🟢 - Отвечает. 🔴 - Ошибка (в скобках причина).</i>"
-    
+    text = (
+        f"📡 <b>Статус API:</b>\n\n"
+        f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else html.escape(str(err_m))[:30]} ({t_m}с)\n"
+        f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:30]} ({t_n}с)"
+    )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
     bal = await get_balance(cb.from_user.id)
-    ref_count = await get_invited_count(cb.from_user.id)
-    total_users = await get_total_users()
     uname = f"@{cb.from_user.username}" if cb.from_user.username else "нет"
     status = "👑 Админ" if await is_admin(cb.from_user.id) else "👤 Юзер"
-    text = (f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n📛 Юзер: {uname}\n🎖 Статус: {status}\n💳 Баланс: <code>{bal}</code> запросов\n👥 Приглашено: <b>{ref_count}</b>\n\n📈 Всего в боте: <b>{total_users}</b> юзеров")
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
+    text = f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n📛 Юзер: {uname}\n🎖 Статус: {status}\n💳 Баланс: <code>{bal}</code> запросов"
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=main_menu(cb.from_user.id, await is_admin(cb.from_user.id)))
     await cb.answer()
+
+@dp.callback_query(F.data == "daily_bonus")
+async def cb_daily_bonus(cb: CallbackQuery):
+    user_id = cb.from_user.id
+    if await is_admin(user_id): return await cb.answer("У админов безлимит.", show_alert=True)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT last_bonus_time FROM users WHERE user_id=$1", user_id)
+        last_time = row['last_bonus_time'] if row else 0
+    now = int(time.time())
+    if now - last_time < 86400:
+        remaining = 86400 - (now - last_time)
+        return await cb.answer(f"❌ Ждать: {remaining // 3600} ч. {(remaining % 3600) // 60} мин.", show_alert=True)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_bonus_time=$1 WHERE user_id=$2", now, user_id)
+    await add_requests(user_id, 2)
+    await cb.answer("🎁 +2 запроса!", show_alert=True)
 
 @dp.callback_query(F.data == "search_menu")
 async def cb_search_menu(cb: CallbackQuery):
     await cb.message.edit_text("Выберите тип поиска:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Обычный поиск", callback_data="search_normal")],
-        [InlineKeyboardButton(text="📄 По документам", callback_data="search_docs")],
+        [InlineKeyboardButton(text="🔍 Обычный", callback_data="search_normal")],
+        [InlineKeyboardButton(text="📄 Документы", callback_data="search_docs")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")],
     ]))
     await cb.answer()
 
 @dp.callback_query(F.data == "search_normal")
 async def cb_search_normal(cb: CallbackQuery):
-    await cb.message.edit_text("🔍 Отправь запрос в чат (номер, email, ФИО и т.д.)", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
+    await cb.message.edit_text("🔍 Отправь запрос в чат:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
     await cb.answer()
 
 @dp.callback_query(F.data == "search_docs")
@@ -771,24 +697,7 @@ async def process_doc_search(msg: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     doc_type = data.get("doc_type", "auto")
     await state.clear()
-    
-    # Запускаем поиск с принудительным типом
     await process_search(msg, msg.text.strip(), bot, forced_type=doc_type)
-
-@dp.callback_query(F.data == "ref_link")
-async def cb_ref_link(cb: CallbackQuery):
-    ref_link = f"https://t.me/{BOT_USERNAME}?start={cb.from_user.id}"
-    share_text = f"Попробуй этот OSINT-бот! Ссылка: {ref_link}"
-    text = f"👥 <b>Пригласи друга</b>\n\nЗа каждого, кто зайдет по ссылке, ты получишь <b>+2 запроса</b>.\n\n🔗 <code>{ref_link}</code>"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📤 Поделиться", url=f"https://t.me/share/url?url={ref_link}&text={share_text}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]])
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-@dp.callback_query(F.data == "terms")
-async def cb_terms(cb: CallbackQuery):
-    text = "📄 <b>Условия</b>\n\n1. Бот агрегирует открытые данные.\n2. Запрещено использовать для травли.\n3. Администрация не несет ответственности."
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]]))
-    await cb.answer()
 
 @dp.callback_query(F.data == "back_to_menu")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
@@ -800,13 +709,7 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
 # --- ПОКУПКА ЗАПРОСОВ ---
 @dp.callback_query(F.data == "buy_menu")
 async def cb_buy_menu(cb: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="10 запросов", callback_data="buy_10"), InlineKeyboardButton(text="50 запросов", callback_data="buy_50")],
-        [InlineKeyboardButton(text="100 запросов", callback_data="buy_100"), InlineKeyboardButton(text="1000 запросов", callback_data="buy_1000")],
-        [InlineKeyboardButton(text="✏️ Ввести свое количество", callback_data="buy_custom")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
-    ])
-    await cb.message.edit_text("💎 <b>Выберите пакет запросов:</b>", parse_mode="HTML", reply_markup=kb)
+    await cb.message.edit_text("💎 <b>Выберите пакет запросов:</b>", parse_mode="HTML", reply_markup=buy_menu())
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("buy_"))
@@ -1123,7 +1026,7 @@ async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None
     html_cache[report_id] = q
     
     web_id = str(random.randint(1000000, 9999999))
-    report_cache[web_id] = {"query": q, "results": api_results}
+    report_cache[web_id] = {"query": q, "results": api_results, "locked": True}
     web_link = f"{WEBHOOK_HOST}/report/{web_id}"
     
     raw_id = str(random.randint(10000, 99999))
@@ -1168,9 +1071,10 @@ async def send_html_file(cb: CallbackQuery):
         
     await cb.answer("Генерирую...")
     note = await cb.message.reply("⏳ Собираю...")
-    api_results = await query_all_apis(q, "auto") # При повторной генерации используем авто
+    api_results = await query_all_apis(q, "auto")
     if not api_results: return await note.edit_text("❌ Данные устарели или ошибка.")
-    file = BufferedInputFile(build_html_report(api_results, q).encode('utf-8'), filename=f"oasis_{q[:10]}.html")
+    
+    file = BufferedInputFile(build_html_report(api_results, q, is_locked=False).encode('utf-8'), filename=f"oasis_{q[:10]}.html")
     await cb.message.answer_document(document=file, caption=f"📄 Отчет: <code>{html.escape(q)}</code>", parse_mode="HTML")
     await note.delete()
 
