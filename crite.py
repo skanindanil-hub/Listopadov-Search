@@ -1,4 +1,4 @@
-# OASIS SEARCH (Mobius + Nebula + Clean Parser + Dark HTML)
+# OASIS SEARCH (Mobius + Nebula + Dark HTML Grid)
 import asyncio
 import json
 import html
@@ -261,7 +261,7 @@ def clean_data(obj):
         return [clean_data(v) for v in obj if v]
     return obj
 
-# --- ПАРСЕР (Вариант 1: Карточка профиля) ---
+# --- ПАРСЕР (Карточка профиля) ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, genders, dates, ages = set(), set(), set(), set()
     phones, operators, regions, countries = set(), set(), set(), set()
@@ -365,7 +365,7 @@ def render_text_results(api_results: list[dict]) -> str:
 
     return "\n".join(lines).strip()
 
-# --- HTML ОТЧЕТ (Темный дизайн со скрина) ---
+# --- HTML ОТЧЕТ (Дизайн как на скрине) ---
 def build_html_report(api_results: list[dict], query: str) -> str:
     all_items = []
     for res in api_results:
@@ -418,23 +418,25 @@ def build_html_report(api_results: list[dict], query: str) -> str:
     main_name = list(fio)[0] if fio else query
     initial = main_name[0].upper() if main_name else "?"
 
-    def make_card(title, icon, data_set):
-        if not data_set: return ""
-        rows = "".join([f'<div class="data-row"><span class="d-icon">{icon}</span><span class="d-val">{html.escape(str(val))}</span></div>' for val in data_set])
+    def make_section(title, items_list):
+        if not items_list: return ""
+        rows = "".join([f'<div class="list-item">{html.escape(str(val))}</div>' for val in items_list])
         return f"""
-        <div class="card">
-            <div class="card-header">{title}</div>
-            <div class="card-body">{rows}</div>
+        <div class="section-card">
+            <div class="section-title"><span class="dot"></span>{title}</div>
+            <div class="section-content">
+                {rows}
+            </div>
         </div>"""
 
-    cards_html = ""
-    cards_html += make_card("Контакты", "📱", phones)
-    cards_html += make_card("Основные данные", "👤", [f"ФИО: {x}" for x in fio] + [f"ДР: {x}" for x in dates] + [f"Возраст: {x}" for x in ages])
-    cards_html += make_card("Соцсети", "🌐", socials)
-    cards_html += make_card("Почта", "📧", emails)
-    cards_html += make_card("Документы", "📄", docs)
-    cards_html += make_card("Адреса", "🏠", addresses)
-    cards_html += make_card("Прочее", "🗂", others)
+    sections_html = ""
+    sections_html += make_section("1. Основные данные", [f"ФИО: {x}" for x in fio] + [f"Дата рождения: {x}" for x in dates] + [f"Возраст: {x}" for x in ages] + [f"Пол: {x}" for x in genders])
+    sections_html += make_section("2. Контакты", [f"Телефон: {x}" for x in phones] + [f"Оператор: {x}" for x in operators] + [f"Регион: {x}" for x in regions])
+    sections_html += make_section("3. Социальные сети", list(socials))
+    sections_html += make_section("4. Почта", list(emails))
+    sections_html += make_section("5. Документы", list(docs))
+    sections_html += make_section("6. Адреса", list(addresses))
+    sections_html += make_section("7. Прочие данные", list(others)[:10])
 
     details_html = f"""
     <!DOCTYPE html>
@@ -444,34 +446,119 @@ def build_html_report(api_results: list[dict], query: str) -> str:
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Oasis Search - {html.escape(query)}</title>
         <style>
-            :root {{ --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --accent: #ffffff; --border: #333333; }}
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.6; }}
-            .container {{ max-width: 600px; margin: 0 auto; }}
-            .header {{ text-align: center; margin-bottom: 30px; }}
-            .logo {{ font-size: 14px; letter-spacing: 2px; color: #888; text-transform: uppercase; margin-bottom: 10px; }}
-            .title {{ font-size: 28px; font-weight: 800; color: var(--accent); margin: 0; line-height: 1.2; }}
-            .query {{ font-size: 16px; color: #888; margin-top: 10px; font-family: monospace; }}
-            .avatar {{ width: 60px; height: 60px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: bold; margin: 0 auto 15px auto; border: 2px solid #444; }}
-            .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 15px; overflow: hidden; }}
-            .card-header {{ background: #252525; padding: 12px 20px; font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: #aaa; border-bottom: 1px solid var(--border); }}
-            .card-body {{ padding: 10px 20px; }}
-            .data-row {{ display: flex; align-items: flex-start; padding: 10px 0; border-bottom: 1px dashed #333; }}
-            .data-row:last-child {{ border-bottom: none; }}
-            .d-icon {{ margin-right: 12px; opacity: 0.7; }}
-            .d-val {{ font-family: monospace; font-size: 14px; color: #fff; word-break: break-word; }}
-            .footer {{ text-align: center; margin-top: 30px; font-size: 12px; color: #555; }}
+            @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+            
+            :root {{ 
+                --bg: #0a0a0a; 
+                --card: #111111; 
+                --text: #ffffff; 
+                --muted: #888888; 
+                --border: #222222; 
+            }}
+            
+            body {{ 
+                font-family: 'Inter', sans-serif; 
+                background-color: var(--bg); 
+                color: var(--text); 
+                margin: 0; 
+                padding: 20px; 
+                line-height: 1.6; 
+                background-image: 
+                    linear-gradient(var(--border) 1px, transparent 1px),
+                    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+                background-size: 50px 50px;
+                background-position: center top;
+            }}
+            
+            .container {{ max-width: 600px; margin: 0 auto; position: relative; }}
+            
+            .header {{ text-align: center; margin-bottom: 40px; padding-top: 20px; }}
+            .version-badge {{ 
+                display: inline-block; 
+                border: 1px solid var(--border); 
+                border-radius: 20px; 
+                padding: 4px 12px; 
+                font-family: 'JetBrains Mono', monospace; 
+                font-size: 12px; 
+                color: var(--muted); 
+                letter-spacing: 2px; 
+                margin-bottom: 20px;
+            }}
+            .main-title {{ 
+                font-size: 32px; 
+                font-weight: 800; 
+                text-transform: uppercase; 
+                letter-spacing: 1px; 
+                margin: 0 0 10px 0; 
+                line-height: 1.1;
+            }}
+            .subtitle {{ 
+                font-family: 'JetBrains Mono', monospace; 
+                font-size: 14px; 
+                color: var(--muted); 
+                margin-bottom: 20px; 
+            }}
+            .query-text {{ 
+                font-size: 24px; 
+                font-weight: 800; 
+                margin-bottom: 20px;
+            }}
+            
+            .section-card {{ 
+                background-color: var(--card); 
+                border: 1px solid var(--border); 
+                border-radius: 12px; 
+                margin-bottom: 20px; 
+                overflow: hidden;
+            }}
+            .section-title {{ 
+                padding: 16px 20px; 
+                font-size: 18px; 
+                font-weight: 700; 
+                display: flex; 
+                align-items: center;
+                border-bottom: 1px solid var(--border);
+            }}
+            .dot {{ 
+                width: 8px; 
+                height: 8px; 
+                background-color: var(--text); 
+                border-radius: 50%; 
+                display: inline-block; 
+                margin-right: 12px; 
+            }}
+            .section-content {{ 
+                padding: 10px 20px; 
+            }}
+            .list-item {{ 
+                font-family: 'JetBrains Mono', monospace; 
+                font-size: 14px; 
+                padding: 8px 0; 
+                border-bottom: 1px solid #1a1a1a; 
+                color: #dddddd;
+                word-break: break-word;
+            }}
+            .list-item:last-child {{ border-bottom: none; }}
+            
+            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="logo">OASIS SEARCH</div>
-                <div class="avatar">{html.escape(initial)}</div>
-                <h1 class="title">{html.escape(main_name)}</h1>
-                <div class="query">Запрос: {html.escape(query)}</div>
+                <div class="version-badge">V.2026</div>
+                <h1 class="main-title">OSINT — Полная база</h1>
+                <div class="subtitle">Обучение · методы · инструменты · код</div>
+                <div class="subtitle" style="color: #fff; font-weight: bold; margin-top: -10px;">ОТ OASIS SEARCH</div>
             </div>
-            {cards_html}
-            <div class="footer">Сгенерировано автоматически &bull; {len(api_results)} источников</div>
+
+            <div class="query-text">{html.escape(main_name)}</div>
+
+            {sections_html}
+            
+            <div class="footer">
+                Сгенерировано автоматически &bull; {len(api_results)} источников
+            </div>
         </div>
     </body>
     </html>
