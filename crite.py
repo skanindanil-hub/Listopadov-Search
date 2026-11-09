@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Version)
+# OASIS SEARCH (Final Full Version)
 import asyncio
 import json
 import html
@@ -49,7 +49,7 @@ db_pool = None
 html_cache = {} 
 report_cache = {} 
 unlocked_reports = set()
-IS_MAINTENANCE = False 
+IS_MAINTENANCE = False # Глобальный флаг тех. перерыва
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -254,7 +254,7 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
 # --- ПАРСЕР ТЕКСТА ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
-    operators = set()
+    operators, tg_data, gifts, history, phone_book = set(), set(), set(), set(), set()
 
     IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target")
 
@@ -269,7 +269,14 @@ def render_text_results(api_results: list[dict]) -> str:
                     if not val_str.strip(): continue
                     if any(word in val_str.lower() for word in IGNORE_WORDS): continue
                     
-                    if k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
+                    if k_lower in ("username", "tg_username", "telegram", "tg", "tg_id"):
+                        if len(val_str) > 1 and val_str != "None": 
+                            if k_lower == "username" and not val_str.startswith("@"): val_str = f"@{val_str}"
+                            tg_data.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("gift", "gifts", "подарки"): gifts.add(val_str)
+                    elif k_lower in ("history", "name_history", "история"): history.add(val_str)
+                    elif k_lower in ("phone_book", "contacts", "телефонная книга"): phone_book.add(val_str)
+                    elif k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
                         if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
                     elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): 
                         phones.add(val_str)
@@ -280,7 +287,7 @@ def render_text_results(api_results: list[dict]) -> str:
                     elif k_lower in ("region", "регион", "город", "city"): others.add(f"Регион: {val_str}")
                     elif k_lower in ("country", "страна"): others.add(f"Страна: {val_str}")
                     elif k_lower in ("email", "mail", "почта"): emails.add(val_str)
-                    elif k_lower in ("vk", "telegram", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("vk", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
                     elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"): 
                         if "T" in val_str:
                             parts = val_str.split("T")[0].split("-")
@@ -302,43 +309,55 @@ def render_text_results(api_results: list[dict]) -> str:
     lines = []
     if fio:
         main_name = list(fio)[0]
-        lines.append(f"<b>🪪 {main_name}</b>")
-        lines.append("")
+        lines.append(f"<b>🪪 {main_name}</b>\n")
     
+    if tg_data:
+        lines.append("<b>📟 Telegram:</b>")
+        for tg in list(tg_data)[:5]: lines.append(f"> <tg-spoiler>{tg}</tg-spoiler>")
+        lines.append("")
+
     if phones or operators:
         lines.append("<b>📱 Связь:</b>")
-        if phones:
-            lines.append(f"> Телефон: <tg-spoiler>{', '.join(phones)}</tg-spoiler>")
-        if operators:
-            lines.append(f"> Оператор: {', '.join(operators)}")
+        if phones: lines.append(f"> Телефон: <tg-spoiler>{', '.join(phones)}</tg-spoiler>")
+        if operators: lines.append(f"> Оператор: {', '.join(operators)}")
+        lines.append("")
+
+    if phone_book:
+        lines.append("<b>📖 Телефонная книга:</b>")
+        for pb in list(phone_book)[:5]: lines.append(f"> <tg-spoiler>{pb}</tg-spoiler>")
+        lines.append("")
+
+    if gifts:
+        lines.append("<b>🎁 Подарки:</b>")
+        for g in list(gifts)[:5]: lines.append(f"> <tg-spoiler>{g}</tg-spoiler>")
+        lines.append("")
+
+    if history:
+        lines.append("<b>📜 История имен:</b>")
+        for h in list(history)[:5]: lines.append(f"> <tg-spoiler>{h}</tg-spoiler>")
         lines.append("")
         
     if others:
         lines.append("<b>👤 Основные данные:</b>")
-        for o in list(others)[:6]:
-            lines.append(f"> <tg-spoiler>{o}</tg-spoiler>")
+        for o in list(others)[:6]: lines.append(f"> <tg-spoiler>{o}</tg-spoiler>")
         lines.append("")
 
     if emails:
         lines.append("<b>📧 E-mail:</b>")
-        for e in emails:
-            lines.append(f"> <tg-spoiler>{e}</tg-spoiler>")
+        for e in emails: lines.append(f"> <tg-spoiler>{e}</tg-spoiler>")
         lines.append("")
 
     if docs:
         lines.append("<b>📄 Документы:</b>")
-        for d in docs:
-            lines.append(f"> <tg-spoiler>{d}</tg-spoiler>")
+        for d in docs: lines.append(f"> <tg-spoiler>{d}</tg-spoiler>")
         lines.append("")
 
     if socials:
         lines.append("<b>🌐 Соцсети:</b>")
-        for s in socials:
-            lines.append(f"> <tg-spoiler>{s}</tg-spoiler>")
+        for s in socials: lines.append(f"> <tg-spoiler>{s}</tg-spoiler>")
         lines.append("")
 
-    if len(lines) <= 1: 
-        return "🔍 <b>Данных не найдено.</b>"
+    if len(lines) <= 1: return "🔍 <b>Данных не найдено.</b>"
 
     return "\n".join(lines).strip()
 
@@ -631,13 +650,20 @@ async def cb_admin_panel(cb: CallbackQuery):
 async def cb_adm_maintenance(cb: CallbackQuery):
     global IS_MAINTENANCE
     if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    
     IS_MAINTENANCE = not IS_MAINTENANCE
+    
     status_text = "ВКЛЮЧЕН 🔴" if IS_MAINTENANCE else "ВЫКЛЮЧЕН 🟢"
-    btn_text = "Выключить 🟢" if IS_MAINTENANCE else "Включить 🔴"
-    await cb.message.edit_text(f"🛠 <b>Тех. перерыв:</b> {status_text}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=btn_text, callback_data="adm_maintenance")],
-        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
-    ]))
+    btn_text = "Выключить (Разрешить поиск) 🟢" if IS_MAINTENANCE else "Включить (Заблокировать поиск) 🔴"
+    
+    await cb.message.edit_text(
+        f"🛠 <b>Технический перерыв</b>\n\nТекущий статус: <b>{status_text}</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=btn_text, callback_data="adm_maintenance")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")]
+        ])
+    )
     await cb.answer()
 
 @dp.callback_query(F.data == "adm_api_status")
