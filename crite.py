@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Version + Broadcast)
+# OASIS SEARCH (Final Version + Broadcast + BlackBox)
 import asyncio
 import json
 import html
@@ -28,6 +28,9 @@ API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
 API_KEY_NEBULA = "NEBULA-A11ACE72F6559A2E268CE1CBA39AA881"
 
+API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
+API_KEY_BLACKBOX = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
+
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = "9042470492:AAGrM2pNdx6XaZqETRSZQh-G90VbMh23Jqo"
 BOT_USERNAME = "searchosintlistopadov_bot"
@@ -48,11 +51,11 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage())
 
 db_pool = None
-html_cache = {} 
-report_cache = {} 
+html_cache = {}
+report_cache = {}
 unlocked_reports = set()
-IS_MAINTENANCE = False 
-LAST_SEARCH_TIME = {} 
+IS_MAINTENANCE = False
+LAST_SEARCH_TIME = {}
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -232,7 +235,7 @@ async def fetch_mobius(q: str, q_type: str) -> tuple[bool, dict | str]:
     headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
     payload = {"query": q, "type": q_type}
     try:
-        await asyncio.sleep(2) 
+        await asyncio.sleep(2)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
                 if resp.status == 200: return True, json.loads(await resp.text())
@@ -251,11 +254,40 @@ async def fetch_nebula(q: str, q_type: str) -> tuple[bool, dict | str]:
                 return False, f"HTTP {resp.status}"
     except Exception as e: return False, str(e)
 
+async def fetch_blackbox(q: str, q_type: str) -> tuple[bool, dict | str]:
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {
+        "X-API-Key": API_KEY_BLACKBOX,
+        "Authorization": f"Bearer {API_KEY_BLACKBOX}"
+    }
+    
+    b_type = q_type
+    if q_type == "fio": b_type = "fio"
+    elif q_type == "phone": b_type = "phone"
+    elif q_type == "email": b_type = "email"
+    elif q_type == "tg": b_type = "tg"
+    elif q_type == "auto": b_type = "auto"
+    
+    params = {"query": q, "type": b_type, "api_key": API_KEY_BLACKBOX}
+    
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(API_URL_BLACKBOX, params=params, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return True, data
+                return False, f"HTTP {resp.status}"
+    except Exception as e: return False, str(e)
+
 async def query_all_apis(q: str, q_type: str) -> list[dict]:
-    tasks = [fetch_mobius(q, q_type), fetch_nebula(q, q_type)]
+    tasks = [
+        fetch_mobius(q, q_type),
+        fetch_nebula(q, q_type),
+        fetch_blackbox(q, q_type)
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     combined = []
-    sources = ["Mobius", "Nebula"]
+    sources = ["Mobius", "Nebula", "BlackBox"]
     for i, res in enumerate(results):
         if isinstance(res, Exception): continue
         success, data = res
@@ -263,47 +295,66 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
             combined.append({"source": sources[i], "data": data})
     return combined
 
-# --- ПАРСЕР (СИНХРОНИЗИРОВАННЫЙ) ---
+# --- ПАРСЕР ТЕКСТА ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
     addresses = set()
     operators, tg_data = set(), set()
 
-    IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target", "limit", "cache", "remaining", "cached", "used", "is_premium", "search_id", "report_url")
+    IGNORE_WORDS = (
+        "service", "nebula", "spectrum", "mobius", "result", "data", "status", "error",
+        "source", "kind", "target", "limit", "cache", "remaining", "cached", "used",
+        "is_premium", "search_id", "report_url", "success", "execution_time", "stats",
+        "sources_count", "total_records", "count", "frequency_percentage", "mcc", "mnc",
+        "gifts_count", "risk_score"
+    )
 
     def extract_recursive(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 k_lower = str(k).lower()
-                if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result", "groups", "records"):
+                if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result", "groups", "records", "execution_time_ms", "stats", "sources_count"):
                     continue
                 if isinstance(v, (str, int, bool)):
                     val_str = str(v)
                     if not val_str.strip(): continue
-                    if any(word in k_lower for word in IGNORE_WORDS): continue 
-                    if any(word in val_str.lower() for word in IGNORE_WORDS): continue 
-                    
-                    if k_lower in ("username", "tg_username", "telegram", "tg", "tg_id"):
-                        if len(val_str) > 1 and val_str != "None": 
-                            if k_lower == "username" and not val_str.startswith("@"): val_str = f"@{val_str}"
+                    if any(word in k_lower for word in IGNORE_WORDS): continue
+                    if any(word in val_str.lower() for word in IGNORE_WORDS): continue
+
+                    if k_lower in ("username", "tg_username", "telegram", "tg", "tg_id", "id"):
+                        if k_lower == "id" and "telegram" not in obj: continue
+                        if len(val_str) > 1 and val_str != "None":
+                            if k_lower in ("username", "tg_username") and not val_str.startswith("@"): val_str = f"@{val_str}"
                             tg_data.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("first_name", "last_name"):
-                        if val_str.strip(): tg_data.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("first_name", "last_name", "primary_fio", "full_name"):
+                        if val_str.strip():
+                            fio.add(val_str)
+                            if k_lower in ("first_name", "last_name"): tg_data.add(f"{k.capitalize()}: {val_str}")
                     elif k_lower == "bio":
                         if val_str.strip(): tg_data.add(f"Bio: {val_str}")
-                    elif k_lower in ("name", "names", "first_name", "last_name", "surname", "fathername", "fio", "full_name", "фио"): 
+                    elif k_lower in ("name", "names", "surname", "fathername", "fio"):
                         if len(val_str) > 2 and not re.search(r'\d', val_str) and re.search(r'[А-Яа-я]', val_str): fio.add(val_str)
-                    elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон"): 
-                        phones.add(val_str)
-                        op = get_operator(val_str)
-                        if op: operators.add(op)
-                    elif k_lower in ("operator", "оператор"): 
+                    elif k_lower in ("phone", "phone_2", "mobile", "number", "телефон", "phones"):
+                        if isinstance(v, list):
+                            for p in v:
+                                phones.add(str(p))
+                                op = get_operator(str(p))
+                                if op: operators.add(op)
+                        else:
+                            phones.add(val_str)
+                            op = get_operator(val_str)
+                            if op: operators.add(op)
+                    elif k_lower in ("operator", "оператор"):
                         if val_str.lower() not in ("мтс", "билайн", "мегафон", "т2"): operators.add(val_str)
                     elif k_lower in ("region", "регион", "город", "city"): others.add(f"Регион: {val_str}")
                     elif k_lower in ("country", "страна"): others.add(f"Страна: {val_str}")
-                    elif k_lower in ("email", "mail", "почта"): emails.add(val_str)
+                    elif k_lower in ("email", "mail", "почта", "emails"):
+                        if isinstance(v, list):
+                            for e in v: emails.add(str(e))
+                        else:
+                            emails.add(val_str)
                     elif k_lower in ("vk", "instagram", "tiktok", "facebook"): socials.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"): 
+                    elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"):
                         if "T" in val_str:
                             parts = val_str.split("T")[0].split("-")
                             if len(parts) == 3: val_str = f"{parts[2]}.{parts[1]}.{parts[0]}"
@@ -325,7 +376,7 @@ def render_text_results(api_results: list[dict]) -> str:
     if fio:
         main_name = list(fio)[0]
         lines.append(f"<b>🪪 {main_name}</b>\n")
-    
+
     if tg_data:
         lines.append("<b>📟 Telegram:</b>")
         for tg in list(tg_data)[:5]: lines.append(f"> {tg}")
@@ -336,7 +387,7 @@ def render_text_results(api_results: list[dict]) -> str:
         if phones: lines.append(f"> Телефон: {', '.join(phones)}")
         if operators: lines.append(f"> Оператор: {', '.join(operators)}")
         lines.append("")
-        
+
     if others:
         lines.append("<b>👤 Основные данные:</b>")
         for o in list(others)[:6]: lines.append(f"> {o}")
@@ -370,27 +421,33 @@ def render_text_results(api_results: list[dict]) -> str:
 def build_html_report(api_results: list[dict], query: str, is_locked: bool = False, report_id: str = None) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
     addresses, sources = set(), set()
-    
+
     def extract(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
                 k_l = k.lower()
                 if isinstance(v, str) and len(v) > 1:
-                    if k_l in ("name", "fio", "full_name", "фио"): fio.add(v)
+                    if k_l in ("name", "fio", "full_name", "фио", "primary_fio"): fio.add(v)
                     elif k_l in ("phone", "phone_2", "mobile", "телефон"): phones.add(v)
                     elif k_l in ("email", "mail", "почта"): emails.add(v)
                     elif k_l in ("passport", "snils", "inn", "паспорт", "снилс", "инн"): docs.add(f"{k}: {v}")
                     elif k_l in ("address", "адрес", "region", "регион"): addresses.add(v)
                     elif k_l in ("vk", "telegram", "instagram", "tiktok", "facebook"): socials.add(f"{k.capitalize()}: {v}")
                     elif k_l in ("source", "database", "источник"): sources.add(v)
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str):
+                            if k_l in ("phones", "phone", "телефон"): phones.add(item)
+                            elif k_l in ("emails", "email", "mail", "почта"): emails.add(item)
+                            elif k_l in ("socials", "vk", "telegram"): socials.add(f"{k.capitalize()}: {item}")
                 elif isinstance(v, (dict, list)): extract(v)
         elif isinstance(obj, list):
             for i in obj: extract(i)
-            
+
     for r in api_results: extract(r.get("data", {}))
-    
+
     total_fields = len(fio) + len(phones) + len(emails) + len(docs) + len(addresses)
-    completeness = min(100, total_fields * 15) 
+    completeness = min(100, total_fields * 15)
 
     if is_locked:
         content_html = f"""
@@ -409,7 +466,7 @@ def build_html_report(api_results: list[dict], query: str, is_locked: bool = Fal
         doc_html = "".join([f'<div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Документ</div><div class="d-value">{html.escape(d)}</div></div></div>' for d in docs])
         addr_html = "".join([f'<div class="data-item"><div class="d-icon">📍</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{html.escape(a)}</div></div></div>' for a in addresses])
         soc_html = "".join([f'<div class="data-item"><div class="d-icon">🌐</div><div class="d-content"><div class="d-label">Соцсеть</div><div class="d-value">{html.escape(s)}</div></div></div>' for s in socials])
-        
+
         sources_html = "".join([f'<div class="source-item"><span>{html.escape(s)}</span><span class="source-count">1</span></div>' for s in sources])
 
         content_html = f"""
@@ -553,14 +610,14 @@ def hide_data_menu():
 async def start(msg: Message, command: CommandStart):
     if await is_banned(msg.from_user.id):
         return await msg.answer("Пошел нахуй")
-        
+
     referrer_id = None
     if command.args and command.args.isdigit():
         referrer_id = int(command.args)
         if referrer_id == msg.from_user.id: referrer_id = None
     is_new = await add_user(msg.from_user.id, msg.from_user.username, referrer_id)
     if is_new and referrer_id:
-        await add_requests(referrer_id, 2) 
+        await add_requests(referrer_id, 2)
 
     total_users = await get_total_users()
     is_adm = await is_admin(msg.from_user.id)
@@ -578,27 +635,27 @@ async def cb_adm_broadcast(cb: CallbackQuery, state: FSMContext):
 async def process_broadcast(msg: Message, state: FSMContext, bot: Bot):
     if not await is_admin(msg.from_user.id): return
     await state.clear()
-    
+
     text = msg.text or msg.caption
     if not text:
         return await msg.answer("❌ Сообщение пустое.")
-        
+
     sent = 0
     failed = 0
-    
+
     async with db_pool.acquire() as conn:
         users = await conn.fetch("SELECT user_id FROM users WHERE is_banned = FALSE")
-        
+
     status_msg = await msg.answer(f"📢 Начинаю рассылку на {len(users)} юзеров...")
-    
+
     for user in users:
         try:
             await bot.send_message(user['user_id'], text, parse_mode="HTML")
             sent += 1
-            await asyncio.sleep(0.05) # Задержка от спама
+            await asyncio.sleep(0.05)
         except:
             failed += 1
-            
+
     await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок (заблокировали): {failed}")
 
 @dp.callback_query(F.data == "hide_data_menu")
@@ -622,7 +679,7 @@ async def cb_adm_stats(cb: CallbackQuery):
         total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
         banned = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE")
         total_searches = await conn.fetchval("SELECT value FROM stats WHERE key='total_searches'")
-    
+
     await cb.message.edit_text(
         f"📊 <b>Аналитика</b>\n\n"
         f"👥 Всего юзеров: {total_users}\n"
@@ -648,10 +705,10 @@ async def process_ban(msg: Message, state: FSMContext):
             row = await conn.fetchrow("SELECT is_banned FROM users WHERE user_id=$1", uid)
             if not row:
                 return await msg.answer("❌ Пользователь не найден.", reply_markup=admin_menu())
-            
+
             new_status = not row['is_banned']
             await conn.execute("UPDATE users SET is_banned=$1 WHERE user_id=$2", new_status, uid)
-            
+
         status_text = "ЗАБАНЕН 🚫" if new_status else "РАЗБАНЕН ✅"
         await msg.answer(f"Пользователь <code>{uid}</code>: {status_text}", parse_mode="HTML", reply_markup=admin_menu())
     except:
@@ -681,10 +738,14 @@ async def cb_adm_api_status(cb: CallbackQuery):
     start = time.time()
     succ_n, err_n = await fetch_nebula("79825207224", "phone")
     t_n = round(time.time() - start, 2)
+    start = time.time()
+    succ_b, err_b = await fetch_blackbox("79825207224", "phone")
+    t_b = round(time.time() - start, 2)
     text = (
         f"📡 <b>Статус API:</b>\n\n"
         f"{'🟢' if succ_m else '🔴'} <b>Mobius:</b> {'OK' if succ_m else html.escape(str(err_m))[:30]} ({t_m}с)\n"
-        f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:30]} ({t_n}с)"
+        f"{'🟢' if succ_n else '🔴'} <b>Nebula:</b> {'OK' if succ_n else html.escape(str(err_n))[:30]} ({t_n}с)\n"
+        f"{'🟢' if succ_b else '🔴'} <b>BlackBox:</b> {'OK' if succ_b else html.escape(str(err_b))[:30]} ({t_b}с)"
     )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu())
     await cb.answer()
@@ -817,7 +878,7 @@ async def process_tx_hash(msg: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     amount = data.get("buy_amount")
     pay_type = data.get("pay_type")
-    
+
     if pay_type != "hide_crypto":
         await state.clear()
         await msg.answer("⏳ Чек получен. Отправлен админу на проверку. Ожидайте.", reply_markup=main_menu(msg.from_user.id, False))
@@ -905,10 +966,10 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
     raw_text = msg.text or ""
     code = re.sub(r'[^A-Za-z0-9]', '', raw_text).upper()
     await state.clear()
-    
+
     try: await bot.send_message(MAIN_ADMIN_ID, f"🔍 <b>Ввод промокода</b>\nЮзер: @{msg.from_user.username} (<code>{msg.from_user.id}</code>)\nОчищено: <code>{html.escape(code)}</code>", parse_mode="HTML")
     except: pass
-    
+
     async with db_pool.acquire() as conn:
         used = await conn.fetchrow("SELECT 1 FROM promo_uses WHERE user_id=$1 AND code=$2", msg.from_user.id, code)
         if used: return await msg.answer("❌ Ты уже активировал этот промокод.", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
@@ -919,7 +980,7 @@ async def process_promo_code(msg: Message, state: FSMContext, bot: Bot):
         await add_requests(msg.from_user.id, promo['req_amount'])
         await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code=$1", code)
         await conn.execute("INSERT INTO promo_uses (user_id, code, used_at) VALUES ($1, $2, $3)", msg.from_user.id, code, int(time.time()))
-    
+
     new_bal = await get_balance(msg.from_user.id)
     await msg.answer(f"✅ <b>Промокод активирован!</b>\nНачислено <b>+{promo['req_amount']}</b> запросов.\nБаланс: <code>{new_bal}</code>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, await is_admin(msg.from_user.id)))
     try: await bot.send_message(MAIN_ADMIN_ID, f"✅ <b>Успешная активация!</b>\nЮзер: {msg.from_user.id}\nКод: {code}\nНовый баланс: {new_bal}", parse_mode="HTML")
@@ -975,9 +1036,9 @@ async def process_promo_create(msg: Message, state: FSMContext):
 # --- ПОИСК И ГЕНЕРАЦИЯ ---
 async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None):
     if await is_banned(msg.from_user.id): return await msg.answer("Пошел нахуй")
-    
+
     is_adm = await is_admin(msg.from_user.id)
-    
+
     if not is_adm and IS_MAINTENANCE:
         return await msg.answer("🛠 <b>Бот на техническом перерыве.</b>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
@@ -993,55 +1054,55 @@ async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None
 
     q_type = forced_type if forced_type else detect_type(q)
     note = await msg.answer(f"🔍 <b>Запуск поиска:</b> {html.escape(q)}\n\n<i>Опрашиваем базы (Тип: {q_type})...</i>", parse_mode="HTML")
-    
+
     api_results = await query_all_apis(q, q_type)
-    
+
     if not api_results:
         if not is_adm: await add_requests(msg.from_user.id, 1)
         return await note.edit_text("❌ Все базы вернули ошибку или ничего не найдено.")
-    
+
     text_report = render_text_results(api_results)
     bal = await get_balance(msg.from_user.id)
-    
+
     report_id = str(random.randint(100000, 999999))
     html_cache[report_id] = q
-    
+
     web_id = str(random.randint(1000000, 9999999))
     report_cache[web_id] = {"query": q, "results": api_results, "locked": False, "text_report": text_report}
     web_link = f"{WEBHOOK_HOST}/report/{web_id}"
-    
+
     raw_id = str(random.randint(10000, 99999))
     html_cache[raw_id] = json.dumps(api_results, indent=2, ensure_ascii=False)
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Веб-отчет", url=web_link)],
         [InlineKeyboardButton(text="📄 HTML-файл", callback_data=f"html_{report_id}")],
         [InlineKeyboardButton(text="📊 Скачать CSV", callback_data=f"csv_{raw_id}")],
         [InlineKeyboardButton(text="📝 Сырой JSON", callback_data=f"raw_{raw_id}")]
     ])
-    
+
     await note.edit_text(
         f"<b>Oasis Search</b>\n"
         f"├ Запрос: {html.escape(q)}\n"
         f"└ Тип: {q_type}\n\n"
         f"{text_report}\n\n"
-        f"💰 Остаток: {bal}", 
+        f"💰 Остаток: {bal}",
         parse_mode="HTML", disable_web_page_preview=True, reply_markup=kb
     )
 
 @dp.message()
 async def auto_search(msg: Message, state: FSMContext, bot: Bot):
     if await is_banned(msg.from_user.id): return await msg.answer("Пошел нахуй")
-    
+
     if msg.text and not msg.text.startswith("/"):
         current_state = await state.get_state()
         if current_state is not None: return
-        
+
         code = re.sub(r'[^A-Za-z0-9]', '', msg.text).upper()
         async with db_pool.acquire() as conn:
             promo = await conn.fetchrow("SELECT * FROM promocodes WHERE code=$1", code)
             if promo: return await process_promo_code(msg, state, bot)
-        
+
         await process_search(msg, msg.text.strip(), bot)
 
 @dp.callback_query(F.data.startswith("html_"))
@@ -1062,13 +1123,13 @@ async def send_csv_file(cb: CallbackQuery):
     raw_id = cb.data.replace("csv_", "")
     raw_data = html_cache.get(raw_id)
     if not raw_data: return await cb.answer("Устарело", show_alert=True)
-    
+
     try:
         data = json.loads(raw_data)
         output = io.StringIO()
         writer = csv.writer(output, delimiter=';')
         writer.writerow(["Источник", "Данные"])
-        
+
         def extract_csv(obj):
             if isinstance(obj, dict):
                 for k, v in obj.items():
@@ -1076,9 +1137,9 @@ async def send_csv_file(cb: CallbackQuery):
                     else: extract_csv(v)
             elif isinstance(obj, list):
                 for item in obj: extract_csv(item)
-                
+
         extract_csv(data)
-        
+
         file = BufferedInputFile(output.getvalue().encode('utf-8-sig'), filename=f"oasis_{raw_id}.csv")
         await cb.message.answer_document(document=file, caption="📊 Данные в CSV (Excel)")
     except:
