@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Stable Version)
+# OASIS SEARCH (Final BlackBox Style)
 import asyncio
 import json
 import html
@@ -62,7 +62,6 @@ class AdminStates(StatesGroup):
     give_reqs = State()
     take_reqs = State()
     promo_create = State()
-    add_admin = State()
     ban_user = State()
 
 class PromoStates(StatesGroup):
@@ -76,7 +75,6 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
-        # Таблица юзеров
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -88,7 +86,6 @@ async def init_db():
                 is_banned BOOLEAN DEFAULT FALSE
             )
         """)
-        # Принудительное добавление колонок для старых баз
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_time BIGINT DEFAULT 0")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE")
@@ -362,30 +359,31 @@ def render_text_results(api_results: list[dict]) -> str:
 
     return "\n".join(lines).strip()
 
-# --- HTML ОТЧЕТ ---
+# --- HTML ОТЧЕТ (BlackBox Style) ---
 def build_html_report(api_results: list[dict], query: str, is_locked: bool = False, report_id: str = None) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
+    addresses, sources = set(), set()
     
     def extract(obj):
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if isinstance(v, str) and len(v) > 2:
-                    k_l = k.lower()
-                    if k_l in ("name", "fio", "фио"): fio.add(v)
-                    elif k_l in ("phone", "телефон"): phones.add(v)
-                    elif k_l in ("email", "почта"): emails.add(v)
+                k_l = k.lower()
+                if isinstance(v, str) and len(v) > 1:
+                    if k_l in ("name", "fio", "full_name", "фио"): fio.add(v)
+                    elif k_l in ("phone", "phone_2", "mobile", "телефон"): phones.add(v)
+                    elif k_l in ("email", "mail", "почта"): emails.add(v)
                     elif k_l in ("passport", "snils", "inn", "паспорт", "снилс", "инн"): docs.add(f"{k}: {v}")
-                    else: others.add(f"{k.capitalize()}: {v}")
+                    elif k_l in ("address", "адрес", "region", "регион"): addresses.add(v)
+                    elif k_l in ("vk", "telegram", "instagram", "tiktok", "facebook"): socials.add(f"{k.capitalize()}: {v}")
+                    elif k_l in ("source", "database", "источник"): sources.add(v)
                 elif isinstance(v, (dict, list)): extract(v)
         elif isinstance(obj, list):
             for i in obj: extract(i)
             
     for r in api_results: extract(r.get("data", {}))
     
-    def make_sec(title, data):
-        if not data: return ""
-        rows = "".join([f'<div class="list-item">{html.escape(str(x))}</div>' for x in data])
-        return f'<div class="section-card"><div class="section-title"><span class="dot"></span>{title}</div><div class="section-content">{rows}</div></div>'
+    total_fields = len(fio) + len(phones) + len(emails) + len(docs) + len(addresses)
+    completeness = min(100, total_fields * 15) 
 
     if is_locked:
         content_html = f"""
@@ -396,12 +394,45 @@ def build_html_report(api_results: list[dict], query: str, is_locked: bool = Fal
         </div>
         """
     else:
+        main_fio = list(fio)[0] if fio else query
+        initials = "".join([w[0].upper() for w in main_fio.split()[:2]]) if main_fio else "??"
+
+        phone_html = "".join([f'<div class="data-item"><div class="d-icon">📞</div><div class="d-content"><div class="d-label">Телефон</div><div class="d-value">{html.escape(p)}</div></div></div>' for p in phones])
+        email_html = "".join([f'<div class="data-item"><div class="d-icon">✉️</div><div class="d-content"><div class="d-label">Почта</div><div class="d-value">{html.escape(e)}</div></div></div>' for e in emails])
+        doc_html = "".join([f'<div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Документ</div><div class="d-value">{html.escape(d)}</div></div></div>' for d in docs])
+        addr_html = "".join([f'<div class="data-item"><div class="d-icon">📍</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{html.escape(a)}</div></div></div>' for a in addresses])
+        soc_html = "".join([f'<div class="data-item"><div class="d-icon">🌐</div><div class="d-content"><div class="d-label">Соцсеть</div><div class="d-value">{html.escape(s)}</div></div></div>' for s in socials])
+        
+        sources_html = "".join([f'<div class="source-item"><span>{html.escape(s)}</span><span class="source-count">1</span></div>' for s in sources])
+
         content_html = f"""
-        {make_sec("1. Основные данные", fio)}
-        {make_sec("2. Контакты", list(phones) + list(emails))}
-        {make_sec("3. Документы", docs)}
-        {make_sec("4. Соцсети", socials)}
-        {make_sec("5. Прочее", list(others)[:10])}
+        <div class="profile-card">
+            <div class="avatar">{html.escape(initials)}</div>
+            <div class="profile-info">
+                <h2>{html.escape(main_fio)}</h2>
+                <div class="sub-info">{html.escape(query)}</div>
+            </div>
+        </div>
+
+        <div class="badges">
+            <div class="badge">📊 {len(sources)} источников</div>
+            <div class="badge">📞 {len(phones)} телефонов</div>
+            <div class="badge">📧 {len(emails)} почт</div>
+            <div class="badge">📍 {len(addresses)} адресов</div>
+        </div>
+
+        <div class="completeness">
+            <div class="c-header"><span>Полнота профиля</span><span>{completeness}%</span></div>
+            <div class="c-bar"><div class="c-fill" style="width: {completeness}%"></div></div>
+        </div>
+
+        {f'<div class="data-section">{phone_html}</div>' if phone_html else ''}
+        {f'<div class="data-section">{email_html}</div>' if email_html else ''}
+        {f'<div class="data-section">{addr_html}</div>' if addr_html else ''}
+        {f'<div class="data-section">{doc_html}</div>' if doc_html else ''}
+        {f'<div class="data-section">{soc_html}</div>' if soc_html else ''}
+
+        {f'<div class="sources-section"><h3>ИСТОЧНИКИ</h3>{sources_html}</div>' if sources_html else ''}
         """
 
     html_content = f"""
@@ -412,29 +443,42 @@ def build_html_report(api_results: list[dict], query: str, is_locked: bool = Fal
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Oasis Search - {html.escape(query)}</title>
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
-            :root {{ --bg: #0a0a0a; --card: #111111; --text: #ffffff; --muted: #888888; --border: #222222; }}
-            body {{ font-family: 'Inter', sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 20px; line-height: 1.6; background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px); background-size: 50px 50px; background-position: center top; }}
-            .container {{ max-width: 600px; margin: 0 auto; position: relative; }}
-            .header {{ text-align: center; margin-bottom: 40px; padding-top: 20px; }}
-            .version-badge {{ display: inline-block; border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); letter-spacing: 2px; margin-bottom: 20px; }}
-            .main-title {{ font-size: 32px; font-weight: 800; text-transform: uppercase; margin: 0 0 10px 0; line-height: 1.1; }}
-            .query-text {{ font-size: 24px; font-weight: 800; margin-bottom: 20px; }}
-            .section-card {{ background-color: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }}
-            .section-title {{ padding: 16px 20px; font-size: 18px; font-weight: 700; display: flex; align-items: center; border-bottom: 1px solid var(--border); }}
-            .dot {{ width: 8px; height: 8px; background-color: var(--text); border-radius: 50%; display: inline-block; margin-right: 12px; }}
-            .section-content {{ padding: 10px 20px; }}
-            .list-item {{ font-family: 'JetBrains Mono', monospace; font-size: 14px; padding: 8px 0; border-bottom: 1px solid #1a1a1a; color: #dddddd; word-break: break-word; }}
-            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }}
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+            body {{ font-family: 'Inter', sans-serif; background-color: #f5f6f8; color: #1a1a1a; margin: 0; padding: 20px; line-height: 1.5; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            .header {{ display: flex; align-items: center; gap: 10px; margin-bottom: 20px; color: #888; font-size: 14px; }}
+            .header-logo {{ font-weight: 700; color: #000; font-size: 18px; }}
+            .profile-card {{ display: flex; align-items: center; gap: 20px; background: #fff; border-radius: 16px; padding: 24px; border: 1px solid #e0e0e0; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); }}
+            .avatar {{ width: 70px; height: 70px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 600; flex-shrink: 0; }}
+            .profile-info h2 {{ margin: 0 0 5px 0; font-size: 22px; font-weight: 700; text-transform: uppercase; }}
+            .sub-info {{ color: #888; font-size: 14px; }}
+            .badges {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }}
+            .badge {{ background: #fff; border: 1px solid #e0e0e0; padding: 8px 14px; border-radius: 20px; font-size: 14px; color: #333; font-weight: 500; }}
+            .completeness {{ margin-bottom: 25px; }}
+            .c-header {{ display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; color: #555; }}
+            .c-bar {{ height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }}
+            .c-fill {{ height: 100%; background: #333; border-radius: 4px; }}
+            .data-section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 16px; margin-bottom: 15px; padding: 10px 20px; }}
+            .data-item {{ display: flex; align-items: center; gap: 15px; padding: 15px 0; border-bottom: 1px solid #f0f0f0; }}
+            .data-item:last-child {{ border-bottom: none; }}
+            .d-icon {{ font-size: 20px; color: #888; width: 30px; text-align: center; }}
+            .d-content {{ flex: 1; }}
+            .d-label {{ font-size: 11px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 4px; }}
+            .d-value {{ font-size: 16px; font-weight: 500; color: #000; word-break: break-word; }}
+            .sources-section {{ margin-top: 30px; }}
+            .sources-section h3 {{ font-size: 13px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 15px; }}
+            .source-item {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; }}
+            .source-item:last-child {{ border-bottom: none; }}
+            .source-count {{ color: #888; }}
+            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="version-badge">OASIS SEARCH</div>
-                <h1 class="main-title">ОТЧЕТ ПО БАЗЕ</h1>
+                <div class="header-logo">OASIS SEARCH</div>
+                <div>/ Report</div>
             </div>
-            <div class="query-text">{html.escape(query)}</div>
             {content_html}
             <div class="footer">Сгенерировано автоматически &bull; {len(api_results)} источников</div>
         </div>
@@ -448,10 +492,8 @@ async def web_report_handler(request):
     report_id = request.match_info.get('report_id')
     if report_id not in report_cache:
         return web.Response(text="<h1>404 Отчет не найден</h1>", content_type="text/html", status=404)
-    
     data = report_cache[report_id]
     is_locked = data.get("locked", False) and (report_id not in unlocked_reports)
-    
     html_content = build_html_report(data["results"], data["query"], is_locked=is_locked, report_id=report_id)
     return web.Response(text=html_content, content_type="text/html")
 
