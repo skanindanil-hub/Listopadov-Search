@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final Sync Version)
+# OASIS SEARCH (Final Version + Broadcast)
 import asyncio
 import json
 import html
@@ -63,6 +63,7 @@ class AdminStates(StatesGroup):
     take_reqs = State()
     promo_create = State()
     ban_user = State()
+    broadcast = State()
 
 class PromoStates(StatesGroup):
     wait_code = State()
@@ -274,10 +275,8 @@ def render_text_results(api_results: list[dict]) -> str:
         if isinstance(obj, dict):
             for k, v in obj.items():
                 k_lower = str(k).lower()
-                
                 if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result", "groups", "records"):
                     continue
-                    
                 if isinstance(v, (str, int, bool)):
                     val_str = str(v)
                     if not val_str.strip(): continue
@@ -523,7 +522,7 @@ def admin_menu():
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo"), InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats")],
         [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
-        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
     ])
 
@@ -567,6 +566,40 @@ async def start(msg: Message, command: CommandStart):
     is_adm = await is_admin(msg.from_user.id)
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
+
+@dp.callback_query(F.data == "adm_broadcast")
+async def cb_adm_broadcast(cb: CallbackQuery, state: FSMContext):
+    if not await is_admin(cb.from_user.id): return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("📢 <b>Рассылка</b>\n\nОтправьте текст сообщения, которое нужно разослать всем пользователям:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
+    await state.set_state(AdminStates.broadcast)
+    await cb.answer()
+
+@dp.message(AdminStates.broadcast)
+async def process_broadcast(msg: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(msg.from_user.id): return
+    await state.clear()
+    
+    text = msg.text or msg.caption
+    if not text:
+        return await msg.answer("❌ Сообщение пустое.")
+        
+    sent = 0
+    failed = 0
+    
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users WHERE is_banned = FALSE")
+        
+    status_msg = await msg.answer(f"📢 Начинаю рассылку на {len(users)} юзеров...")
+    
+    for user in users:
+        try:
+            await bot.send_message(user['user_id'], text, parse_mode="HTML")
+            sent += 1
+            await asyncio.sleep(0.05) # Задержка от спама
+        except:
+            failed += 1
+            
+    await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок (заблокировали): {failed}")
 
 @dp.callback_query(F.data == "hide_data_menu")
 async def cb_hide_data_menu(cb: CallbackQuery):
