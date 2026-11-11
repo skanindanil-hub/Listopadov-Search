@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final + Ban + CSV + Analytics)
+# OASIS SEARCH (Final Stable Version)
 import asyncio
 import json
 import html
@@ -52,7 +52,7 @@ html_cache = {}
 report_cache = {} 
 unlocked_reports = set()
 IS_MAINTENANCE = False 
-LAST_SEARCH_TIME = {} # Для анти-спама
+LAST_SEARCH_TIME = {} 
 
 class BuyStates(StatesGroup):
     wait_custom_amount = State()
@@ -76,6 +76,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
+        # Таблица юзеров
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -87,6 +88,12 @@ async def init_db():
                 is_banned BOOLEAN DEFAULT FALSE
             )
         """)
+        # Принудительное добавление колонок для старых баз
+        try:
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_time BIGINT DEFAULT 0")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE")
+        except: pass
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS promocodes (
                 code TEXT PRIMARY KEY,
@@ -258,7 +265,7 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
             combined.append({"source": sources[i], "data": data})
     return combined
 
-# --- ПАРСЕР (С ЦИТАТАМИ) ---
+# --- ПАРСЕР (ЦИТАТЫ) ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
     operators, tg_data = set(), set()
@@ -322,33 +329,33 @@ def render_text_results(api_results: list[dict]) -> str:
     
     if tg_data:
         lines.append("<b>📟 Telegram:</b>")
-        for tg in list(tg_data)[:5]: lines.append(f"> {tg}") # ЦИТАТА
+        for tg in list(tg_data)[:5]: lines.append(f"> {tg}")
         lines.append("")
 
     if phones or operators:
         lines.append("<b>📱 Связь:</b>")
-        if phones: lines.append(f"> Телефон: {', '.join(phones)}") # ЦИТАТА
+        if phones: lines.append(f"> Телефон: {', '.join(phones)}")
         if operators: lines.append(f"> Оператор: {', '.join(operators)}")
         lines.append("")
         
     if others:
         lines.append("<b>👤 Основные данные:</b>")
-        for o in list(others)[:6]: lines.append(f"> {o}") # ЦИТАТА
+        for o in list(others)[:6]: lines.append(f"> {o}")
         lines.append("")
 
     if emails:
         lines.append("<b>📧 E-mail:</b>")
-        for e in emails: lines.append(f"> {e}") # ЦИТАТА
+        for e in emails: lines.append(f"> {e}")
         lines.append("")
 
     if docs:
         lines.append("<b>📄 Документы:</b>")
-        for d in docs: lines.append(f"> {d}") # ЦИТАТА
+        for d in docs: lines.append(f"> {d}")
         lines.append("")
 
     if socials:
         lines.append("<b>🌐 Соцсети:</b>")
-        for s in socials: lines.append(f"> {s}") # ЦИТАТА
+        for s in socials: lines.append(f"> {s}")
         lines.append("")
 
     if len(lines) <= 1: return "🔍 <b>Данных не найдено.</b>"
@@ -877,7 +884,6 @@ async def process_search(msg: Message, q: str, bot: Bot, forced_type: str = None
     if not is_adm and IS_MAINTENANCE:
         return await msg.answer("🛠 <b>Бот на техническом перерыве.</b>", parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
 
-    # Анти-спам
     if not is_adm:
         now = time.time()
         last_time = LAST_SEARCH_TIME.get(msg.from_user.id, 0)
