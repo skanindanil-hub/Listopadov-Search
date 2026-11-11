@@ -1,4 +1,4 @@
-# OASIS SEARCH (Final BlackBox Style)
+# OASIS SEARCH (Final Sync Version)
 import asyncio
 import json
 import html
@@ -262,9 +262,10 @@ async def query_all_apis(q: str, q_type: str) -> list[dict]:
             combined.append({"source": sources[i], "data": data})
     return combined
 
-# --- ПАРСЕР (ЦИТАТЫ) ---
+# --- ПАРСЕР (СИНХРОНИЗИРОВАННЫЙ) ---
 def render_text_results(api_results: list[dict]) -> str:
     fio, phones, socials, emails, docs, others = set(), set(), set(), set(), set(), set()
+    addresses = set()
     operators, tg_data = set(), set()
 
     IGNORE_WORDS = ("service", "nebula", "spectrum", "mobius", "result", "data", "status", "error", "source", "kind", "target", "limit", "cache", "remaining", "cached", "used", "is_premium", "search_id", "report_url")
@@ -273,8 +274,10 @@ def render_text_results(api_results: list[dict]) -> str:
         if isinstance(obj, dict):
             for k, v in obj.items():
                 k_lower = str(k).lower()
+                
                 if k_lower in ("id", "profile_url", "success", "query", "elapsed_seconds", "results_count", "status", "count", "total_records", "latency_ms", "type", "kind", "target", "kind_tag", "stype", "error", "source", "mobius-spectrum-phone", "result", "groups", "records"):
                     continue
+                    
                 if isinstance(v, (str, int, bool)):
                     val_str = str(v)
                     if not val_str.strip(): continue
@@ -300,7 +303,7 @@ def render_text_results(api_results: list[dict]) -> str:
                     elif k_lower in ("region", "регион", "город", "city"): others.add(f"Регион: {val_str}")
                     elif k_lower in ("country", "страна"): others.add(f"Страна: {val_str}")
                     elif k_lower in ("email", "mail", "почта"): emails.add(val_str)
-                    elif k_lower in ("vk", "instagram", "tiktok"): socials.add(f"{k.capitalize()}: {val_str}")
+                    elif k_lower in ("vk", "instagram", "tiktok", "facebook"): socials.add(f"{k.capitalize()}: {val_str}")
                     elif k_lower in ("birthday", "birth_date", "date", "dob", "дата рождения"): 
                         if "T" in val_str:
                             parts = val_str.split("T")[0].split("-")
@@ -309,7 +312,7 @@ def render_text_results(api_results: list[dict]) -> str:
                     elif k_lower in ("age", "возраст"): others.add(f"Возраст: {val_str}")
                     elif k_lower in ("gender", "sex", "пол"): others.add(f"Пол: {'Мужской' if val_str.lower() in ('m', 'male', 'мужской', 'м') else 'Женский'}")
                     elif k_lower in ("inn", "snils", "passport", "ogrn", "passport_series", "passport_number", "инн", "снилс", "паспорт"): docs.add(f"{k.capitalize()}: {val_str}")
-                    elif k_lower in ("address", "адрес"): others.add(f"Адрес: {val_str}")
+                    elif k_lower in ("address", "адрес"): addresses.add(val_str)
                     else: others.add(f"{k.capitalize()}: {val_str}")
                 else:
                     extract_recursive(v)
@@ -348,6 +351,11 @@ def render_text_results(api_results: list[dict]) -> str:
     if docs:
         lines.append("<b>📄 Документы:</b>")
         for d in docs: lines.append(f"> {d}")
+        lines.append("")
+
+    if addresses:
+        lines.append("<b>🏠 Адреса:</b>")
+        for a in addresses: lines.append(f"> {a}")
         lines.append("")
 
     if socials:
@@ -559,6 +567,20 @@ async def start(msg: Message, command: CommandStart):
     is_adm = await is_admin(msg.from_user.id)
     welcome_msg = f"{WELCOME_TEXT}\n\n📊 Нас уже: <b>{total_users}</b> пользователей."
     await msg.answer(welcome_msg, parse_mode="HTML", reply_markup=main_menu(msg.from_user.id, is_adm))
+
+@dp.callback_query(F.data == "hide_data_menu")
+async def cb_hide_data_menu(cb: CallbackQuery):
+    try:
+        await cb.message.edit_text(
+            "🔒 <b>Скрытие данных</b>\n\n"
+            "Эта функция позволяет скрыть данные. После оплаты бот пришлет вам отчет в чат.\n\n"
+            "Выберите способ оплаты:",
+            parse_mode="HTML", reply_markup=hide_data_menu()
+        )
+        await cb.answer()
+    except Exception as e:
+        logging.error(f"Ошибка в hide_data_menu: {e}")
+        await cb.answer("Ошибка. Попробуйте позже.", show_alert=True)
 
 @dp.callback_query(F.data == "adm_stats")
 async def cb_adm_stats(cb: CallbackQuery):
