@@ -9,8 +9,7 @@ import time
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
+# --- УБИРАЕМ FASTAPI И ВЕБХУКИ, ОСТАВЛЯЕМ ТОЛЬКО AIOGRAM ---
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
@@ -18,12 +17,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+# --- ДЛЯ ВЕБ-ОТЧЕТА (оставляем, чтобы графы работали) ---
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+import uvicorn
+
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ"
 MAIN_ADMIN_ID = 8394631079 
-WEBHOOK_HOST = "https://listopadov-search.onrender.com" 
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+WEBHOOK_HOST = "https://listopadov-search.onrender.com" # Ссылка для веб-отчетов
 DB_FILE = "oasis.db" 
 USERS_DB = "users.db" 
 
@@ -42,8 +44,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
-MIRROR_BOTS = []
-PROCESSED_MESSAGES = {} 
 
 class SearchStates(StatesGroup):
     wait_partial_field = State()
@@ -70,13 +70,6 @@ def init_users_db():
     ''')
     try: cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
     except: pass
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mirrors (
-            bot_username TEXT PRIMARY KEY,
-            owner_id INTEGER,
-            created_at TEXT
-        )
-    ''')
     conn.commit()
     conn.close()
 
@@ -155,8 +148,7 @@ PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
 
 SUPPORT_TEXT = """🆘 <b>Связь с нами</b>
 
-Пожалуйста, напишите ваше сообщение прямо в чат. Мы получим его и ответим вам в ближайшее время.
-Если это предложение о покупке запросов или сотрудничестве — укажите это в тексте."""
+Пожалуйста, напишите ваше сообщение прямо в чат. Мы получим его и ответим вам в ближайшее время."""
 
 MIRROR_TEXT = """🔧 <b>Инструкция по созданию бота:</b>
 
@@ -456,78 +448,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
     </html>
     """
 
-# --- FASTAPI ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    yield
-    await bot.delete_webhook()
-    await bot.session.close()
-
-app = FastAPI(title="Oasis Digital API", lifespan=lifespan)
-
-@app.get("/report/{report_id}", response_class=HTMLResponse)
-async def web_report(report_id: str):
-    data = REPORTS_CACHE.get(report_id)
-    if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
-    return HTMLResponse(content=generate_html_report(data, report_id))
-
-@app.get("/mirrors", response_class=HTMLResponse)
-async def show_mirrors():
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT bot_username, created_at FROM mirrors ORDER BY created_at DESC")
-    bots = cursor.fetchall()
-    conn.close()
-    
-    bots_html = ""
-    for b in bots:
-        uname = b[0]
-        date = b[1]
-        bots_html += f'''
-        <div class="bot-card">
-            <div class="bot-icon">🤖</div>
-            <div class="bot-info">
-                <h3>@{uname}</h3>
-                <p>Создан: {date}</p>
-            </div>
-            <a href="https://t.me/{uname}" target="_blank" class="btn">Запустить</a>
-        </div>
-        '''
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Oasis Digital - Зеркала</title>
-        <style>
-            body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 40px 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; }}
-            h1 {{ color: #38bdf8; text-align: center; margin-bottom: 10px; }}
-            p.sub {{ text-align: center; color: #94a3b8; margin-bottom: 40px; }}
-            .bot-card {{ display: flex; align-items: center; background: #1e293b; padding: 15px 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }}
-            .bot-icon {{ font-size: 24px; margin-right: 15px; }}
-            .bot-info {{ flex: 1; }}
-            .bot-info h3 {{ margin: 0 0 5px 0; color: #f8fafc; font-size: 16px; }}
-            .bot-info p {{ margin: 0; color: #64748b; font-size: 12px; }}
-            .btn {{ background: #38bdf8; color: #0f172a; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.2s; }}
-            .btn:hover {{ background: #0ea5e9; }}
-            .footer {{ text-align: center; color: #475569; font-size: 12px; margin-top: 50px; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>OASIS DIGITAL</h1>
-            <p class="sub">Каталог активных зеркал бота</p>
-            {bots_html if bots else '<p style="text-align:center;">Пока нет созданных зеркал.</p>'}
-            <div class="footer">Сгенерировано автоматически • Oasis Digital</div>
-        </div>
-    </body>
-    </html>
-    """
-
 # --- ЗЕРКАЛО ---
 async def run_mirror_bot(token: str, admin_id: int):
     mirror_bot = Bot(token=token)
@@ -679,6 +599,7 @@ async def run_mirror_bot(token: str, admin_id: int):
         logging.error(f"Ошибка клона: {e}")
     finally:
         await mirror_bot.session.close()
+
 
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart(deep_link=True))
@@ -894,6 +815,28 @@ async def process_search(msg: Message, state: FSMContext):
         parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
+@dp.callback_query(F.data.startswith("get_txt_"))
+async def cb_send_txt(cb: CallbackQuery):
+    report_id = cb.data.replace("get_txt_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data: return await cb.answer("Отчет устарел", show_alert=True)
+    
+    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {data['email']}\nАдрес: {data['address']}\nПаспорт: {data['passport']}\nИНН: {data['inn']}\nСНИЛС: {data['snils']}"
+    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
+    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("get_json_"))
+async def cb_send_json(cb: CallbackQuery):
+    report_id = cb.data.replace("get_json_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data: return await cb.answer("Отчет устарел", show_alert=True)
+    
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
+    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
+    await cb.answer()
+
 # --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
@@ -1014,13 +957,32 @@ async def cb_adm_stub(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
     await cb.answer("Функция в разработке", show_alert=True)
 
-@app.post(WEBHOOK_PATH)
-async def bot_webhook(request: Request):
-    from aiogram.types import Update
-    update = Update.model_validate(await request.json(), context={"bot": bot})
-    await dp.feed_update(bot, update)
-    return {"ok": True}
+# --- ЗАПУСК (POLLING + WEB ДЛЯ ОТЧЕТОВ) ---
+web_app = FastAPI()
+
+@web_app.get("/report/{report_id}", response_class=HTMLResponse)
+async def web_report(report_id: str):
+    data = REPORTS_CACHE.get(report_id)
+    if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
+    return HTMLResponse(content=generate_html_report(data, report_id))
+
+async def run_web():
+    config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+async def main():
+    print("Бот запускается на Polling...")
+    await bot.delete_webhook(drop_pending_updates=True) # Важно! Отключаем вебхук, чтобы не было дублей
+    
+    # Запускаем веб-сервер для отчетов в фоне
+    asyncio.create_task(run_web())
+    
+    # Запускаем бота
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
