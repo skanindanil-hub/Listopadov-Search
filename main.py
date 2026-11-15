@@ -41,9 +41,12 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
+MIRROR_BOTS = [] # Список для хранения запущенных клонов
 
 class SearchStates(StatesGroup):
     wait_partial_field = State()
+    wait_support_msg = State()
+    wait_mirror_token = State()
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -78,7 +81,6 @@ def add_user(user_id, username, referrer_id=None):
     if cursor.fetchone():
         conn.close()
         return False
-    
     cursor.execute(
         "INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at) VALUES (?, ?, ?, ?, ?)",
         (user_id, username, 3, referrer_id, datetime.now().strftime("%d.%m.%Y"))
@@ -108,18 +110,27 @@ def deduct_request(user_id):
     return False
 
 # --- ТЕКСТЫ ---
-START_TEXT = (
-    "<b>Oasis Digital</b>\n\n"
-    "<blockquote>Бот для поиска и агрегации информации. "
-    "Ищет данные по номеру телефона, Telegram ID, email, "
-    "автомобилям и документам в открытых и приватных базах.</blockquote>"
-)
+START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
 
-GUIDE_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
+🕵️ <b>Личность</b>
+<blockquote>Навальный Алексей Анатольевич</blockquote>
+
+📲 <b>Контакты</b>
 <blockquote>79104813955 — номер телефона
-vania120df@gmail.com — email
-@durov — Telegram</blockquote>
-Отправьте запрос сообщением."""
+vania120df@gmail.com — email</blockquote>
+
+🚘 <b>Транспорт</b>
+<blockquote>РЕНО19 — госномер автомобиля
+XTA210930Y2696785 — VIN автомобиля</blockquote>
+
+💬 <b>Соцсети</b>
+<blockquote>@durov 1090472807 — Telegram
+vk.com/id1, 2737383 - ВКонтакте</blockquote>
+
+🌐 <b>Онлайн-следы</b>
+<blockquote>78.26.242.244, google.com</blockquote>
+
+<i>Отправьте запрос сообщением. Если подходят несколько типов, бот предложит выбрать нужный.</i>"""
 
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
 
@@ -128,17 +139,40 @@ PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
 Достаточно заполнить то, что у вас есть — все поля необязательны.
 Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
 
+SUPPORT_TEXT = """🆘 <b>Связь с нами</b>
+
+Пожалуйста, напишите ваше сообщение прямо в чат. Мы получим его и ответим вам в ближайшее время.
+Если это предложение о покупке запросов или сотрудничестве — укажите это в тексте."""
+
+MIRROR_TEXT = """🔧 <b>Инструкция по созданию бота:</b>
+
+1. Перейди в Telegram-бота 👉 @BotFather
+2. Нажми кнопку «Start» или напиши команду /start
+3. Отправь команду: /newbot
+4. Введи любое имя для своего бота (например, «Мой Первый Бот»)
+5. Придумай уникальный username для бота, который должен оканчиваться на Bot (например: IUzZDe_RgdW_bot)
+6. @BotFather пришлёт тебе сообщение с API Token — он выглядит вот так:
+<code>1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11</code>
+
+<i>Скопируй этот токен и отправь его сюда — и всё готово!</i>"""
+
 # --- КЛАВИАТУРЫ ---
-def start_kb():
+def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Поиск", callback_data="search_info")],
         [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
-        [InlineKeyboardButton(text="👤 Профиль / Рефералка", callback_data="profile")],
-        [InlineKeyboardButton(text="Связь с нами", callback_data="support")]
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🔗 Рефералка / Зеркало", callback_data="ref_link")],
+        [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
     ])
 
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]])
+
+def ref_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 Создать зеркало бота", callback_data="create_mirror")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
+    ])
 
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -147,12 +181,6 @@ def result_kb(report_id: str):
             InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
             InlineKeyboardButton(text="📦 Скачать JSON", callback_data=f"get_json_{report_id}")
         ],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
-    ])
-
-def admin_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -292,25 +320,17 @@ async def search_everywhere(q: str):
 
     return final_data if found_something else None
 
-# --- HTML ОТЧЕТ ---
+# --- HTML ---
 def generate_html_report(data: dict, report_id: str) -> str:
     nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
     edges = []
     node_id = 2
-    
-    if data.get('fio') and data['fio'] != "Нет":
-        nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('phone_main') and data['phone_main'] != "Нет":
-        nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('operator') and data['operator'] != "Нет":
-        nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('email') and data['email'] != "Нет":
-        nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('passport') and data['passport'] != "Нет":
-        nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('inn') and data['inn'] != "Нет":
-        nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-
+    if data.get('fio') and data['fio'] != "Нет": nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('phone_main') and data['phone_main'] != "Нет": nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('operator') and data['operator'] != "Нет": nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('email') and data['email'] != "Нет": nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('passport') and data['passport'] != "Нет": nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('inn') and data['inn'] != "Нет": nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
     return f"""
@@ -434,6 +454,161 @@ async def web_report(report_id: str):
     if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
     return HTMLResponse(content=generate_html_report(data, report_id))
 
+# --- ЗЕРКАЛО ---
+async def run_mirror_bot(token: str, admin_id: int):
+    mirror_bot = Bot(token=token)
+    mirror_dp = Dispatcher(storage=MemoryStorage())
+    
+    @mirror_dp.message(CommandStart())
+    async def mirror_start(message: Message):
+        user = get_user(message.from_user.id)
+        if not user: add_user(message.from_user.id, message.from_user.username)
+        
+        try: await message.answer_sticker(STICKER_ID)
+        except: pass
+        await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+        
+    @mirror_dp.callback_query(F.data == "profile")
+    async def mirror_profile(cb: CallbackQuery):
+        user = get_user(cb.from_user.id)
+        text = f"👤 <b>Профиль</b>\n\nID: <code>{cb.from_user.id}</code>\nЗапросов: <b>{user[2] if user else 0}</b>"
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
+        await cb.answer()
+        
+    @mirror_dp.callback_query(F.data == "ref_link")
+    async def mirror_ref(cb: CallbackQuery):
+        ref_link = f"https://t.me/{(await mirror_bot.get_me()).username}?start={cb.from_user.id}"
+        text = f"🔗 <b>Ваша реферальная ссылка:</b>\n\n<code>{ref_link}</code>\n\n<i>За каждого приглашенного вы получаете +1 запрос!</i>"
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data == "support")
+    async def mirror_support(cb: CallbackQuery, state: FSMContext):
+        await state.set_state(SearchStates.wait_support_msg)
+        await cb.message.edit_text(SUPPORT_TEXT, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data == "back_to_start")
+    async def mirror_back(cb: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+        await cb.answer()
+
+    @mirror_dp.message(SearchStates.wait_support_msg)
+    async def mirror_process_support(msg: Message, state: FSMContext):
+        await state.clear()
+        admin_text = f"📩 <b>Новое сообщение в поддержку</b>\n\nОт: {msg.from_user.full_name} (@{msg.from_user.username})\nID: <code>{msg.from_user.id}</code>\n\nТекст: {msg.text}"
+        try:
+            await bot.send_message(admin_id, admin_text, parse_mode="HTML")
+            await msg.answer("✅ Ваше сообщение отправлено администрации. Ожидайте ответа.", reply_markup=main_kb())
+        except:
+            await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
+
+    # Поиск по неполным данным для зеркала
+    @mirror_dp.callback_query(F.data == "search_partial")
+    async def mirror_search_partial(cb: CallbackQuery, state: FSMContext):
+        await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
+        await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data.startswith("field_"))
+    async def mirror_select_field(cb: CallbackQuery, state: FSMContext):
+        field = cb.data.replace("field_", "")
+        await state.update_data(editing_field=field)
+        field_names = {"surname": "Фамилию", "name": "Имя", "patronymic": "Отчество", "birth_date": "Дату рождения"}
+        await cb.message.edit_text(f"Введите {field_names.get(field, 'значение')}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]]))
+        await state.set_state(SearchStates.wait_partial_field)
+        await cb.answer()
+
+    @mirror_dp.message(SearchStates.wait_partial_field)
+    async def mirror_process_field_input(msg: Message, state: FSMContext):
+        data = await state.get_data()
+        field = data.get("editing_field")
+        if field and msg.text: await state.update_data({field: msg.text.strip()})
+        await state.set_state(None)
+        await msg.answer(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+
+    @mirror_dp.callback_query(F.data == "clear_fields")
+    async def mirror_clear(cb: CallbackQuery, state: FSMContext):
+        await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
+        await cb.answer("Поля очищены")
+        await cb.message.edit_reply_markup(reply_markup=partial_search_kb(await state.get_data()))
+
+    @mirror_dp.callback_query(F.data == "select_country")
+    async def mirror_select_country(cb: CallbackQuery):
+        await cb.message.edit_text("🌍 Выберите страну поиска:", reply_markup=country_kb())
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data.startswith("set_country_"))
+    async def mirror_set_country(cb: CallbackQuery, state: FSMContext):
+        country = cb.data.replace("set_country_", "")
+        await state.update_data(country=country)
+        await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data == "back_to_partial")
+    async def mirror_back_to_partial(cb: CallbackQuery, state: FSMContext):
+        await state.set_state(None)
+        await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+        await cb.answer()
+
+    @mirror_dp.callback_query(F.data == "do_partial_search")
+    async def mirror_do_partial(cb: CallbackQuery, state: FSMContext):
+        if not deduct_request(cb.from_user.id):
+            return await cb.answer("❌ У вас закончились запросы.", show_alert=True)
+            
+        data = await state.get_data()
+        query_parts = []
+        if data.get('surname'): query_parts.append(f"Фамилия: {data['surname']}")
+        if data.get('name'): query_parts.append(f"Имя: {data['name']}")
+        if data.get('patronymic'): query_parts.append(f"Отчество: {data['patronymic']}")
+        if data.get('birth_date'): query_parts.append(f"Дата: {data['birth_date']}")
+        if data.get('country'): query_parts.append(f"Страна: {data['country']}")
+        
+        query_str = ", ".join(query_parts) if query_parts else "Пустой запрос"
+        
+        note = await cb.message.edit_text(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial", parse_mode="HTML")
+        data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"}
+        
+        report_id = str(uuid.uuid4())[:8]
+        REPORTS_CACHE[report_id] = data_result
+        
+        await note.edit_text(f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>", parse_mode="HTML", reply_markup=result_kb(report_id))
+        await cb.answer()
+
+    @mirror_dp.message(F.text & ~F.text.startswith("/"))
+    async def mirror_process_search(msg: Message, state: FSMContext):
+        if msg.from_user.is_bot: return
+        if not deduct_request(msg.from_user.id):
+            return await msg.answer("❌ У вас закончились запросы.")
+        
+        q = msg.text.strip()
+        note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
+        data = await search_everywhere(q)
+        
+        if not data:
+            data = {"query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"), "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"}
+        else:
+            data["query"] = q
+            data["date"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+        report_id = str(uuid.uuid4())[:8]
+        REPORTS_CACHE[report_id] = data
+        
+        await note.edit_text(
+            f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\nОператор: {data['operator']}\n\n<i>Выберите формат отчета:</i>", 
+            parse_mode="HTML", reply_markup=result_kb(report_id)
+        )
+
+    # Запускаем пуллинг для этого клона
+    try:
+        await mirror_dp.start_polling(mirror_bot)
+    except Exception as e:
+        logging.error(f"Ошибка клона: {e}")
+    finally:
+        await mirror_bot.session.close()
+
+
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart(deep_link=True))
 async def cmd_start_ref(message: Message, command: CommandStart, state: FSMContext):
@@ -445,62 +620,94 @@ async def cmd_start_ref(message: Message, command: CommandStart, state: FSMConte
         add_user(message.from_user.id, message.from_user.username, referrer_id)
         if referrer_id:
             add_requests(referrer_id, 1)
-            try:
-                await bot.send_message(referrer_id, "🎉 По вашей ссылке зашел новый пользователь! Вам начислен +1 запрос.")
+            try: await bot.send_message(referrer_id, "🎉 По вашей ссылке зашел новый пользователь! Вам начислен +1 запрос.")
             except: pass
     
-    # Стикер
-    try:
-        await message.answer_sticker(STICKER_ID)
+    try: await message.answer_sticker(STICKER_ID)
     except: pass
-    
-    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user = get_user(message.from_user.id)
-    if not user:
-        add_user(message.from_user.id, message.from_user.username)
+    if not user: add_user(message.from_user.id, message.from_user.username)
     
-    # Стикер
-    try:
-        await message.answer_sticker(STICKER_ID)
+    try: await message.answer_sticker(STICKER_ID)
     except: pass
-    
-    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 @dp.callback_query(F.data == "back_to_start")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
     await cb.answer()
 
-@dp.callback_query(F.data == "search_info")
-async def cb_search_info(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(GUIDE_TEXT, parse_mode="HTML", reply_markup=back_kb())
+@dp.callback_query(F.data == "ref_link")
+async def cb_ref_link(cb: CallbackQuery):
+    user = get_user(cb.from_user.id)
+    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
+    text = (
+        f"🔗 <b>Ваша реферальная ссылка:</b>\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"<i>За каждого приглашенного вы получаете +1 запрос!</i>\n\n"
+        f"<b>Также вы можете создать своего собственного бота с этим функционалом!</b>"
+    )
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=ref_kb())
     await cb.answer()
+
+@dp.callback_query(F.data == "create_mirror")
+async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
+    await state.set_state(SearchStates.wait_mirror_token)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_mirror_token)
+async def process_mirror_token(msg: Message, state: FSMContext):
+    await state.clear()
+    token = msg.text.strip()
+    
+    if ":" not in token:
+        return await msg.answer("❌ Это не похоже на токен. Скопируй его из BotFather.", reply_markup=main_kb())
+        
+    # Проверяем токен на валидность (быстро делаем запрос к телеге)
+    try:
+        test_bot = Bot(token=token)
+        await test_bot.get_me()
+        await test_bot.session.close()
+    except Exception:
+        return await msg.answer("❌ Неверный токен. Проверь и попробуй снова.", reply_markup=main_kb())
+        
+    await msg.answer("✅ Токен верный! Бот-клон запускается в фоне. Пожалуйста, подождите...", reply_markup=main_kb())
+    
+    # Запускаем клон в фоне, чтобы не блокировать основного бота
+    task = asyncio.create_task(run_mirror_bot(token, msg.from_user.id))
+    MIRROR_BOTS.append(task)
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
     user = get_user(cb.from_user.id)
-    if not user:
-        return await cb.answer("Ошибка: вы не в базе", show_alert=True)
-    
-    reqs = user[2]
-    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
-    
-    text = (
-        f"👤 <b>Профиль</b>\n\n"
-        f"ID: <code>{cb.from_user.id}</code>\n"
-        f"Запросов: <b>{reqs}</b>\n\n"
-        f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
-        f"<i>За каждого приглашенного вы получаете +1 запрос!</i>"
-    )
+    text = f"👤 <b>Профиль</b>\n\nID: <code>{cb.from_user.id}</code>\nЗапросов: <b>{user[2] if user else 0}</b>"
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
-# --- НЕПОЛНЫЙ ПОИСК ---
+@dp.callback_query(F.data == "support")
+async def cb_support(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(SearchStates.wait_support_msg)
+    await cb.message.edit_text(SUPPORT_TEXT, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await cb.answer()
+
+@dp.message(SearchStates.wait_support_msg)
+async def process_support_msg(msg: Message, state: FSMContext):
+    await state.clear()
+    admin_text = f"📩 <b>Новое сообщение в поддержку</b>\n\nОт: {msg.from_user.full_name} (@{msg.from_user.username})\nID: <code>{msg.from_user.id}</code>\n\nТекст: {msg.text}"
+    try:
+        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
+        await msg.answer("✅ Ваше сообщение отправлено администрации. Ожидайте ответа.", reply_markup=main_kb())
+    except:
+        await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
+
+# --- ОСТАЛЬНЫЕ ХЕНДЛЕРЫ (КАК БЫЛИ) ---
 @dp.callback_query(F.data == "search_partial")
 async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
     await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
@@ -572,13 +779,12 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
     await note.edit_text(f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>", parse_mode="HTML", reply_markup=result_kb(report_id))
     await cb.answer()
 
-# --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
     if msg.from_user.is_bot: return
     
     if not deduct_request(msg.from_user.id):
-        return await msg.answer("❌ У вас закончились запросы. Пригласите друга (кнопка Профиль) или купите в профиле.")
+        return await msg.answer("❌ У вас закончились запросы. Пригласите друга (кнопка Рефералка) или купите в профиле.")
     
     q = msg.text.strip()
     
@@ -609,27 +815,10 @@ async def process_search(msg: Message, state: FSMContext):
         parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
-# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
-
-@dp.callback_query(F.data == "adm_api_status")
-async def cb_adm_api_status(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
-    res_bb = await fetch_blackbox("79825207224")
-    res_mb = await fetch_mobius("79825207224")
-    res_nb = await fetch_nebula("79825207224")
-    text = f"📡 <b>Статус API:</b>\n\n{'🟢 OK' if res_bb else '🔴 Ошибка'} — BlackBox\n{'🟢 OK' if res_mb else '🔴 Ошибка'} — Mobius\n{'🟢 OK' if res_nb else '🔴 Ошибка'} — Nebula"
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("adm_"))
-async def cb_adm_stub(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.answer("Функция в разработке (требует БД)", show_alert=True)
+    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML")
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
