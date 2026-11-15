@@ -41,7 +41,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
-MIRROR_BOTS = [] # Список для хранения запущенных клонов
+MIRROR_BOTS = []
 
 class SearchStates(StatesGroup):
     wait_partial_field = State()
@@ -59,6 +59,13 @@ def init_users_db():
             requests_left INTEGER DEFAULT 3,
             referrer_id INTEGER,
             joined_at TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mirrors (
+            bot_username TEXT PRIMARY KEY,
+            owner_id INTEGER,
+            created_at TEXT
         )
     ''')
     conn.commit()
@@ -454,6 +461,62 @@ async def web_report(report_id: str):
     if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
     return HTMLResponse(content=generate_html_report(data, report_id))
 
+@app.get("/mirrors", response_class=HTMLResponse)
+async def show_mirrors():
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT bot_username, created_at FROM mirrors ORDER BY created_at DESC")
+    bots = cursor.fetchall()
+    conn.close()
+    
+    bots_html = ""
+    for b in bots:
+        uname = b[0]
+        date = b[1]
+        bots_html += f'''
+        <div class="bot-card">
+            <div class="bot-icon">🤖</div>
+            <div class="bot-info">
+                <h3>@{uname}</h3>
+                <p>Создан: {date}</p>
+            </div>
+            <a href="https://t.me/{uname}" target="_blank" class="btn">Запустить</a>
+        </div>
+        '''
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Oasis Digital - Зеркала</title>
+        <style>
+            body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 40px 20px; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            h1 {{ color: #38bdf8; text-align: center; margin-bottom: 10px; }}
+            p.sub {{ text-align: center; color: #94a3b8; margin-bottom: 40px; }}
+            .bot-card {{ display: flex; align-items: center; background: #1e293b; padding: 15px 20px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #334155; }}
+            .bot-icon {{ font-size: 24px; margin-right: 15px; }}
+            .bot-info {{ flex: 1; }}
+            .bot-info h3 {{ margin: 0 0 5px 0; color: #f8fafc; font-size: 16px; }}
+            .bot-info p {{ margin: 0; color: #64748b; font-size: 12px; }}
+            .btn {{ background: #38bdf8; color: #0f172a; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 14px; transition: 0.2s; }}
+            .btn:hover {{ background: #0ea5e9; }}
+            .footer {{ text-align: center; color: #475569; font-size: 12px; margin-top: 50px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>OASIS DIGITAL</h1>
+            <p class="sub">Каталог активных зеркал бота</p>
+            {bots_html if bots else '<p style="text-align:center;">Пока нет созданных зеркал.</p>'}
+            <div class="footer">Сгенерировано автоматически • Oasis Digital</div>
+        </div>
+    </body>
+    </html>
+    """
+
 # --- ЗЕРКАЛО ---
 async def run_mirror_bot(token: str, admin_id: int):
     mirror_bot = Bot(token=token)
@@ -504,7 +567,6 @@ async def run_mirror_bot(token: str, admin_id: int):
         except:
             await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
 
-    # Поиск по неполным данным для зеркала
     @mirror_dp.callback_query(F.data == "search_partial")
     async def mirror_search_partial(cb: CallbackQuery, state: FSMContext):
         await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
@@ -600,7 +662,6 @@ async def run_mirror_bot(token: str, admin_id: int):
             parse_mode="HTML", reply_markup=result_kb(report_id)
         )
 
-    # Запускаем пуллинг для этого клона
     try:
         await mirror_dp.start_polling(mirror_bot)
     except Exception as e:
@@ -670,17 +731,22 @@ async def process_mirror_token(msg: Message, state: FSMContext):
     if ":" not in token:
         return await msg.answer("❌ Это не похоже на токен. Скопируй его из BotFather.", reply_markup=main_kb())
         
-    # Проверяем токен на валидность (быстро делаем запрос к телеге)
     try:
         test_bot = Bot(token=token)
-        await test_bot.get_me()
+        bot_info = await test_bot.get_me()
         await test_bot.session.close()
     except Exception:
         return await msg.answer("❌ Неверный токен. Проверь и попробуй снова.", reply_markup=main_kb())
         
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO mirrors (bot_username, owner_id, created_at) VALUES (?, ?, ?)", 
+                   (bot_info.username, msg.from_user.id, datetime.now().strftime("%d.%m.%Y")))
+    conn.commit()
+    conn.close()
+        
     await msg.answer("✅ Токен верный! Бот-клон запускается в фоне. Пожалуйста, подождите...", reply_markup=main_kb())
     
-    # Запускаем клон в фоне, чтобы не блокировать основного бота
     task = asyncio.create_task(run_mirror_bot(token, msg.from_user.id))
     MIRROR_BOTS.append(task)
 
@@ -707,7 +773,6 @@ async def process_support_msg(msg: Message, state: FSMContext):
     except:
         await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
 
-# --- ОСТАЛЬНЫЕ ХЕНДЛЕРЫ (КАК БЫЛИ) ---
 @dp.callback_query(F.data == "search_partial")
 async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
     await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
