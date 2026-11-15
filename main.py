@@ -15,6 +15,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- ГРАФЫ ---
@@ -43,6 +44,12 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
+
+class AdminStates(StatesGroup):
+    wait_give = State()
+    wait_take = State()
+    wait_ban = State()
+    wait_broadcast = State()
 
 # --- ТЕКСТЫ ---
 START_TEXT = (
@@ -95,7 +102,6 @@ def start_kb():
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]])
 
-# Кнопки результата (теперь без ссылок на файлы, они будут появляться после нажатия)
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Веб-отчет (Граф)", url=f"{WEBHOOK_HOST}/report/{report_id}")],
@@ -108,7 +114,10 @@ def result_kb(report_id: str):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
+        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo"), InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -181,7 +190,7 @@ async def search_everywhere(q: str):
             }
     return None
 
-# --- ГРАФ ---
+# --- ГРАФ И HTML ---
 def generate_graph_png(data: dict) -> bytes:
     G = nx.Graph()
     center = data.get('phone_main', 'Нет')
@@ -206,7 +215,6 @@ def generate_graph_png(data: dict) -> bytes:
     buf.seek(0); plt.close()
     return buf.read()
 
-# --- ГЕНЕРАЦИЯ HTML ---
 def generate_html_report(data: dict, report_id: str) -> str:
     return f"""
     <!DOCTYPE html>
@@ -281,17 +289,13 @@ async def cb_profile(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
-# --- ОТПРАВКА ФАЙЛОВ В ЧАТ ---
+# --- ОТПРАВКА ФАЙЛОВ ---
 @dp.callback_query(F.data.startswith("get_txt_"))
 async def cb_send_txt(cb: CallbackQuery):
     report_id = cb.data.replace("get_txt_", "")
     data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-        
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nTelegram: {data['username']}\n\nИсточники: {', '.join([s['name'] for s in data['sources_list']])}"
-    
-    # Создаем файл в памяти и отправляем
+    if not data: return await cb.answer("Отчет устарел", show_alert=True)
+    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nTelegram: {data['username']}\n"
     file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
     await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await cb.answer()
@@ -300,12 +304,8 @@ async def cb_send_txt(cb: CallbackQuery):
 async def cb_send_json(cb: CallbackQuery):
     report_id = cb.data.replace("get_json_", "")
     data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-        
+    if not data: return await cb.answer("Отчет устарел", show_alert=True)
     json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    
-    # Создаем файл в памяти и отправляем
     file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
     await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
     await cb.answer()
@@ -319,9 +319,7 @@ async def cb_stub(cb: CallbackQuery):
 async def process_search(msg: Message, state: FSMContext):
     q = msg.text.strip()
     note = await msg.answer(f"🔍 <b>Ищу:</b> {q}\n<i>(Опрос баз, до 45 сек...)</i>", parse_mode="HTML")
-    
     data = await search_everywhere(q)
-    
     if not data:
         data = {
             "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -337,13 +335,11 @@ async def process_search(msg: Message, state: FSMContext):
             "operator": "-", "region": "-", "country": "-", "passport": "-", "inn": "-", "snils": "-", 
             "email": "-", "dob": "-", "age": "-", "address": "-"
         })
-
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
-    
     await note.edit_text(
-        f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\n\n"
-        f"<i>Выберите формат отчета:</i>", parse_mode="HTML", reply_markup=result_kb(report_id)
+        f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\n\n<i>Выберите формат отчета:</i>", 
+        parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
 # --- АДМИНКА ---
@@ -355,16 +351,18 @@ async def admin_panel(msg: Message):
 @dp.callback_query(F.data == "adm_api_status")
 async def cb_adm_api_status(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Проверяю API (до 45 сек)...</b>", parse_mode="HTML")
+    await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
     res_bb = await fetch_blackbox("79825207224")
     res_mb = await fetch_mobius("79825207224")
     res_nb = await fetch_nebula("79825207224")
-    text = "📡 <b>Статус API:</b>\n\n"
-    text += f"{'🟢 OK' if res_bb else '🔴 Ошибка'} — BlackBox\n"
-    text += f"{'🟢 OK' if res_mb else '🔴 Ошибка'} — Mobius\n"
-    text += f"{'🟢 OK' if res_nb else '🔴 Ошибка'} — Nebula"
+    text = f"📡 <b>Статус API:</b>\n\n{'🟢 OK' if res_bb else '🔴 Ошибка'} — BlackBox\n{'🟢 OK' if res_mb else '🔴 Ошибка'} — Mobius\n{'🟢 OK' if res_nb else '🔴 Ошибка'} — Nebula"
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
     await cb.answer()
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def cb_adm_stub(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.answer("Функция в разработке (требует БД)", show_alert=True)
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
