@@ -24,6 +24,10 @@ WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 DB_FILE = "oasis.db" 
+USERS_DB = "users.db" 
+
+# --- СТИКЕР ---
+STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
 # --- API КЛЮЧИ ---
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
@@ -41,6 +45,68 @@ REPORTS_CACHE = {}
 class SearchStates(StatesGroup):
     wait_partial_field = State()
 
+# --- БАЗА ЮЗЕРОВ ---
+def init_users_db():
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            requests_left INTEGER DEFAULT 3,
+            referrer_id INTEGER,
+            joined_at TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_users_db()
+
+def get_user(user_id):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def add_user(user_id, username, referrer_id=None):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if cursor.fetchone():
+        conn.close()
+        return False
+    
+    cursor.execute(
+        "INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, username, 3, referrer_id, datetime.now().strftime("%d.%m.%Y"))
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+def add_requests(user_id, amount):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET requests_left = requests_left + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def deduct_request(user_id):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT requests_left FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row and row[0] > 0:
+        cursor.execute("UPDATE users SET requests_left = requests_left - 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
 # --- ТЕКСТЫ ---
 START_TEXT = (
     "<b>Oasis Digital</b>\n\n"
@@ -50,34 +116,9 @@ START_TEXT = (
 )
 
 GUIDE_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
-
-🕵️ <b>Личность</b>
-<blockquote>Навальный Алексей Анатольевич</blockquote>
-
-📲 <b>Контакты</b>
 <blockquote>79104813955 — номер телефона
-vania120df@gmail.com — email</blockquote>
-
-📄 <b>Документы:</b>
-<blockquote>/vu 1234567890 – водительские права
-/passport 1234567890 – паспорт
-/ogrn 1027700067328 – ОГРН</blockquote>
-
-🚘 <b>Транспорт</b>
-<blockquote>РЕНО19 — госномер автомобиля
-XTA210930Y2696785 — VIN автомобиля</blockquote>
-
-🏢 <b>Юридическое лицо:</b>
-<blockquote>/inn 1234567890 – ИНН
-/ogrn 1027700067328 – ОГРН</blockquote>
-
-💬 <b>Соцсети</b>
-<blockquote>@durov 1090472807 — Telegram
-vk.com/id1, 2737383 - ВКонтакте</blockquote>
-
-🌐 <b>Онлайн-следы</b>
-<blockquote>78.26.242.244, google.com</blockquote>
-
+vania120df@gmail.com — email
+@durov — Telegram</blockquote>
 Отправьте запрос сообщением."""
 
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
@@ -92,7 +133,7 @@ def start_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Поиск", callback_data="search_info")],
         [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
-        [InlineKeyboardButton(text="Профиль", callback_data="profile"), InlineKeyboardButton(text="Купить запросы", callback_data="buy")],
+        [InlineKeyboardButton(text="👤 Профиль / Рефералка", callback_data="profile")],
         [InlineKeyboardButton(text="Связь с нами", callback_data="support")]
     ])
 
@@ -111,10 +152,7 @@ def result_kb(report_id: str):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
-        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo"), InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats")],
-        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
-        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -171,7 +209,7 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- ЛОГИКА ПОИСКА (ЖДЕМ ВСЕХ) ---
+# --- СУПЕР-ПАРСЕР ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
@@ -189,40 +227,50 @@ async def search_everywhere(q: str):
             if row:
                 return {
                     "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет", 
-                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-",
-                    "sources_list": [{"name": "Local DB", "count": 1}]
+                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-",
+                    "sources_list": [{"name": "Local DB", "count": 1}], "stats": {"sources": 1, "phones": 1, "records": 1}, "completeness": "20%"
                 }
         except: pass
 
-    # Ждем ВСЕ API (до 45 секунд)
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
     results = await asyncio.gather(*tasks)
     
-    final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "sources_list": []}
+    final_data = {
+        "fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", 
+        "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
+        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
+    }
     found_something = False
 
     for res in results:
         if not res or not isinstance(res, dict): continue
 
-        # BlackBox
         if "profile" in res and res.get("status") == "success":
             found_something = True
             prof = res.get("profile", {})
             tel = res.get("telecom", {})
             locs = res.get("locations", [])
+            fin = res.get("financial", {})
             
             if prof.get("primary_fio"): final_data["fio"] = prof["primary_fio"]
             if prof.get("birth_date"): final_data["dob"] = prof["birth_date"]
             if prof.get("passports") and isinstance(prof["passports"], list): final_data["passport"] = prof["passports"][0]
             if prof.get("inn"): final_data["inn"] = prof["inn"]
+            if prof.get("snils"): final_data["snils"] = prof["snils"]
             
             if tel.get("query_phone"): final_data["phone_main"] = tel["query_phone"]
             if tel.get("operator"): final_data["operator"] = tel["operator"]
             if tel.get("region"): final_data["region"] = tel["region"]
+            
             if locs: final_data["address"] = locs[0].get("address", "Нет")
-            final_data["sources_list"].append({"name": "BlackBox", "count": 1})
+            if fin.get("records"): final_data["email"] = str(fin["records"])
+                
+            final_data["stats"]["sources"] += res.get("stats", {}).get("sources_count", 1)
+            final_data["stats"]["phones"] += len(prof.get("phones", []))
+            final_data["stats"]["records"] += res.get("stats", {}).get("total_records", 1)
+            
+            final_data["sources_list"].append({"name": "BlackBox", "count": res.get("stats", {}).get("sources_count", 1)})
 
-        # Mobius/Nebula
         elif res.get("success") and "results" in res:
             found_something = True
             for key, val in res["results"].items():
@@ -235,28 +283,33 @@ async def search_everywhere(q: str):
                         if inner_data.get("phone_info") and final_data["operator"] == "Нет":
                             final_data["operator"] = inner_data["phone_info"].get("operator", "Нет")
                             final_data["region"] = inner_data["phone_info"].get("region", "Нет")
-            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
+                            
+            final_data["stats"]["sources"] += 1
+            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": res.get("results_count", 1)})
+
+    filled = sum(1 for k in ["fio", "phone_main", "email", "address", "dob"] if final_data[k] != "Нет")
+    final_data["completeness"] = f"{int((filled / 5) * 100)}%"
 
     return final_data if found_something else None
 
-# --- HTML С ЧЕРНЫМ ДИЗАЙНОМ И ГРАФОМ ---
+# --- HTML ОТЧЕТ ---
 def generate_html_report(data: dict, report_id: str) -> str:
     nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
     edges = []
     node_id = 2
     
     if data.get('fio') and data['fio'] != "Нет":
-        nodes.append({"id": node_id, "label": f"ФИО: {data['fio']}", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('phone_main') and data['phone_main'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Тел: {data['phone_main']}", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('operator') and data['operator'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Оператор: {data['operator']}", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('email') and data['email'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Email: {data['email']}", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('passport') and data['passport'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Паспорт: {data['passport']}", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('inn') and data['inn'] != "Нет":
-        nodes.append({"id": node_id, "label": f"ИНН: {data['inn']}", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+        nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
 
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
@@ -269,41 +322,82 @@ def generate_html_report(data: dict, report_id: str) -> str:
         <title>Oasis Digital - {data['query']}</title>
         <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <style>
-            body {{ font-family: sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
-            .container {{ max-width: 800px; margin: 0 auto; background: #1e293b; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
-            h1 {{ color: #38bdf8; font-size: 24px; margin-bottom: 5px; }}
-            .subtitle {{ color: #94a3b8; font-size: 14px; margin-bottom: 20px; }}
-            .graph-section {{ height: 500px; background: #0f172a; border-radius: 12px; margin: 20px 0; border: 1px solid #334155; }}
-            .data-item {{ padding: 12px 0; border-bottom: 1px solid #334155; }}
-            .d-label {{ font-size: 11px; color: #64748b; text-transform: uppercase; }}
-            .d-value {{ font-size: 16px; font-weight: 500; color: #f8fafc; }}
-            .legend {{ display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 15px; }}
-            .legend-item {{ display: flex; align-items: center; gap: 5px; font-size: 12px; }}
-            .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+            body {{ font-family: 'Inter', sans-serif; background-color: #f5f6f8; color: #1a1a1a; margin: 0; padding: 20px; line-height: 1.5; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            .header {{ display: flex; align-items: center; gap: 10px; margin-bottom: 20px; color: #888; font-size: 14px; }}
+            .header-logo {{ font-weight: 700; color: #000; font-size: 18px; }}
+            .profile-card {{ display: flex; align-items: center; gap: 20px; background: #fff; border-radius: 16px; padding: 24px; border: 1px solid #e0e0e0; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); }}
+            .avatar {{ width: 70px; height: 70px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 600; flex-shrink: 0; }}
+            .profile-info h2 {{ margin: 0 0 5px 0; font-size: 22px; font-weight: 700; text-transform: uppercase; }}
+            .sub-info {{ color: #888; font-size: 14px; }}
+            .badges {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }}
+            .badge {{ background: #fff; border: 1px solid #e0e0e0; padding: 8px 14px; border-radius: 20px; font-size: 14px; color: #333; font-weight: 500; }}
+            .completeness {{ margin-bottom: 25px; }}
+            .c-header {{ display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; color: #555; }}
+            .c-bar {{ height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }}
+            .c-fill {{ height: 100%; background: #333; border-radius: 4px; width: {data['completeness']}; }}
+            .graph-section {{ height: 400px; background: #0f172a; border-radius: 12px; margin: 20px 0; border: 1px solid #334155; }}
+            .data-section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 16px; margin-bottom: 15px; padding: 10px 20px; }}
+            .data-item {{ display: flex; align-items: center; gap: 15px; padding: 15px 0; border-bottom: 1px solid #f0f0f0; }}
+            .data-item:last-child {{ border-bottom: none; }}
+            .d-icon {{ font-size: 20px; color: #888; width: 30px; text-align: center; }}
+            .d-content {{ flex: 1; }}
+            .d-label {{ font-size: 11px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 4px; }}
+            .d-value {{ font-size: 16px; font-weight: 500; color: #000; word-break: break-word; }}
+            .sources-section {{ margin-top: 30px; }}
+            .sources-section h3 {{ font-size: 13px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 15px; }}
+            .source-item {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; }}
+            .source-item:last-child {{ border-bottom: none; }}
+            .source-count {{ color: #888; }}
+            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>OASIS DIGITAL</h1>
-            <p class="subtitle">Отчет по запросу: {data['query']}</p>
-            
-            <div class="legend">
-                <div class="legend-item"><div class="dot" style="background:#38bdf8;"></div>Цель/Тел</div>
-                <div class="legend-item"><div class="dot" style="background:#4ade80;"></div>ФИО</div>
-                <div class="legend-item"><div class="dot" style="background:#facc15;"></div>Оператор</div>
-                <div class="legend-item"><div class="dot" style="background:#a78bfa;"></div>Email</div>
-                <div class="legend-item"><div class="dot" style="background:#f87171;"></div>Паспорт</div>
+            <div class="header">
+                <div class="header-logo">OASIS DIGITAL</div>
+                <div>/ Report</div>
+            </div>
+
+            <div class="profile-card">
+                <div class="avatar">{data['fio'][:2] if data['fio'] != 'Нет' else '??'}</div>
+                <div class="profile-info">
+                    <h2>{data['fio']}</h2>
+                    <div class="sub-info">{data['query']} • {data['date']}</div>
+                </div>
+            </div>
+
+            <div class="badges">
+                <div class="badge">{data['stats']['sources']} источников</div>
+                <div class="badge">{data['stats']['phones']} телефонов</div>
+                <div class="badge">{data['stats']['records']} записей</div>
+            </div>
+
+            <div class="completeness">
+                <div class="c-header"><span>Полнота профиля</span><span>{data['completeness']}</span></div>
+                <div class="c-bar"><div class="c-fill"></div></div>
             </div>
 
             <div id="mynetwork" class="graph-section"></div>
 
-            <div class="data-item"><div class="d-label">ФИО</div><div class="d-value">{data['fio']}</div></div>
-            <div class="data-item"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div>
-            <div class="data-item"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div>
-            <div class="data-item"><div class="d-label">Email</div><div class="d-value">{data['email']}</div></div>
-            <div class="data-item"><div class="d-label">Адрес</div><div class="d-value">{data['address']}</div></div>
-            <div class="data-item"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div>
-            <div class="data-item"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div>
+            <div class="data-section">
+                <div class="data-item"><div class="d-icon">📞</div><div class="d-content"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div></div>
+                <div class="data-item"><div class="d-icon">📡</div><div class="d-content"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div></div>
+                <div class="data-item"><div class="d-icon">🎂</div><div class="d-content"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div></div>
+                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email / Банк</div><div class="d-value">{data['email']}</div></div></div>
+                <div class="data-item"><div class="d-icon">🏠</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{data['address']}</div></div></div>
+                <div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div></div>
+                <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">ИНН</div><div class="d-value">{data['inn']}</div></div></div>
+                <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">СНИЛС</div><div class="d-value">{data['snils']}</div></div></div>
+            </div>
+
+            <div class="sources-section">
+                <h3>Источники</h3>
+                {''.join([f'<div class="source-item"><span>{src["name"]}</span><span class="source-count">{src["count"]}</span></div>' for src in data.get('sources_list', [])])}
+            </div>
+
+            <div class="footer">Сгенерировано автоматически • Oasis Digital</div>
         </div>
 
         <script type="text/javascript">
@@ -316,7 +410,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 nodes: {{ shape: 'dot', size: 20, font: {{ size: 14, color: '#ffffff' }}, borderWidth: 2 }},
                 edges: {{ color: '#475569', width: 2, smooth: {{ type: 'continuous' }} }},
                 physics: {{ barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 150 }} }},
-                interaction: {{ hover: true, tooltipDelay: 200 }}
+                interaction: {{ hover: true }}
             }};
             var network = new vis.Network(container, data, options);
         </script>
@@ -341,9 +435,39 @@ async def web_report(report_id: str):
     return HTMLResponse(content=generate_html_report(data, report_id))
 
 # --- БОТ ХЕНДЛЕРЫ ---
+@dp.message(CommandStart(deep_link=True))
+async def cmd_start_ref(message: Message, command: CommandStart, state: FSMContext):
+    await state.clear()
+    referrer_id = int(command.args) if command.args and command.args.isdigit() else None
+    
+    user = get_user(message.from_user.id)
+    if not user:
+        add_user(message.from_user.id, message.from_user.username, referrer_id)
+        if referrer_id:
+            add_requests(referrer_id, 1)
+            try:
+                await bot.send_message(referrer_id, "🎉 По вашей ссылке зашел новый пользователь! Вам начислен +1 запрос.")
+            except: pass
+    
+    # Стикер
+    try:
+        await message.answer_sticker(STICKER_ID)
+    except: pass
+    
+    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    user = get_user(message.from_user.id)
+    if not user:
+        add_user(message.from_user.id, message.from_user.username)
+    
+    # Стикер
+    try:
+        await message.answer_sticker(STICKER_ID)
+    except: pass
+    
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
 
 @dp.callback_query(F.data == "back_to_start")
@@ -359,7 +483,20 @@ async def cb_search_info(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
-    text = f"👤 <b>Профиль</b>\n\nID: <code>{cb.from_user.id}</code>\nБаланс: 0 запросов"
+    user = get_user(cb.from_user.id)
+    if not user:
+        return await cb.answer("Ошибка: вы не в базе", show_alert=True)
+    
+    reqs = user[2]
+    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
+    
+    text = (
+        f"👤 <b>Профиль</b>\n\n"
+        f"ID: <code>{cb.from_user.id}</code>\n"
+        f"Запросов: <b>{reqs}</b>\n\n"
+        f"🔗 <b>Ваша реферальная ссылка:</b>\n<code>{ref_link}</code>\n\n"
+        f"<i>За каждого приглашенного вы получаете +1 запрос!</i>"
+    )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
@@ -413,6 +550,9 @@ async def cb_back_to_partial(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "do_partial_search")
 async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
+    if not deduct_request(cb.from_user.id):
+        return await cb.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.", show_alert=True)
+        
     data = await state.get_data()
     query_parts = []
     if data.get('surname'): query_parts.append(f"Фамилия: {data['surname']}")
@@ -424,7 +564,7 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
     query_str = ", ".join(query_parts) if query_parts else "Пустой запрос"
     
     note = await cb.message.edit_text(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial", parse_mode="HTML")
-    data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "sources_list": []}
+    data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"}
     
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data_result
@@ -435,6 +575,11 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
 # --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
+    if msg.from_user.is_bot: return
+    
+    if not deduct_request(msg.from_user.id):
+        return await msg.answer("❌ У вас закончились запросы. Пригласите друга (кнопка Профиль) или купите в профиле.")
+    
     q = msg.text.strip()
     
     note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
@@ -445,7 +590,8 @@ async def process_search(msg: Message, state: FSMContext):
         data = {
             "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
             "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-            "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "sources_list": []
+            "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", 
+            "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"
         }
     else:
         data["query"] = q
