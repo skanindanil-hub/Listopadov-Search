@@ -15,7 +15,6 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- ГРАФЫ ---
@@ -44,12 +43,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
-
-class AdminStates(StatesGroup):
-    wait_give = State()
-    wait_take = State()
-    wait_ban = State()
-    wait_broadcast = State()
 
 # --- ТЕКСТЫ ---
 START_TEXT = (
@@ -155,39 +148,48 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
+# --- ЛОГИКА ПОИСКА ---
 async def search_everywhere(q: str):
-    if os.path.exists(DB_FILE):
+    clean_q = q.strip().replace("@", "")
+    
+    # 1. Локальная база (ТОЛЬКО ДЛЯ ТГ: ники или ID до 12 цифр)
+    is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
+    
+    if os.path.exists(DB_FILE) and is_tg_query:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            clean_q = q.strip().replace("@", "")
             if clean_q.isdigit():
-                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE phone LIKE ? LIMIT 1", (f"%{clean_q}%",))
+                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE tg_id = ? LIMIT 1", (clean_q,))
             else:
-                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE username LIKE ? OR fio LIKE ? LIMIT 1", (f"%{clean_q}%", f"%{clean_q}%"))
+                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE LOWER(username) = ? LIMIT 1", (clean_q.lower(),))
             row = cursor.fetchone()
             conn.close()
             if row:
                 return {
                     "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет",
-                    "sources_list": [{"name": "Local DB", "count": 1}], "is_local": True
+                    "sources_list": [{"name": "Local DB (TG)", "count": 1}], "is_local": True
                 }
-        except: pass
+        except Exception as e:
+            print(f"Ошибка БД: {e}")
 
+    # 2. API (Для всего остального: ФИО, номера, почты)
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
+    results = await asyncio.gather(*tasks)
     
-    for coro in asyncio.as_completed(tasks):
-        res = await coro
-        if res:
-            tg_info = res.get("telegram", {}) if isinstance(res, dict) else {}
-            profile = res.get("profile", {}) if isinstance(res, dict) else {}
-            return {
-                "fio": tg_info.get("first_name", profile.get("full_name", "Нет")),
-                "phone_main": tg_info.get("phone", profile.get("phone", q)),
-                "username": tg_info.get("username", "Нет"),
-                "sources_list": [{"name": "OSINT API", "count": 1}],
-                "is_api": True
-            }
+    for res in results:
+        if res and isinstance(res, dict):
+            tg_info = res.get("telegram", {})
+            profile = res.get("profile", {})
+            
+            if tg_info.get("id") or tg_info.get("username") or profile.get("full_name") or profile.get("phone") or tg_info.get("first_name"):
+                return {
+                    "fio": tg_info.get("first_name", profile.get("full_name", "Нет")),
+                    "phone_main": tg_info.get("phone", profile.get("phone", q)),
+                    "username": tg_info.get("username", "Нет"),
+                    "sources_list": [{"name": "OSINT API", "count": 1}],
+                    "is_api": True
+                }
     return None
 
 # --- ГРАФ И HTML ---
@@ -319,7 +321,9 @@ async def cb_stub(cb: CallbackQuery):
 async def process_search(msg: Message, state: FSMContext):
     q = msg.text.strip()
     note = await msg.answer(f"🔍 <b>Ищу:</b> {q}\n<i>(Опрос баз, до 45 сек...)</i>", parse_mode="HTML")
+    
     data = await search_everywhere(q)
+    
     if not data:
         data = {
             "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -335,11 +339,13 @@ async def process_search(msg: Message, state: FSMContext):
             "operator": "-", "region": "-", "country": "-", "passport": "-", "inn": "-", "snils": "-", 
             "email": "-", "dob": "-", "age": "-", "address": "-"
         })
+
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
+    
     await note.edit_text(
-        f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\n\n<i>Выберите формат отчета:</i>", 
-        parse_mode="HTML", reply_markup=result_kb(report_id)
+        f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\n\n"
+        f"<i>Выберите формат отчета:</i>", parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
 # --- АДМИНКА ---
