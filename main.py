@@ -10,12 +10,11 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, FSInputFile
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # --- ГРАФЫ ---
@@ -44,10 +43,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
-
-class AdminStates(StatesGroup):
-    wait_give = State()
-    wait_take = State()
 
 # --- ТЕКСТЫ ---
 START_TEXT = (
@@ -153,11 +148,12 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- ЛОГИКА ПОИСКА (ПРАВИЛЬНЫЙ ПАРСЕР) ---
+# --- ЛОГИКА ПОИСКА ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     
+    # 1. Локальная база
     if os.path.exists(DB_FILE) and is_tg_query:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -176,14 +172,15 @@ async def search_everywhere(q: str):
                 }
         except: pass
 
+    # 2. API (Берем первый успешный)
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
-    results = await asyncio.gather(*tasks)
     
-    final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "sources_list": []}
-    found_something = False
-
-    for res in results:
+    for coro in asyncio.as_completed(tasks):
+        res = await coro
         if not res or not isinstance(res, dict): continue
+
+        final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "sources_list": []}
+        found_something = False
 
         # Парсим BlackBox
         if "profile" in res and res.get("status") == "success":
@@ -197,7 +194,7 @@ async def search_everywhere(q: str):
             if tel.get("operator"): final_data["operator"] = tel["operator"]
             if tel.get("region"): final_data["region"] = tel["region"]
             if locs: final_data["address"] = locs[0].get("address", "Нет")
-            final_data["sources_list"].append({"name": "BlackBox", "count": res.get("stats", {}).get("sources_count", 1)})
+            final_data["sources_list"].append({"name": "BlackBox", "count": 1})
 
         # Парсим Mobius/Nebula
         elif res.get("success") and "results" in res:
@@ -206,15 +203,18 @@ async def search_everywhere(q: str):
                 if isinstance(val, dict) and "result" in val and isinstance(val["result"], dict):
                     inner_data = val["result"].get("data", {}).get("results", {})
                     if inner_data:
-                        if inner_data.get("names") and final_data["fio"] == "Нет": final_data["fio"] = inner_data["names"][0]
-                        if inner_data.get("emails") and final_data["email"] == "Нет": final_data["email"] = inner_data["emails"][0]
-                        if inner_data.get("addresses") and final_data["address"] == "Нет": final_data["address"] = inner_data["addresses"][0]
-                        if inner_data.get("phone_info") and final_data["operator"] == "Нет":
+                        if inner_data.get("names"): final_data["fio"] = inner_data["names"][0]
+                        if inner_data.get("emails"): final_data["email"] = inner_data["emails"][0]
+                        if inner_data.get("addresses"): final_data["address"] = inner_data["addresses"][0]
+                        if inner_data.get("phone_info"):
                             final_data["operator"] = inner_data["phone_info"].get("operator", "Нет")
                             final_data["region"] = inner_data["phone_info"].get("region", "Нет")
-            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": res.get("results_count", 1)})
+            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
 
-    return final_data if found_something else None
+        if found_something:
+            return final_data
+
+    return None
 
 # --- ГРАФ И HTML ---
 def generate_graph_png(data: dict) -> bytes:
@@ -305,7 +305,20 @@ async def web_graph(report_id: str):
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+    
+    try:
+        # Загружаем картинку с точным именем файла из GitHub
+        photo = FSInputFile("IMG_20261115_023803_066.jpg")
+        await message.answer_photo(
+            photo=photo,
+            caption=START_TEXT,
+            parse_mode="HTML",
+            reply_markup=start_kb()
+        )
+    except Exception as e:
+        # Если картинка не загрузилась, отправляем просто текст
+        logging.error(f"Ошибка загрузки фото: {e}")
+        await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
 
 @dp.callback_query(F.data == "back_to_start")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
