@@ -13,15 +13,10 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-
-# --- ГРАФЫ ---
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import networkx as nx
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8704046668:AAGqPaGJntSegYzKBWspTFfj1GQxDBWeN2E"
@@ -43,6 +38,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
+
+class SearchStates(StatesGroup):
+    wait_partial_field = State()
 
 # --- ТЕКСТЫ ---
 START_TEXT = (
@@ -81,7 +79,14 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 🌐 <b>Онлайн-следы</b>
 <blockquote>78.26.242.244, google.com</blockquote>
 
-Отправьте запрос сообщением. Если подходят несколько типов, бот предложит выбрать нужный."""
+Отправьте запрос сообщением."""
+
+PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
+
+Вы можете указать любое количество данных: фамилию, имя, отчество, дату или год рождения, возраст, место рождения и т.д.
+
+Достаточно заполнить то, что у вас есть — все поля необязательны.
+Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
 
 # --- КЛАВИАТУРЫ ---
 def start_kb():
@@ -112,6 +117,36 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
         [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
+    ])
+
+# --- КЛАВИАТУРА НЕПОЛНОГО ПОИСКА ---
+def partial_search_kb(data: dict):
+    def short(val):
+        if not val: return "..."
+        return val[:10] + "..." if len(val) > 10 else val
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"),
+            InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")
+        ],
+        [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic")],
+        [
+            InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"),
+            InlineKeyboardButton(text=f"Страна: {data.get('country', 'Не выбрана')}", callback_data="select_country")
+        ],
+        [
+            InlineKeyboardButton(text="Очистить", callback_data="clear_fields"),
+            InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
+    ])
+
+def country_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🇷🇺 RU", callback_data="set_country_RU"), InlineKeyboardButton(text="🇺🇦 UA", callback_data="set_country_UA"), InlineKeyboardButton(text="🇰🇿 KZ", callback_data="set_country_KZ"), InlineKeyboardButton(text="🇧🇾 BY", callback_data="set_country_BY")],
+        [InlineKeyboardButton(text="🇰🇬 KG", callback_data="set_country_KG"), InlineKeyboardButton(text="🇦🇲 AM", callback_data="set_country_AM"), InlineKeyboardButton(text="🇺🇿 UZ", callback_data="set_country_UZ")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
 # --- API ЗАПРОСЫ ---
@@ -149,12 +184,11 @@ async def fetch_nebula(q: str):
     return None
 
 # --- ЛОГИКА ПОИСКА ---
-async def search_everywhere(q: str):
+async def search_everywhere(q: str, search_type="auto"):
     clean_q = q.strip().replace("@", "")
     is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     
-    # 1. Локальная база
-    if os.path.exists(DB_FILE) and is_tg_query:
+    if os.path.exists(DB_FILE) and is_tg_query and search_type == "auto":
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -167,22 +201,20 @@ async def search_everywhere(q: str):
             if row:
                 return {
                     "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет", 
-                    "operator": "-", "region": "-", "email": "-", "address": "-",
+                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-",
                     "sources_list": [{"name": "Local DB", "count": 1}]
                 }
         except: pass
 
-    # 2. API (Берем первый успешный)
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
     
     for coro in asyncio.as_completed(tasks):
         res = await coro
         if not res or not isinstance(res, dict): continue
 
-        final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "sources_list": []}
+        final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "sources_list": []}
         found_something = False
 
-        # Парсим BlackBox
         if "profile" in res and res.get("status") == "success":
             found_something = True
             prof = res.get("profile", {})
@@ -190,23 +222,26 @@ async def search_everywhere(q: str):
             locs = res.get("locations", [])
             
             if prof.get("primary_fio"): final_data["fio"] = prof["primary_fio"]
+            if prof.get("birth_date"): final_data["dob"] = prof["birth_date"]
+            if prof.get("passports") and isinstance(prof["passports"], list): final_data["passport"] = prof["passports"][0]
+            if prof.get("inn"): final_data["inn"] = prof["inn"]
+            
             if tel.get("query_phone"): final_data["phone_main"] = tel["query_phone"]
             if tel.get("operator"): final_data["operator"] = tel["operator"]
             if tel.get("region"): final_data["region"] = tel["region"]
             if locs: final_data["address"] = locs[0].get("address", "Нет")
             final_data["sources_list"].append({"name": "BlackBox", "count": 1})
 
-        # Парсим Mobius/Nebula
         elif res.get("success") and "results" in res:
             found_something = True
             for key, val in res["results"].items():
                 if isinstance(val, dict) and "result" in val and isinstance(val["result"], dict):
                     inner_data = val["result"].get("data", {}).get("results", {})
                     if inner_data:
-                        if inner_data.get("names"): final_data["fio"] = inner_data["names"][0]
-                        if inner_data.get("emails"): final_data["email"] = inner_data["emails"][0]
-                        if inner_data.get("addresses"): final_data["address"] = inner_data["addresses"][0]
-                        if inner_data.get("phone_info"):
+                        if inner_data.get("names") and final_data["fio"] == "Нет": final_data["fio"] = inner_data["names"][0]
+                        if inner_data.get("emails") and final_data["email"] == "Нет": final_data["email"] = inner_data["emails"][0]
+                        if inner_data.get("addresses") and final_data["address"] == "Нет": final_data["address"] = inner_data["addresses"][0]
+                        if inner_data.get("phone_info") and final_data["operator"] == "Нет":
                             final_data["operator"] = inner_data["phone_info"].get("operator", "Нет")
                             final_data["region"] = inner_data["phone_info"].get("region", "Нет")
             final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
@@ -216,32 +251,55 @@ async def search_everywhere(q: str):
 
     return None
 
-# --- ГРАФ И HTML ---
-def generate_graph_png(data: dict) -> bytes:
-    G = nx.Graph()
-    center = data.get('phone_main', 'Нет')
-    G.add_node(center, color='#38bdf8', label="ТЕЛЕФОН")
-    if data.get('fio') and data['fio'] != "Нет":
-        G.add_node(data['fio'], color='#4ade80', label="ФИО")
-        G.add_edge(center, data['fio'])
-    if data.get('email') and data['email'] != "Нет":
-        G.add_node(data['email'], color='#facc15', label="EMAIL")
-        G.add_edge(center, data['email'])
-
-    plt.figure(figsize=(8, 6), facecolor='#f5f6f8')
-    ax = plt.gca(); ax.set_facecolor('#f5f6f8')
-    pos = nx.spring_layout(G, seed=42)
-    node_colors = [nx.get_node_attributes(G, 'color').get(n, '#fff') for n in G.nodes()]
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=3000, alpha=0.9)
-    nx.draw_networkx_edges(G, pos, width=2, edge_color='#94a3b8')
-    nx.draw_networkx_labels(G, pos, labels=nx.get_node_attributes(G, 'label'), font_size=10, font_color='black', font_weight='bold')
-    plt.axis('off')
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', facecolor='#f5f6f8')
-    buf.seek(0); plt.close()
-    return buf.read()
-
+# --- ГЕНЕРАЦИЯ HTML С ИНТЕРАКТИВНЫМ ГРАФОМ ---
 def generate_html_report(data: dict, report_id: str) -> str:
+    # Подготавливаем данные для графа (узлы и связи)
+    nodes = []
+    edges = []
+    
+    # Центральный узел (Цель)
+    nodes.append({"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}})
+    
+    node_id = 2
+    
+    # ФИО
+    if data['fio'] and data['fio'] != "Нет":
+        nodes.append({"id": node_id, "label": f"ФИО: {data['fio']}", "color": "#4ade80"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+    
+    # Телефон
+    if data['phone_main'] and data['phone_main'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Тел: {data['phone_main']}", "color": "#38bdf8"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+        
+    # Оператор
+    if data['operator'] and data['operator'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Оператор: {data['operator']}", "color": "#facc15"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+
+    # Email
+    if data['email'] and data['email'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Email: {data['email']}", "color": "#a78bfa"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+        
+    # Паспорт
+    if data.get('passport') and data['passport'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Паспорт: {data['passport']}", "color": "#f87171"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+        
+    # ИНН
+    if data.get('inn') and data['inn'] != "Нет":
+        nodes.append({"id": node_id, "label": f"ИНН: {data['inn']}", "color": "#fbbf24"})
+        edges.append({"from": 1, "to": node_id})
+        node_id += 1
+
+    graph_json = json.dumps({"nodes": nodes, "edges": edges})
+
     return f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -249,32 +307,70 @@ def generate_html_report(data: dict, report_id: str) -> str:
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Oasis Digital - {data['query']}</title>
+        <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <style>
-            body {{ font-family: sans-serif; background: #f5f6f8; color: #1a1a1a; margin: 0; padding: 20px; }}
-            .container {{ max-width: 600px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }}
-            h1 {{ color: #333; font-size: 24px; margin-bottom: 5px; }}
-            .subtitle {{ color: #888; font-size: 14px; margin-bottom: 20px; }}
-            .data-item {{ padding: 12px 0; border-bottom: 1px solid #eee; }}
-            .d-label {{ font-size: 11px; color: #888; text-transform: uppercase; }}
-            .d-value {{ font-size: 16px; font-weight: 500; }}
-            .graph-section img {{ width: 100%; border-radius: 12px; margin: 20px 0; }}
+            body {{ font-family: sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 20px; }}
+            .container {{ max-width: 800px; margin: 0 auto; background: #1e293b; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
+            h1 {{ color: #38bdf8; font-size: 24px; margin-bottom: 5px; }}
+            .subtitle {{ color: #94a3b8; font-size: 14px; margin-bottom: 20px; }}
+            .graph-section {{ height: 500px; background: #0f172a; border-radius: 12px; margin: 20px 0; border: 1px solid #334155; }}
+            .data-item {{ padding: 12px 0; border-bottom: 1px solid #334155; }}
+            .d-label {{ font-size: 11px; color: #64748b; text-transform: uppercase; }}
+            .d-value {{ font-size: 16px; font-weight: 500; color: #f8fafc; }}
+            .legend {{ display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 15px; }}
+            .legend-item {{ display: flex; align-items: center; gap: 5px; font-size: 12px; }}
+            .dot {{ width: 10px; height: 10px; border-radius: 50%; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>OASIS DIGITAL</h1>
             <p class="subtitle">Отчет по запросу: {data['query']}</p>
-            <div class="graph-section"><img src="/report/{report_id}/graph"></div>
             
+            <div class="legend">
+                <div class="legend-item"><div class="dot" style="background:#38bdf8;"></div>Цель/Тел</div>
+                <div class="legend-item"><div class="dot" style="background:#4ade80;"></div>ФИО</div>
+                <div class="legend-item"><div class="dot" style="background:#facc15;"></div>Оператор</div>
+                <div class="legend-item"><div class="dot" style="background:#a78bfa;"></div>Email</div>
+                <div class="legend-item"><div class="dot" style="background:#f87171;"></div>Паспорт</div>
+            </div>
+
+            <div id="mynetwork" class="graph-section"></div>
+
             <div class="data-item"><div class="d-label">ФИО</div><div class="d-value">{data['fio']}</div></div>
             <div class="data-item"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div>
             <div class="data-item"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div>
             <div class="data-item"><div class="d-label">Email</div><div class="d-value">{data['email']}</div></div>
             <div class="data-item"><div class="d-label">Адрес</div><div class="d-value">{data['address']}</div></div>
-            
-            <h3 style="margin-top: 20px; font-size: 14px; color: #888;">Источники</h3>
-            {''.join([f'<div class="data-item"><span>{src["name"]}</span><span>{src["count"]} записей</span></div>' for src in data.get('sources_list', [])])}
+            <div class="data-item"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div>
+            <div class="data-item"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div>
         </div>
+
+        <script type="text/javascript">
+            var graphData = {graph_json};
+            var nodes = new vis.DataSet(graphData.nodes);
+            var edges = new vis.DataSet(graphData.edges);
+            var container = document.getElementById('mynetwork');
+            var data = {{ nodes: nodes, edges: edges }};
+            var options = {{
+                nodes: {{
+                    shape: 'dot',
+                    size: 20,
+                    font: {{ size: 14, color: '#ffffff', face: 'sans-serif' }},
+                    borderWidth: 2
+                }},
+                edges: {{
+                    color: '#475569',
+                    width: 2,
+                    smooth: {{ type: 'continuous' }}
+                }},
+                physics: {{
+                    barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 150 }}
+                }},
+                interaction: {{ hover: true, tooltipDelay: 200 }}
+            }};
+            var network = new vis.Network(container, data, options);
+        </script>
     </body>
     </html>
     """
@@ -295,30 +391,11 @@ async def web_report(report_id: str):
     if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
     return HTMLResponse(content=generate_html_report(data, report_id))
 
-@app.get("/report/{report_id}/graph")
-async def web_graph(report_id: str):
-    data = REPORTS_CACHE.get(report_id)
-    if not data: raise HTTPException(status_code=404)
-    return Response(content=generate_graph_png(data), media_type="image/png")
-
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    
-    try:
-        # Загружаем картинку с точным именем файла из GitHub
-        photo = FSInputFile("IMG_20261115_023803_066.jpg")
-        await message.answer_photo(
-            photo=photo,
-            caption=START_TEXT,
-            parse_mode="HTML",
-            reply_markup=start_kb()
-        )
-    except Exception as e:
-        # Если картинка не загрузилась, отправляем просто текст
-        logging.error(f"Ошибка загрузки фото: {e}")
-        await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
+    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=start_kb())
 
 @dp.callback_query(F.data == "back_to_start")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
@@ -337,45 +414,91 @@ async def cb_profile(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
-# --- ОТПРАВКА ФАЙЛОВ ---
-@dp.callback_query(F.data.startswith("get_txt_"))
-async def cb_send_txt(cb: CallbackQuery):
-    report_id = cb.data.replace("get_txt_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data: return await cb.answer("Отчет устарел", show_alert=True)
-    
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {data['email']}\nАдрес: {data['address']}"
-    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
-    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
+# --- НЕПОЛНЫЙ ПОИСК ---
+@dp.callback_query(F.data == "search_partial")
+async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
+    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
     await cb.answer()
 
-@dp.callback_query(F.data.startswith("get_json_"))
-async def cb_send_json(cb: CallbackQuery):
-    report_id = cb.data.replace("get_json_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data: return await cb.answer("Отчет устарел", show_alert=True)
-    
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
-    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
+@dp.callback_query(F.data.startswith("field_"))
+async def cb_select_field(cb: CallbackQuery, state: FSMContext):
+    field = cb.data.replace("field_", "")
+    await state.update_data(editing_field=field)
+    field_names = {"surname": "Фамилию", "name": "Имя", "patronymic": "Отчество", "birth_date": "Дату рождения"}
+    await cb.message.edit_text(f"Введите {field_names.get(field, 'значение')}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]]))
+    await state.set_state(SearchStates.wait_partial_field)
     await cb.answer()
 
-@dp.callback_query(F.data.in_({"buy", "support", "search_partial"}))
-async def cb_stub(cb: CallbackQuery):
-    await cb.answer("В разработке", show_alert=True)
+@dp.message(SearchStates.wait_partial_field)
+async def process_field_input(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("editing_field")
+    if field and msg.text: await state.update_data({field: msg.text.strip()})
+    await state.set_state(None)
+    await msg.answer(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
 
-# --- ПОИСК ---
+@dp.callback_query(F.data == "clear_fields")
+async def cb_clear(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
+    await cb.answer("Поля очищены")
+    await cb.message.edit_reply_markup(reply_markup=partial_search_kb(await state.get_data()))
+
+@dp.callback_query(F.data == "select_country")
+async def cb_select_country(cb: CallbackQuery):
+    await cb.message.edit_text("🌍 Выберите страну поиска:", reply_markup=country_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("set_country_"))
+async def cb_set_country(cb: CallbackQuery, state: FSMContext):
+    country = cb.data.replace("set_country_", "")
+    await state.update_data(country=country)
+    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+    await cb.answer()
+
+@dp.callback_query(F.data == "back_to_partial")
+async def cb_back_to_partial(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(None)
+    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+    await cb.answer()
+
+@dp.callback_query(F.data == "do_partial_search")
+async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    query_parts = []
+    if data.get('surname'): query_parts.append(f"Фамилия: {data['surname']}")
+    if data.get('name'): query_parts.append(f"Имя: {data['name']}")
+    if data.get('patronymic'): query_parts.append(f"Отчество: {data['patronymic']}")
+    if data.get('birth_date'): query_parts.append(f"Дата: {data['birth_date']}")
+    if data.get('country'): query_parts.append(f"Страна: {data['country']}")
+    
+    query_str = ", ".join(query_parts) if query_parts else "Пустой запрос"
+    
+    note = await cb.message.edit_text(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial", parse_mode="HTML")
+    # Тут должен быть запрос к API с этими параметрами, но пока заглушка
+    data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "sources_list": []}
+    
+    report_id = str(uuid.uuid4())[:8]
+    REPORTS_CACHE[report_id] = data_result
+    
+    await note.edit_text(f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>", parse_mode="HTML", reply_markup=result_kb(report_id))
+    await cb.answer()
+
+# --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>Ищу:</b> {q}\n<i>(Опрос баз, до 45 сек...)</i>", parse_mode="HTML")
+    
+    # Показываем красивый статус загрузки
+    note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
+    
     data = await search_everywhere(q)
     
     if not data:
         data = {
             "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
             "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-            "operator": "-", "region": "-", "email": "-", "address": "-", "sources_list": []
+            "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "sources_list": []
         }
     else:
         data["query"] = q
@@ -402,15 +525,11 @@ async def admin_panel(msg: Message):
 @dp.callback_query(F.data == "adm_api_status")
 async def cb_adm_api_status(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    
     await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
-    
     res_bb = await fetch_blackbox("79825207224")
     res_mb = await fetch_mobius("79825207224")
     res_nb = await fetch_nebula("79825207224")
-    
     text = f"📡 <b>Статус API:</b>\n\n{'🟢 OK' if res_bb else '🔴 Ошибка'} — BlackBox\n{'🟢 OK' if res_mb else '🔴 Ошибка'} — Mobius\n{'🟢 OK' if res_nb else '🔴 Ошибка'} — Nebula"
-    
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
     await cb.answer()
 
