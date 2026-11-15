@@ -5,6 +5,7 @@ import json
 import uuid
 import sqlite3
 import aiohttp
+import time
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -42,11 +43,14 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
 MIRROR_BOTS = []
+PROCESSED_MESSAGES = {} 
 
 class SearchStates(StatesGroup):
     wait_partial_field = State()
     wait_support_msg = State()
     wait_mirror_token = State()
+    wait_admin_give = State()
+    wait_admin_take = State()
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -166,20 +170,15 @@ MIRROR_TEXT = """🔧 <b>Инструкция по созданию бота:</b
 # --- КЛАВИАТУРЫ ---
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info")],
         [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🔗 Рефералка / Зеркало", callback_data="ref_link")],
+        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🤖 Зеркало", callback_data="create_mirror")],
         [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
     ])
 
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]])
-
-def ref_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 Создать зеркало бота", callback_data="create_mirror")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
 
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -188,6 +187,13 @@ def result_kb(report_id: str):
             InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
             InlineKeyboardButton(text="📦 Скачать JSON", callback_data=f"get_json_{report_id}")
         ],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
+    ])
+
+def admin_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -710,10 +716,9 @@ async def cb_ref_link(cb: CallbackQuery):
     text = (
         f"🔗 <b>Ваша реферальная ссылка:</b>\n\n"
         f"<code>{ref_link}</code>\n\n"
-        f"<i>За каждого приглашенного вы получаете +1 запрос!</i>\n\n"
-        f"<b>Также вы можете создать своего собственного бота с этим функционалом!</b>"
+        f"<i>За каждого приглашенного вы получаете +1 запрос!</i>"
     )
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=ref_kb())
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
 @dp.callback_query(F.data == "create_mirror")
@@ -744,10 +749,15 @@ async def process_mirror_token(msg: Message, state: FSMContext):
     conn.commit()
     conn.close()
         
-    await msg.answer("✅ Токен верный! Бот-клон запускается в фоне. Пожалуйста, подождите...", reply_markup=main_kb())
+    await msg.answer("🕵‍♂ <b>Зеркало успешно создано!</b>\n\nБот-клон запускается в фоне. Пожалуйста, подождите...", reply_markup=main_kb())
     
     task = asyncio.create_task(run_mirror_bot(token, msg.from_user.id))
     MIRROR_BOTS.append(task)
+
+@dp.callback_query(F.data == "search_info")
+async def cb_search_info(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(GUIDE_TEXT, parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
@@ -882,7 +892,54 @@ async def process_search(msg: Message, state: FSMContext):
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML")
+    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data == "adm_api_status")
+async def cb_adm_api_status(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
+    res_bb = await fetch_blackbox("79825207224")
+    res_mb = await fetch_mobius("79825207224")
+    res_nb = await fetch_nebula("79825207224")
+    text = f"📡 <b>Статус API:</b>\n\n{'🟢 OK' if res_bb else '🔴 Ошибка'} — BlackBox\n{'🟢 OK' if res_mb else '🔴 Ошибка'} — Mobius\n{'🟢 OK' if res_nb else '🔴 Ошибка'} — Nebula"
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data == "adm_give")
+async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("Введите <code>ID количество</code> для выдачи:", parse_mode="HTML")
+    await state.set_state(SearchStates.wait_admin_give)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_admin_give)
+async def process_admin_give(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    try:
+        parts = msg.text.strip().split()
+        uid, amount = int(parts[0]), int(parts[1])
+        add_requests(uid, amount)
+        await msg.answer(f"✅ Выдано {amount} для {uid}.", reply_markup=admin_menu_kb())
+    except: await msg.answer("❌ Ошибка формата.")
+    await state.clear()
+
+@dp.callback_query(F.data == "adm_take")
+async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML")
+    await state.set_state(SearchStates.wait_admin_take)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_admin_take)
+async def process_admin_take(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    try:
+        parts = msg.text.strip().split()
+        uid, amount = int(parts[0]), int(parts[1])
+        add_requests(uid, -amount)
+        await msg.answer(f"✅ Забрано {amount} у {uid}.", reply_markup=admin_menu_kb())
+    except: await msg.answer("❌ Ошибка формата.")
+    await state.clear()
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
