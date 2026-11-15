@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oasis Digital Report - {{ d.query }}</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f5f6f8; color: #1a1a1a; margin: 0; padding: 20px; line-height: 1.5; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; color: #888; font-size: 14px; }
+        .header-logo { font-weight: 700; color: #000; font-size: 18px; }
+        .profile-card { background: #fff; border-radius: 16px; padding: 24px; border: 1px solid #e0e0e0; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); }
+        .avatar { width: 80px; height: 80px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 600; margin-bottom: 15px; }
+        .profile-info h2 { margin: 0 0 5px 0; font-size: 24px; font-weight: 700; text-transform: uppercase; }
+        .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+        .badge { background: #f0f0f0; padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: 500; }
+        .completeness { margin-bottom: 20px; }
+        .c-header { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; color: #555; }
+        .c-bar { height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }
+        .c-fill { height: 100%; background: #333; border-radius: 4px; width: {{ d.completeness }}; }
+        .data-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; margin-bottom: 15px; padding: 10px 20px; }
+        .data-item { display: flex; align-items: flex-start; gap: 15px; padding: 15px 0; border-bottom: 1px solid #f0f0f0; }
+        .data-item:last-child { border-bottom: none; }
+        .d-icon { font-size: 20px; color: #888; width: 24px; text-align: center; }
+        .d-content { flex: 1; }
+        .d-label { font-size: 11px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 4px; }
+        .d-value { font-size: 16px; font-weight: 500; color: #000; word-break: break-word; }
+        .source-item { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; }
+        .source-count { color: #888; }
+        .graph-section img { width: 100%; border-radius: 12px; border: 1px solid #e0e0e0; margin-bottom: 20px; }
+        .footer { text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-logo">OASIS DIGITAL</div>
+            <div>/ Report</div>
+        </div>
+
+        <div class="profile-card">
+            <div class="avatar">ВО</div>
+            <div class="profile-info">
+                <h2>{{ d.fio }}</h2>
+                <div style="color: #666; font-size: 14px;">{{ d.query }} • {{ d.date }}</div>
+            </div>
+        </div>
+
+        <div class="badges">
+            <div class="badge">{{ d.stats.sources }} источников</div>
+            <div class="badge">{{ d.stats.phones }} телефонов</div>
+            <div class="badge">{{ d.stats.records }} записей</div>
+            <div class="badge">{{ d.stats.emails }} почт</div>
+            <div class="badge">{{ d.stats.addresses }} адресов</div>
+        </div>
+
+        <div class="completeness">
+            <div class="c-header"><span>Полнота профиля</span><span>{{ d.completeness }}</span></div>
+            <div class="c-bar"><div class="c-fill"></div></div>
+        </div>
+
+        <div class="graph-section">
+            <img src="/report/{{ report_id }}/graph" alt="Граф связей">
+        </div>
+
+        <div class="data-section">
+            <div class="data-item">
+                <div class="d-icon">📞</div>
+                <div class="d-content">
+                    <div class="d-label">Телефон</div>
+                    <div class="d-value">{{ d.phone_main }} (100%)</div>
+                </div>
+            </div>
+            <div class="data-item">
+                <div class="d-icon">🏠</div>
+                <div class="d-content">
+                    <div class="d-label">Адрес</div>
+                    <div class="d-value">{{ d.address }}</div>
+                </div>
+            </div>
+            <div class="data-item">
+                <div class="d-icon">📄</div>
+                <div class="d-content">
+                    <div class="d-label">Паспорт</div>
+                    <div class="d-value">{{ d.passport }}</div>
+                </div>
+            </div>
+            <div class="data-item">
+                <div class="d-icon">🆔</div>
+                <div class="d-content">
+                    <div class="d-label">ИНН</div>
+                    <div class="d-value">{{ d.inn }}</div>
+                </div>
+            </div>
+            <div class="data-item">
+                <div class="d-icon">🎂</div>
+                <div class="d-content">
+                    <div class="d-label">Дата рождения</div>
+                    <div class="d-value">{{ d.dob }} ({{ d.age }})</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="data-section">
+            <h3 style="font-size: 14px; color: #888; text-transform: uppercase; margin-top: 10px;">Источники</h3>
+            {% for src in d.sources_list %}
+            <div class="source-item">
+                <span>{{ src.name }}</span>
+                <span class="source-count">{{ src.count }}</span>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="footer">Oasis Digital • Автоматизированный OSINT отчет</div>
+    </div>
+</body>
+</html>
