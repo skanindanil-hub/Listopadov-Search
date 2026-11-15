@@ -17,8 +17,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = "8704046668:AAGqPaGJntSegYzKBWspTFfj1GQxDBWeN2E"
+# --- НАСТРОЙКИ --- 
+BOT_TOKEN = "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ"
 MAIN_ADMIN_ID = 8394631079 
 WEBHOOK_HOST = "https://listopadov-search.onrender.com" 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
