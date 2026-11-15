@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -26,7 +26,8 @@ import networkx as nx
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8704046668:AAGqPaGJntSegYzKBWspTFfj1GQxDBWeN2E"
-WEBHOOK_HOST = "https://listopadov-search.onrender.com" # ТВОЙ URL
+MAIN_ADMIN_ID = 8394631079 # Твой ID
+WEBHOOK_HOST = "https://listopadov-search.onrender.com" 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 DB_FILE = "oasis.db" 
@@ -106,7 +107,16 @@ def result_kb(report_id: str):
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
-# --- API ЗАПРОСЫ ---
+def admin_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo"), InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
+    ])
+
+# --- ПОИСК ---
 async def fetch_blackbox(q: str):
     headers = {"X-API-Key": API_KEY_BLACKBOX}
     params = {"q": q, "type": "auto"}
@@ -138,7 +148,6 @@ async def fetch_nebula(q: str):
     return None
 
 async def search_everywhere(q: str):
-    # 1. База
     if os.path.exists(DB_FILE):
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -157,7 +166,6 @@ async def search_everywhere(q: str):
                 }
         except: pass
 
-    # 2. API
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
     results = await asyncio.gather(*tasks)
     
@@ -260,7 +268,7 @@ async def cb_profile(cb: CallbackQuery):
 async def cb_stub(cb: CallbackQuery):
     await cb.answer("В разработке", show_alert=True)
 
-# --- ОБЫЧНЫЙ ПОИСК ---
+# --- ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
     q = msg.text.strip()
@@ -292,6 +300,40 @@ async def process_search(msg: Message, state: FSMContext):
         f"<i>Выберите формат отчета:</i>", parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
+# --- АДМИНКА ---
+@dp.message(Command("admin"))
+async def admin_panel(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID: 
+        return await msg.answer("⛔ Нет доступа.")
+    await msg.answer("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data == "adm_api_status")
+async def cb_adm_api_status(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: 
+        return await cb.answer("Нет доступа", show_alert=True)
+    
+    await cb.message.edit_text("📡 <b>Проверяю API...</b>", parse_mode="HTML")
+    
+    # Тестовые запросы
+    res_bb = await fetch_blackbox("79825207224")
+    res_mb = await fetch_mobius("79825207224")
+    res_nb = await fetch_nebula("79825207224")
+    
+    text = "📡 <b>Статус API:</b>\n\n"
+    text += f"{'🟢' if res_bb else '🔴'} BlackBox\n"
+    text += f"{'🟢' if res_mb else '🔴'} Mobius\n"
+    text += f"{'🟢' if res_nb else '🔴'} Nebula"
+    
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def cb_adm_stub(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: 
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.answer("Функция в разработке (требует БД)", show_alert=True)
+
+# --- ЗАПУСК ---
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
     from aiogram.types import Update
