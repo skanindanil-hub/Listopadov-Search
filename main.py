@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import io
 import json
 import uuid
 import sqlite3
@@ -119,26 +118,15 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
-# --- КЛАВИАТУРА НЕПОЛНОГО ПОИСКА ---
 def partial_search_kb(data: dict):
     def short(val):
         if not val: return "..."
         return val[:10] + "..." if len(val) > 10 else val
-
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"),
-            InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")
-        ],
+        [InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"), InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")],
         [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic")],
-        [
-            InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"),
-            InlineKeyboardButton(text=f"Страна: {data.get('country', 'Не выбрана')}", callback_data="select_country")
-        ],
-        [
-            InlineKeyboardButton(text="Очистить", callback_data="clear_fields"),
-            InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")
-        ],
+        [InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"), InlineKeyboardButton(text=f"Страна: {data.get('country', 'Не выбрана')}", callback_data="select_country")],
+        [InlineKeyboardButton(text="Очистить", callback_data="clear_fields"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
     ])
 
@@ -183,12 +171,12 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- ЛОГИКА ПОИСКА ---
-async def search_everywhere(q: str, search_type="auto"):
+# --- ЛОГИКА ПОИСКА (ЖДЕМ ВСЕХ) ---
+async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     
-    if os.path.exists(DB_FILE) and is_tg_query and search_type == "auto":
+    if os.path.exists(DB_FILE) and is_tg_query:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -206,15 +194,17 @@ async def search_everywhere(q: str, search_type="auto"):
                 }
         except: pass
 
+    # Ждем ВСЕ API (до 45 секунд)
     tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
+    results = await asyncio.gather(*tasks)
     
-    for coro in asyncio.as_completed(tasks):
-        res = await coro
+    final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "sources_list": []}
+    found_something = False
+
+    for res in results:
         if not res or not isinstance(res, dict): continue
 
-        final_data = {"fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "sources_list": []}
-        found_something = False
-
+        # BlackBox
         if "profile" in res and res.get("status") == "success":
             found_something = True
             prof = res.get("profile", {})
@@ -232,6 +222,7 @@ async def search_everywhere(q: str, search_type="auto"):
             if locs: final_data["address"] = locs[0].get("address", "Нет")
             final_data["sources_list"].append({"name": "BlackBox", "count": 1})
 
+        # Mobius/Nebula
         elif res.get("success") and "results" in res:
             found_something = True
             for key, val in res["results"].items():
@@ -246,57 +237,26 @@ async def search_everywhere(q: str, search_type="auto"):
                             final_data["region"] = inner_data["phone_info"].get("region", "Нет")
             final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
 
-        if found_something:
-            return final_data
+    return final_data if found_something else None
 
-    return None
-
-# --- ГЕНЕРАЦИЯ HTML С ИНТЕРАКТИВНЫМ ГРАФОМ ---
+# --- HTML С ЧЕРНЫМ ДИЗАЙНОМ И ГРАФОМ ---
 def generate_html_report(data: dict, report_id: str) -> str:
-    # Подготавливаем данные для графа (узлы и связи)
-    nodes = []
+    nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
     edges = []
-    
-    # Центральный узел (Цель)
-    nodes.append({"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}})
-    
     node_id = 2
     
-    # ФИО
-    if data['fio'] and data['fio'] != "Нет":
-        nodes.append({"id": node_id, "label": f"ФИО: {data['fio']}", "color": "#4ade80"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
-    
-    # Телефон
-    if data['phone_main'] and data['phone_main'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Тел: {data['phone_main']}", "color": "#38bdf8"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
-        
-    # Оператор
-    if data['operator'] and data['operator'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Оператор: {data['operator']}", "color": "#facc15"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
-
-    # Email
-    if data['email'] and data['email'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Email: {data['email']}", "color": "#a78bfa"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
-        
-    # Паспорт
+    if data.get('fio') and data['fio'] != "Нет":
+        nodes.append({"id": node_id, "label": f"ФИО: {data['fio']}", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('phone_main') and data['phone_main'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Тел: {data['phone_main']}", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('operator') and data['operator'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Оператор: {data['operator']}", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('email') and data['email'] != "Нет":
+        nodes.append({"id": node_id, "label": f"Email: {data['email']}", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('passport') and data['passport'] != "Нет":
-        nodes.append({"id": node_id, "label": f"Паспорт: {data['passport']}", "color": "#f87171"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
-        
-    # ИНН
+        nodes.append({"id": node_id, "label": f"Паспорт: {data['passport']}", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('inn') and data['inn'] != "Нет":
-        nodes.append({"id": node_id, "label": f"ИНН: {data['inn']}", "color": "#fbbf24"})
-        edges.append({"from": 1, "to": node_id})
-        node_id += 1
+        nodes.append({"id": node_id, "label": f"ИНН: {data['inn']}", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
 
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
@@ -353,20 +313,9 @@ def generate_html_report(data: dict, report_id: str) -> str:
             var container = document.getElementById('mynetwork');
             var data = {{ nodes: nodes, edges: edges }};
             var options = {{
-                nodes: {{
-                    shape: 'dot',
-                    size: 20,
-                    font: {{ size: 14, color: '#ffffff', face: 'sans-serif' }},
-                    borderWidth: 2
-                }},
-                edges: {{
-                    color: '#475569',
-                    width: 2,
-                    smooth: {{ type: 'continuous' }}
-                }},
-                physics: {{
-                    barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 150 }}
-                }},
+                nodes: {{ shape: 'dot', size: 20, font: {{ size: 14, color: '#ffffff' }}, borderWidth: 2 }},
+                edges: {{ color: '#475569', width: 2, smooth: {{ type: 'continuous' }} }},
+                physics: {{ barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 150 }} }},
                 interaction: {{ hover: true, tooltipDelay: 200 }}
             }};
             var network = new vis.Network(container, data, options);
@@ -475,7 +424,6 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
     query_str = ", ".join(query_parts) if query_parts else "Пустой запрос"
     
     note = await cb.message.edit_text(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial", parse_mode="HTML")
-    # Тут должен быть запрос к API с этими параметрами, но пока заглушка
     data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "sources_list": []}
     
     report_id = str(uuid.uuid4())[:8]
@@ -489,7 +437,6 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
 async def process_search(msg: Message, state: FSMContext):
     q = msg.text.strip()
     
-    # Показываем красивый статус загрузки
     note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
     
     data = await search_everywhere(q)
