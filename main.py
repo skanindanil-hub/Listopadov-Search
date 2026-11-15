@@ -51,6 +51,8 @@ class SearchStates(StatesGroup):
     wait_mirror_token = State()
     wait_admin_give = State()
     wait_admin_take = State()
+    wait_admin_ban = State()
+    wait_admin_broadcast = State()
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -62,9 +64,12 @@ def init_users_db():
             username TEXT,
             requests_left INTEGER DEFAULT 3,
             referrer_id INTEGER,
-            joined_at TEXT
+            joined_at TEXT,
+            is_banned INTEGER DEFAULT 0
         )
     ''')
+    try: cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+    except: pass
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mirrors (
             bot_username TEXT PRIMARY KEY,
@@ -108,11 +113,12 @@ def add_requests(user_id, amount):
     conn.close()
 
 def deduct_request(user_id):
+    if user_id == MAIN_ADMIN_ID: return True
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
-    cursor.execute("SELECT requests_left FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT requests_left, is_banned FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
-    if row and row[0] > 0:
+    if row and row[0] > 0 and row[1] == 0:
         cursor.execute("UPDATE users SET requests_left = requests_left - 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
@@ -120,28 +126,25 @@ def deduct_request(user_id):
     conn.close()
     return False
 
+def is_banned(user_id):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row and row[0] == 1)
+
 # --- ТЕКСТЫ ---
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
-
-🕵️ <b>Личность</b>
-<blockquote>Навальный Алексей Анатольевич</blockquote>
-
-📲 <b>Контакты</b>
 <blockquote>79104813955 — номер телефона
-vania120df@gmail.com — email</blockquote>
+vania120df@gmail.com — email
+@durov — Telegram</blockquote>
+<i>Отправьте запрос сообщением.</i>"""
 
-🚘 <b>Транспорт</b>
-<blockquote>РЕНО19 — госномер автомобиля
-XTA210930Y2696785 — VIN автомобиля</blockquote>
-
-💬 <b>Соцсети</b>
-<blockquote>@durov 1090472807 — Telegram
-vk.com/id1, 2737383 - ВКонтакте</blockquote>
-
-🌐 <b>Онлайн-следы</b>
-<blockquote>78.26.242.244, google.com</blockquote>
-
-<i>Отправьте запрос сообщением. Если подходят несколько типов, бот предложит выбрать нужный.</i>"""
+GUIDE_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
+<blockquote>79104813955 — телефон
+vania120df@gmail.com — email
+@durov — Telegram</blockquote>"""
 
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
 
@@ -192,8 +195,10 @@ def result_kb(report_id: str):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Выдать запросы", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
-        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status")],
+        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo"), InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="📡 Статус API", callback_data="adm_api_status"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
+        [InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -889,10 +894,11 @@ async def process_search(msg: Message, state: FSMContext):
         parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+    await msg.answer("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 @dp.callback_query(F.data == "adm_api_status")
 async def cb_adm_api_status(cb: CallbackQuery):
@@ -908,7 +914,7 @@ async def cb_adm_api_status(cb: CallbackQuery):
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID количество</code> для выдачи:", parse_mode="HTML")
+    await cb.message.edit_text("Введите <code>ID количество</code> для выдачи:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
     await state.set_state(SearchStates.wait_admin_give)
     await cb.answer()
 
@@ -926,7 +932,7 @@ async def process_admin_give(msg: Message, state: FSMContext):
 @dp.callback_query(F.data == "adm_take")
 async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML")
+    await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
     await state.set_state(SearchStates.wait_admin_take)
     await cb.answer()
 
@@ -940,6 +946,73 @@ async def process_admin_take(msg: Message, state: FSMContext):
         await msg.answer(f"✅ Забрано {amount} у {uid}.", reply_markup=admin_menu_kb())
     except: await msg.answer("❌ Ошибка формата.")
     await state.clear()
+
+@dp.callback_query(F.data == "adm_ban")
+async def cb_adm_ban(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("Введите <code>ID</code> для бана/разбана:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await state.set_state(SearchStates.wait_admin_ban)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_admin_ban)
+async def process_admin_ban(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    try:
+        uid = int(msg.text.strip())
+        conn = sqlite3.connect(USERS_DB)
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (uid,))
+        row = cursor.fetchone()
+        if row:
+            new_status = 0 if row[0] == 1 else 1
+            cursor.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (new_status, uid))
+            conn.commit()
+            status_text = "ЗАБАНЕН 🚫" if new_status == 1 else "РАЗБАНЕН ✅"
+            await msg.answer(f"Пользователь <code>{uid}</code>: {status_text}", parse_mode="HTML", reply_markup=admin_menu_kb())
+        else:
+            await msg.answer("❌ Пользователь не найден.", reply_markup=admin_menu_kb())
+        conn.close()
+    except: await msg.answer("❌ Ошибка формата.")
+    await state.clear()
+
+@dp.callback_query(F.data == "adm_broadcast")
+async def cb_adm_broadcast(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("📢 <b>Рассылка</b>\n\nОтправьте текст сообщения:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await state.set_state(SearchStates.wait_admin_broadcast)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_admin_broadcast)
+async def process_admin_broadcast(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    await state.clear()
+    
+    if not msg.text: return await msg.answer("❌ Текст пустой.")
+    
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = cursor.fetchall()
+    conn.close()
+    
+    sent = 0
+    failed = 0
+    status_msg = await msg.answer(f"📢 Рассылка на {len(users)} юзеров...")
+    
+    for user in users:
+        try:
+            await bot.send_message(user[0], msg.text, parse_mode="HTML")
+            sent += 1
+            await asyncio.sleep(0.05)
+        except:
+            failed += 1
+            
+    await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок: {failed}", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data.in_({"adm_promo", "adm_stats", "adm_maintenance"}))
+async def cb_adm_stub(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.answer("Функция в разработке", show_alert=True)
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
