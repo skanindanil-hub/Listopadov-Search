@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# --- НАСТРОЙКИ --- 
+# --- НАСТРОЙКИ ---
 BOT_TOKEN = "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ"
 MAIN_ADMIN_ID = 8394631079 
 WEBHOOK_HOST = "https://listopadov-search.onrender.com" 
@@ -668,7 +668,6 @@ async def run_mirror_bot(token: str, admin_id: int):
         logging.error(f"Ошибка клона: {e}")
     finally:
         await mirror_bot.session.close()
-
 
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart(deep_link=True))
