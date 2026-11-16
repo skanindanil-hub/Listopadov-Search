@@ -49,6 +49,7 @@ class SearchStates(StatesGroup):
     wait_admin_take = State()
     wait_admin_ban = State()
     wait_admin_broadcast = State()
+    wait_admin_raw = State()
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -195,8 +196,11 @@ def result_kb(report_id: str):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
-        [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
+        [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
@@ -807,7 +811,7 @@ async def process_admin_take(msg: Message, state: FSMContext):
 @dp.callback_query(F.data == "adm_ban")
 async def cb_adm_ban(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID</code>:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await cb.message.edit_text("Введите <code>ID</code> для бана/разбана:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
     await state.set_state(SearchStates.wait_admin_ban)
     await cb.answer()
 
@@ -865,6 +869,31 @@ async def process_admin_broadcast(msg: Message, state: FSMContext):
             failed += 1
             
     await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок: {failed}", reply_markup=admin_menu_kb())
+
+@dp.callback_query(F.data == "adm_test_api")
+async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("📡 <b>Тест API</b>\n\nВведите запрос (например, номер телефона, ФИО или ник):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await state.set_state(SearchStates.wait_admin_raw)
+    await cb.answer()
+
+@dp.message(SearchStates.wait_admin_raw)
+async def process_admin_raw(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID: return
+    await state.clear()
+    
+    q = msg.text.strip()
+    note = await msg.answer(f"📡 <b>Отправляю запрос к API:</b> {q}...", parse_mode="HTML")
+    
+    res_bb = await fetch_blackbox(q)
+    res_mb = await fetch_mobius(q)
+    
+    bb_str = json.dumps(res_bb, ensure_ascii=False)[:1500] if res_bb else "None/Ошибка"
+    mb_str = json.dumps(res_mb, ensure_ascii=False)[:1500] if res_mb else "None/Ошибка"
+    
+    text = f"<b>BLACKBOX:</b>\n<pre>{bb_str}</pre>\n\n<b>MOBIUS:</b>\n<pre>{mb_str}</pre>"
+    await note.edit_text(text, parse_mode="HTML")
+    await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
 
 # --- ВЕБ-СЕРВЕР ДЛЯ ОТЧЕТОВ ---
 web_app = FastAPI()
