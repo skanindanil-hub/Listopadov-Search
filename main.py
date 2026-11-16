@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import json
 import uuid
 import sqlite3
@@ -19,23 +20,28 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ"
-MAIN_ADMIN_ID = 8394631079 
-WEBHOOK_HOST = "https://listopadov-search.onrender.com" 
-DB_FILE = "oasis.db" 
-USERS_DB = "users.db" 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ")
+MAIN_ADMIN_ID = 8394631079
+WEBHOOK_HOST = "https://listopadov-search.onrender.com"
+DB_FILE = "oasis.db"
+USERS_DB = "users.db"
 
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
-# Оставляем только Mobius
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
-API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+API_KEY_MOBIUS = os.getenv("MOBIUS_API_KEY", "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk")
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("oasis")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 REPORTS_CACHE = {}
+
+TG_USERNAME_RE = re.compile(r"[a-zA-Z0-9_]{5,32}")
+TG_ID_RE = re.compile(r"\d{5,12}")
+
 
 class SearchStates(StatesGroup):
     wait_partial_field = State()
@@ -46,6 +52,7 @@ class SearchStates(StatesGroup):
     wait_admin_ban = State()
     wait_admin_broadcast = State()
     wait_admin_raw = State()
+
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -61,12 +68,16 @@ def init_users_db():
             is_banned INTEGER DEFAULT 0
         )
     ''')
-    try: cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-    except: pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
+
 init_users_db()
+
 
 def get_user(user_id):
     conn = sqlite3.connect(USERS_DB)
@@ -75,6 +86,7 @@ def get_user(user_id):
     row = cursor.fetchone()
     conn.close()
     return row
+
 
 def add_user(user_id, username, referrer_id=None):
     conn = sqlite3.connect(USERS_DB)
@@ -89,7 +101,11 @@ def add_user(user_id, username, referrer_id=None):
     )
     conn.commit()
     conn.close()
+
+    if referrer_id and referrer_id != user_id:
+        add_requests(referrer_id, 1)
     return True
+
 
 def add_requests(user_id, amount):
     conn = sqlite3.connect(USERS_DB)
@@ -98,8 +114,10 @@ def add_requests(user_id, amount):
     conn.commit()
     conn.close()
 
+
 def deduct_request(user_id):
-    if user_id == MAIN_ADMIN_ID: return True
+    if user_id == MAIN_ADMIN_ID:
+        return True
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     cursor.execute("SELECT requests_left, is_banned FROM users WHERE user_id = ?", (user_id,))
@@ -112,6 +130,16 @@ def deduct_request(user_id):
     conn.close()
     return False
 
+
+def is_banned(user_id):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row and row[0] == 1)
+
+
 def calculate_days(joined_str):
     try:
         joined_date = datetime.strptime(joined_str, "%d.%m.%Y")
@@ -119,9 +147,12 @@ def calculate_days(joined_str):
         days = delta.days
         months = days // 30
         rem_days = days % 30
-        if months > 0: return f"{months} мес. {rem_days} дн."
+        if months > 0:
+            return f"{months} мес. {rem_days} дн."
         return f"{rem_days} дн."
-    except: return "0 дн."
+    except Exception:
+        return "0 дн."
+
 
 # --- ТЕКСТЫ ---
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
@@ -166,6 +197,7 @@ HIDE_DATA_TEXT = """🛡️ <b>Скрытие данных</b>
 
 💳 <b>Стоимость скрытия данных: $7 (навсегда)</b>"""
 
+
 # --- КЛАВИАТУРЫ ---
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -177,8 +209,10 @@ def main_kb():
         [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
     ])
 
+
 def back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]])
+
 
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -190,6 +224,7 @@ def result_kb(report_id: str):
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
+
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
@@ -200,17 +235,23 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
+
 def partial_search_kb(data: dict):
     def short(val):
-        if not val: return "..."
+        if not val:
+            return "..."
         return val[:10] + "..." if len(val) > 10 else val
+
+    country = data.get("country") or "Не выбрана"
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"), InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")],
         [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic")],
-        [InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"), InlineKeyboardButton(text=f"Страна: {data.get('country', 'Не выбрана')}", callback_data="select_country")],
+        [InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"), InlineKeyboardButton(text=f"Страна: {country}", callback_data="select_country")],
         [InlineKeyboardButton(text="Очистить", callback_data="clear_fields"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
     ])
+
 
 def country_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -218,29 +259,37 @@ def country_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
+
 # --- API ЗАПРОС (MOBIUS) ---
 async def fetch_mobius(q: str):
     headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
     payload = {"query": q, "type": "auto"}
     timeout = aiohttp.ClientTimeout(total=60)
     try:
-        await asyncio.sleep(2) 
+        await asyncio.sleep(2)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
-                if resp.status == 200: return await resp.json()
-    except: pass
+                if resp.status == 200:
+                    return await resp.json()
+                body = await resp.text()
+                log.warning("Mobius HTTP %s: %s", resp.status, body[:500])
+    except Exception:
+        log.exception("Mobius request failed for query=%r", q)
     return None
 
-# --- СУПЕР-ПАРСЕР (MOBIUS KRATOS) ---
+
+# --- СУПЕР-ПАРСЕР ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
-    
-    is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
-    if os.path.exists(DB_FILE) and is_tg_query:
+
+    is_tg_id = bool(TG_ID_RE.fullmatch(clean_q))
+    is_tg_username = bool(TG_USERNAME_RE.fullmatch(clean_q)) and not clean_q.isdigit()
+
+    if os.path.exists(DB_FILE) and (is_tg_id or is_tg_username):
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            if clean_q.isdigit():
+            if is_tg_id:
                 cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE tg_id = ? LIMIT 1", (clean_q,))
             else:
                 cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE LOWER(username) = ? LIMIT 1", (clean_q.lower(),))
@@ -248,16 +297,21 @@ async def search_everywhere(q: str):
             conn.close()
             if row:
                 return {
-                    "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет", 
-                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-",
-                    "sources_list": [{"name": "Local DB", "count": 1}], "stats": {"sources": 1, "phones": 1, "records": 1}, "completeness": "20%"
+                    "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет",
+                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-",
+                    "passport": "-", "inn": "-", "snils": "-",
+                    "sources_list": [{"name": "Local DB", "count": 1}],
+                    "stats": {"sources": 1, "phones": 1, "records": 1},
+                    "completeness": "20%"
                 }
-        except: pass
+        except Exception:
+            log.exception("Local DB lookup failed for %r", clean_q)
 
     res_mobius = await fetch_mobius(q)
-    
+
     final_data = {
-        "fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", 
+        "fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет",
         "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
@@ -270,22 +324,21 @@ async def search_everywhere(q: str):
         debug_info = f"API Mobius вернул ошибку: {res_mobius.get('message', 'Unknown')}"
     else:
         results = res_mobius.get("results", {})
-        
-        # Ищем данные в Kratos
         kratos_data = results.get("mobius-kratos-phone", {}).get("result", {}).get("data", {}).get("results", [])
-        
+
         if kratos_data:
             found_something = True
             final_data["stats"]["records"] = len(kratos_data)
             final_data["stats"]["sources"] = len(kratos_data)
-            
+
             for record in kratos_data:
                 for k, v in record.items():
                     k_low = k.lower()
                     val_str = str(v).strip("'")
-                    if not val_str or val_str == "None": continue
+                    if not val_str or val_str == "None":
+                        continue
 
-                    if "фио" in k_low or k_low == "имя" or k_low == "фамилия" or k_low == "отчество":
+                    if "фио" in k_low or k_low in ("имя", "фамилия", "отчество"):
                         if final_data["fio"] == "Нет" or len(val_str) > len(final_data["fio"]):
                             final_data["fio"] = val_str
                     elif "паспорт" in k_low and "серия" not in k_low and final_data["passport"] == "Нет":
@@ -300,42 +353,54 @@ async def search_everywhere(q: str):
                         final_data["address"] = val_str
                     elif "телефон" in k_low and final_data["phone_main"] == q:
                         final_data["phone_main"] = val_str
-            
-            # Дополнительно ищем оператора и регион в Nebula (он тоже внутри Mobius)
+
             nebula_data = results.get("mobius-nebula-phone", {}).get("result", {}).get("data", {}).get("results", {})
             if nebula_data:
                 phone_info = nebula_data.get("phone_info", {})
-                if phone_info.get("operator"): final_data["operator"] = phone_info["operator"]
-                if phone_info.get("region"): final_data["region"] = phone_info["region"]
+                if phone_info.get("operator"):
+                    final_data["operator"] = phone_info["operator"]
+                if phone_info.get("region"):
+                    final_data["region"] = phone_info["region"]
                 emails = nebula_data.get("emails", [])
-                if emails and final_data["email"] == "Нет": final_data["email"] = emails[0]
+                if emails and final_data["email"] == "Нет":
+                    final_data["email"] = emails[0]
 
             final_data["sources_list"].append({"name": "Mobius (Kratos)", "count": len(kratos_data)})
 
     if found_something:
-        filled = sum(1 for k in ["fio", "phone_main", "email", "address", "dob"] if final_data[k] != "Нет")
+        filled = sum(1 for k in ("fio", "phone_main", "email", "address", "dob") if final_data[k] != "Нет")
         final_data["completeness"] = f"{int((filled / 5) * 100)}%"
+        final_data["query"] = q
+        final_data["date"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         return final_data
-    
+
     return {
         "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-        "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", 
-        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%",
-        "debug": debug_info
+        "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-",
+        "passport": "-", "inn": "-", "snils": "-",
+        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0},
+        "completeness": "0%", "debug": debug_info
     }
+
 
 # --- HTML ---
 def generate_html_report(data: dict, report_id: str) -> str:
     nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
     edges = []
     node_id = 2
-    if data.get('fio') and data['fio'] != "Нет": nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('phone_main') and data['phone_main'] != "Нет": nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('operator') and data['operator'] != "Нет": nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('email') and data['email'] != "Нет": nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('passport') and data['passport'] != "Нет": nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('inn') and data['inn'] != "Нет": nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('fio') and data['fio'] != "Нет":
+        nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('phone_main') and data['phone_main'] != "Нет":
+        nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('operator') and data['operator'] != "Нет":
+        nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('email') and data['email'] != "Нет":
+        nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('passport') and data['passport'] != "Нет":
+        nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+    if data.get('inn') and data['inn'] != "Нет":
+        nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
     return f"""
@@ -443,29 +508,48 @@ def generate_html_report(data: dict, report_id: str) -> str:
     </html>
     """
 
-# --- FASTAPI ДЛЯ ВЕБ-ОТЧЕТОВ ---
+
+# --- FASTAPI ---
 web_app = FastAPI()
+
 
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
     data = REPORTS_CACHE.get(report_id)
-    if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
+    if not data:
+        return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
     return HTMLResponse(content=generate_html_report(data, report_id))
+
 
 async def run_web():
     config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
+
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+
+    if is_banned(message.from_user.id):
+        return await message.answer("🚫 Вы заблокированы.")
+
     user = get_user(message.from_user.id)
-    if not user: add_user(message.from_user.id, message.from_user.username)
-    try: await message.answer_sticker(STICKER_ID)
-    except: pass
+    referrer_id = None
+    if not user:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].isdigit():
+            referrer_id = int(parts[1])
+        add_user(message.from_user.id, message.from_user.username, referrer_id)
+
+    try:
+        await message.answer_sticker(STICKER_ID)
+    except Exception:
+        pass
+
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+
 
 @dp.callback_query(F.data == "back_to_start")
 async def cb_back(cb: CallbackQuery, state: FSMContext):
@@ -473,16 +557,18 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
     await cb.answer()
 
+
 @dp.callback_query(F.data == "search_info")
 async def cb_search_info(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
+
 @dp.callback_query(F.data == "profile")
 async def cb_profile(cb: CallbackQuery):
     user = get_user(cb.from_user.id)
     days_str = calculate_days(user[4]) if user else "0 дн."
-    
+
     text = (
         f"👤 <b>Мой профиль</b>\n\n"
         f"ID: <code>{cb.from_user.id}</code>\n"
@@ -492,14 +578,15 @@ async def cb_profile(cb: CallbackQuery):
         f"Дата регистрации: {user[4] if user else '-'}\n"
         f"<i>(Вы агент уже: {days_str})</i>"
     )
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛡️ Скрытие данных (5$)", callback_data="hide_data_menu")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
     ])
-    
+
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
+
 
 @dp.callback_query(F.data == "hide_data_menu")
 async def cb_hide_data_menu(cb: CallbackQuery):
@@ -510,10 +597,10 @@ async def cb_hide_data_menu(cb: CallbackQuery):
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
 
+
 @dp.callback_query(F.data == "pay_tonkeeper")
 async def cb_pay_tonkeeper(cb: CallbackQuery):
     memo = f"Oasis_Digital_{cb.from_user.id}"
-    
     text = (
         f"💎 <b>Счёт на оплату через USDT (TON) / TON</b>\n\n"
         f"📦 <b>Тариф:</b> Скрытие личных данных из поиска\n"
@@ -525,31 +612,37 @@ async def cb_pay_tonkeeper(cb: CallbackQuery):
         f"📲 Самый удобный способ: нажмите кнопку «📲 Оплатить в 1 клик» ниже — кошелёк Tonkeeper / Telegram Wallet откроется с уже введённой суммой и memo!\n\n"
         f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки."
     )
-    
+
     tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link)],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
     ])
-    
+
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
+
 
 @dp.callback_query(F.data == "buy_requests")
 async def cb_buy_requests(cb: CallbackQuery):
     await cb.message.edit_text(
-        "💎 <b>Покупка запросов</b>\n\nДля покупки запросов напишите в поддержку или оплатите через профиль (функция в разработке).", 
-        parse_mode="HTML", 
+        "💎 <b>Покупка запросов</b>\n\nДля покупки запросов напишите в поддержку или оплатите через профиль (функция в разработке).",
+        parse_mode="HTML",
         reply_markup=back_kb()
     )
     await cb.answer()
 
+
 @dp.callback_query(F.data == "support")
 async def cb_support(cb: CallbackQuery, state: FSMContext):
     await state.set_state(SearchStates.wait_support_msg)
-    await cb.message.edit_text(SUPPORT_TEXT, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await cb.message.edit_text(
+        SUPPORT_TEXT, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await cb.answer()
+
 
 @dp.message(SearchStates.wait_support_msg)
 async def process_support_msg(msg: Message, state: FSMContext):
@@ -558,8 +651,10 @@ async def process_support_msg(msg: Message, state: FSMContext):
     try:
         await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
         await msg.answer("✅ Ваше сообщение отправлено администрации.", reply_markup=main_kb())
-    except:
+    except Exception:
+        log.exception("Support forward failed")
         await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
+
 
 # --- НЕПОЛНЫЙ ПОИСК ---
 @dp.callback_query(F.data == "search_partial")
@@ -568,22 +663,29 @@ async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
     await cb.answer()
 
+
 @dp.callback_query(F.data.startswith("field_"))
 async def cb_select_field(cb: CallbackQuery, state: FSMContext):
     field = cb.data.replace("field_", "")
     await state.update_data(editing_field=field)
     field_names = {"surname": "Фамилию", "name": "Имя", "patronymic": "Отчество", "birth_date": "Дату рождения"}
-    await cb.message.edit_text(f"Введите {field_names.get(field, 'значение')}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]]))
+    await cb.message.edit_text(
+        f"Введите {field_names.get(field, 'значение')}:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]])
+    )
     await state.set_state(SearchStates.wait_partial_field)
     await cb.answer()
+
 
 @dp.message(SearchStates.wait_partial_field)
 async def process_field_input(msg: Message, state: FSMContext):
     data = await state.get_data()
     field = data.get("editing_field")
-    if field and msg.text: await state.update_data({field: msg.text.strip()})
+    if field and msg.text:
+        await state.update_data({field: msg.text.strip()})
     await state.set_state(None)
     await msg.answer(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+
 
 @dp.callback_query(F.data == "clear_fields")
 async def cb_clear(cb: CallbackQuery, state: FSMContext):
@@ -591,10 +693,12 @@ async def cb_clear(cb: CallbackQuery, state: FSMContext):
     await cb.answer("Поля очищены")
     await cb.message.edit_reply_markup(reply_markup=partial_search_kb(await state.get_data()))
 
+
 @dp.callback_query(F.data == "select_country")
 async def cb_select_country(cb: CallbackQuery):
     await cb.message.edit_text("🌍 Выберите страну поиска:", reply_markup=country_kb())
     await cb.answer()
+
 
 @dp.callback_query(F.data.startswith("set_country_"))
 async def cb_set_country(cb: CallbackQuery, state: FSMContext):
@@ -603,35 +707,57 @@ async def cb_set_country(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
     await cb.answer()
 
+
 @dp.callback_query(F.data == "back_to_partial")
 async def cb_back_to_partial(cb: CallbackQuery, state: FSMContext):
     await state.set_state(None)
     await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
     await cb.answer()
 
+
 @dp.callback_query(F.data == "do_partial_search")
 async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
-    if not deduct_request(cb.from_user.id):
-        return await cb.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.", show_alert=True)
-        
+    if is_banned(cb.from_user.id):
+        return await cb.answer("🚫 Вы заблокированы.", show_alert=True)
+
     data = await state.get_data()
     query_parts = []
-    if data.get('surname'): query_parts.append(f"Фамилия: {data['surname']}")
-    if data.get('name'): query_parts.append(f"Имя: {data['name']}")
-    if data.get('patronymic'): query_parts.append(f"Отчество: {data['patronymic']}")
-    if data.get('birth_date'): query_parts.append(f"Дата: {data['birth_date']}")
-    if data.get('country'): query_parts.append(f"Страна: {data['country']}")
-    
-    query_str = ", ".join(query_parts) if query_parts else "Пустой запрос"
-    
-    note = await cb.message.edit_text(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial", parse_mode="HTML")
-    data_result = {"query": query_str, "date": datetime.now().strftime("%d.%m.%Y"), "fio": "НЕ НАЙДЕНО", "phone_main": "-", "username": "-", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"}
-    
+    if data.get('surname'):
+        query_parts.append(f"Фамилия: {data['surname']}")
+    if data.get('name'):
+        query_parts.append(f"Имя: {data['name']}")
+    if data.get('patronymic'):
+        query_parts.append(f"Отчество: {data['patronymic']}")
+    if data.get('birth_date'):
+        query_parts.append(f"Дата: {data['birth_date']}")
+    if data.get('country'):
+        query_parts.append(f"Страна: {data['country']}")
+
+    if not query_parts:
+        return await cb.answer("Заполните хотя бы одно поле.", show_alert=True)
+
+    if not deduct_request(cb.from_user.id):
+        return await cb.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.", show_alert=True)
+
+    query_str = ", ".join(query_parts)
+    note = await cb.message.edit_text(
+        f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial",
+        parse_mode="HTML"
+    )
+
+    data_result = await search_everywhere(query_str)
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data_result
-    
-    await note.edit_text(f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>", parse_mode="HTML", reply_markup=result_kb(report_id))
+
+    if data_result.get("fio") == "НЕ НАЙДЕНО":
+        await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
+    else:
+        await note.edit_text(
+            f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>",
+            parse_mode="HTML", reply_markup=result_kb(report_id)
+        )
     await cb.answer()
+
 
 @dp.callback_query(F.data == "ref_link")
 async def cb_ref_link(cb: CallbackQuery):
@@ -640,135 +766,179 @@ async def cb_ref_link(cb: CallbackQuery):
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
+
 @dp.callback_query(F.data == "create_mirror")
 async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
     await state.set_state(SearchStates.wait_mirror_token)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_mirror_token)
 async def process_mirror_token(msg: Message, state: FSMContext):
     await state.clear()
-    token = msg.text.strip()
-    
+    token = msg.text.strip() if msg.text else ""
+
     if ":" not in token:
         return await msg.answer("❌ Это не похоже на токен.", reply_markup=main_kb())
-        
+
+    test_bot = Bot(token=token)
     try:
-        test_bot = Bot(token=token)
-        bot_info = await test_bot.get_me()
-        await test_bot.session.close()
+        await test_bot.get_me()
     except Exception:
+        log.exception("Mirror token validation failed")
         return await msg.answer("❌ Неверный токен.", reply_markup=main_kb())
-        
-    await msg.answer("🕵‍♂ <b>Зеркало успешно создано!</b>", reply_markup=main_kb())
-    task = asyncio.create_task(run_mirror_bot(token, msg.from_user.id))
+    finally:
+        await test_bot.session.close()
+
+    await msg.answer(
+        "🕵‍♂ <b>Токен принят.</b>\n\nСоздание зеркал находится в разработке — мы уведомим вас, когда функция станет доступна.",
+        parse_mode="HTML", reply_markup=main_kb()
+    )
+
 
 # --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state is not None: return
-    if msg.from_user.is_bot: return
-    
+    if current_state is not None:
+        return
+    if msg.from_user.is_bot:
+        return
+
+    if is_banned(msg.from_user.id):
+        return await msg.answer("🚫 Вы заблокированы.")
+
     if not deduct_request(msg.from_user.id):
         return await msg.answer("❌ У вас закончились запросы.")
-    
+
     q = msg.text.strip()
-    
-    note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
+
+    note = await msg.answer(
+        f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto",
+        parse_mode="HTML"
+    )
     data = await search_everywhere(q)
-    
+
     if not data or data.get("fio") == "НЕ НАЙДЕНО":
-        return await note.edit_text(f"❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
+        return await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
 
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
-    
+
     await note.edit_text(
         f"✅ <b>Отчет готов!</b>\n"
         f"ФИО: <b>{data['fio']}</b>\n"
         f"Тел: <b>{data['phone_main']}</b>\n"
         f"Оператор: {data['operator']}\n\n"
-        f"<i>Выберите формат отчета:</i>", 
+        f"<i>Выберите формат отчета:</i>",
         parse_mode="HTML", reply_markup=result_kb(report_id)
     )
 
-# --- СКАЧИВАНИЕ ФАЙЛОВ ---
+
+# --- СКАЧИВАНИЕ ---
 @dp.callback_query(F.data.startswith("get_txt_"))
 async def cb_send_txt(cb: CallbackQuery):
     report_id = cb.data.replace("get_txt_", "")
     data = REPORTS_CACHE.get(report_id)
-    if not data: return await cb.answer("Отчет устарел", show_alert=True)
-    
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+
     text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {data['email']}\nАдрес: {data['address']}\nПаспорт: {data['passport']}\nИНН: {data['inn']}\nСНИЛС: {data['snils']}"
     file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
     await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await cb.answer()
 
+
 @dp.callback_query(F.data.startswith("get_json_"))
 async def cb_send_json(cb: CallbackQuery):
     report_id = cb.data.replace("get_json_", "")
     data = REPORTS_CACHE.get(report_id)
-    if not data: return await cb.answer("Отчет устарел", show_alert=True)
-    
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+
     json_str = json.dumps(data, ensure_ascii=False, indent=2)
     file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
     await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
     await cb.answer()
 
+
 # --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
-    if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
     await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+
 
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID количество</code>:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "Введите <code>ID количество</code>:", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await state.set_state(SearchStates.wait_admin_give)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_admin_give)
 async def process_admin_give(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
     try:
         parts = msg.text.strip().split()
         uid, amount = int(parts[0]), int(parts[1])
         add_requests(uid, amount)
         await msg.answer(f"✅ Выдано {amount} для {uid}.", reply_markup=admin_menu_kb())
-    except: await msg.answer("❌ Ошибка формата.")
+    except Exception:
+        await msg.answer("❌ Ошибка формата.")
     await state.clear()
+
 
 @dp.callback_query(F.data == "adm_take")
 async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID количество</code> для списания:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "Введите <code>ID количество</code> для списания:", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await state.set_state(SearchStates.wait_admin_take)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_admin_take)
 async def process_admin_take(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
     try:
         parts = msg.text.strip().split()
         uid, amount = int(parts[0]), int(parts[1])
         add_requests(uid, -amount)
         await msg.answer(f"✅ Забрано {amount} у {uid}.", reply_markup=admin_menu_kb())
-    except: await msg.answer("❌ Ошибка формата.")
+    except Exception:
+        await msg.answer("❌ Ошибка формата.")
     await state.clear()
+
 
 @dp.callback_query(F.data == "adm_ban")
 async def cb_adm_ban(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID</code> для бана/разбана:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "Введите <code>ID</code> для бана/разбана:", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await state.set_state(SearchStates.wait_admin_ban)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_admin_ban)
 async def process_admin_ban(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
     try:
         uid = int(msg.text.strip())
         conn = sqlite3.connect(USERS_DB)
@@ -784,72 +954,134 @@ async def process_admin_ban(msg: Message, state: FSMContext):
         else:
             await msg.answer("❌ Пользователь не найден.", reply_markup=admin_menu_kb())
         conn.close()
-    except: await msg.answer("❌ Ошибка формата.")
+    except Exception:
+        await msg.answer("❌ Ошибка формата.")
     await state.clear()
+
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def cb_adm_broadcast(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📢 <b>Рассылка</b>\n\nОтправьте текст сообщения:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "📢 <b>Рассылка</b>\n\nОтправьте текст сообщения:", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await state.set_state(SearchStates.wait_admin_broadcast)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_admin_broadcast)
 async def process_admin_broadcast(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
     await state.clear()
-    
-    if not msg.text: return await msg.answer("❌ Текст пустой.")
-    
+
+    if not msg.text:
+        return await msg.answer("❌ Текст пустой.")
+
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
     users = cursor.fetchall()
     conn.close()
-    
+
     sent = 0
     failed = 0
     status_msg = await msg.answer(f"📢 Рассылка на {len(users)} юзеров...")
-    
+
     for user in users:
         try:
             await bot.send_message(user[0], msg.text, parse_mode="HTML")
             sent += 1
             await asyncio.sleep(0.05)
-        except:
+        except Exception:
             failed += 1
-            
-    await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок: {failed}", reply_markup=admin_menu_kb())
+
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок: {failed}",
+        reply_markup=admin_menu_kb()
+    )
+
 
 @dp.callback_query(F.data == "adm_test_api")
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API</b>\n\nВведите запрос (например, номер телефона, ФИО или ник):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "📡 <b>Тест API</b>\n\nВведите запрос (например, номер телефона, ФИО или ник):", parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
+    )
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
+
 @dp.message(SearchStates.wait_admin_raw)
 async def process_admin_raw(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
     await state.clear()
-    
+
     q = msg.text.strip()
     note = await msg.answer(f"📡 <b>Отправляю запрос к API:</b> {q}...", parse_mode="HTML")
-    
+
     res_mb = await fetch_mobius(q)
-    
-    mb_str = json.dumps(res_mb, ensure_ascii=False)[:3500] if res_mb else "None/Ошибка"
-    
+    mb_str = json.dumps(res_mb, ensure_ascii=False)[:3500] if res_mb else "None/Ошибка (см. логи)"
+
     text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>"
     await note.edit_text(text, parse_mode="HTML")
     await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
 
+
+# --- Заглушки под кнопки без хендлеров ---
+@dp.callback_query(F.data == "adm_stats")
+async def cb_adm_stats(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), SUM(requests_left) FROM users")
+    total, remaining = cursor.fetchone()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+    banned = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at = ?", (datetime.now().strftime("%d.%m.%Y"),))
+    today = cursor.fetchone()[0]
+    conn.close()
+
+    text = (
+        f"📊 <b>Аналитика</b>\n\n"
+        f"👥 Всего юзеров: <b>{total or 0}</b>\n"
+        f"🚫 Забанено: <b>{banned or 0}</b>\n"
+        f"🆕 Сегодня: <b>{today or 0}</b>\n"
+        f"🎟 Остаток запросов: <b>{remaining or 0}</b>\n"
+        f"📁 Отчетов в кэше: <b>{len(REPORTS_CACHE)}</b>"
+    )
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "adm_promo")
+async def cb_adm_promo(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.answer("В разработке", show_alert=True)
+
+
+@dp.callback_query(F.data == "adm_maintenance")
+async def cb_adm_maintenance(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.answer("В разработке", show_alert=True)
+
+
 async def main():
-    print("Бот запускается на Polling...")
+    log.info("Бот запускается на Polling...")
     await bot.delete_webhook(drop_pending_updates=True)
-    
+
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     try:
