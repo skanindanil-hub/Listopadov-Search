@@ -218,7 +218,7 @@ def country_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
-# --- API ЗАПРОС (NEBULA) С ЗАДЕРЖКОЙ 60 СЕК ---
+# --- API ЗАПРОС (NEBULA) ---
 async def fetch_nebula(q: str):
     headers = {"X-API-Key": API_KEY_NEBULA}
     params = {"query": q, "type": "auto"}
@@ -231,7 +231,7 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- СУПЕР-ПАРСЕР ---
+# --- СУПЕР-ПАРСЕР (NEBULA) ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     
@@ -262,9 +262,13 @@ async def search_everywhere(q: str):
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
     found_something = False
+    debug_info = ""
 
-    if res_nebula and res_nebula.get("success"):
-        found_something = True
+    if not res_nebula:
+        debug_info = "API вернул None (таймаут или ошибка сети)"
+    elif not res_nebula.get("success"):
+        debug_info = f"API вернул ошибку: {res_nebula.get('message', 'Unknown')}"
+    else:
         res_data = res_nebula.get("results", {})
         
         phone_info = res_data.get("phone_info", {})
@@ -285,6 +289,9 @@ async def search_everywhere(q: str):
         final_data["stats"]["records"] = len(breaches)
         final_data["stats"]["sources"] = len(breaches)
         
+        if breaches:
+            found_something = True
+            
         for b in breaches:
             rec = b.get("record", {})
             for k, v in rec.items():
@@ -304,11 +311,22 @@ async def search_everywhere(q: str):
                     if final_data["email"] == "Нет": final_data["email"] = val_str
 
         final_data["sources_list"].append({"name": "Nebula (OSINT)", "count": len(breaches)})
+        
+        if names or phone_info:
+            found_something = True
 
-    filled = sum(1 for k in ["fio", "phone_main", "email", "address", "dob"] if final_data[k] != "Нет")
-    final_data["completeness"] = f"{int((filled / 5) * 100)}%"
-
-    return final_data if found_something else None
+    if found_something:
+        filled = sum(1 for k in ["fio", "phone_main", "email", "address", "dob"] if final_data[k] != "Нет")
+        final_data["completeness"] = f"{int((filled / 5) * 100)}%"
+        return final_data
+    
+    return {
+        "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
+        "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", 
+        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%",
+        "debug": debug_info
+    }
 
 # --- HTML ---
 def generate_html_report(data: dict, report_id: str) -> str:
@@ -452,11 +470,10 @@ async def run_mirror_bot(token: str, admin_id: int):
         note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
         data = await search_everywhere(q)
         
-        if not data:
-            data = {"query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"), "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет", "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"}
-        else:
-            data["query"] = q
-            data["date"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+        if not data or data.get("fio") == "НЕ НАЙДЕНО":
+            debug_msg = data.get("debug", "Данные не найдены в базе Nebula.") if data else "Ошибка"
+            await note.edit_text(f"❌ <b>Данные не найдены.</b>\n\n<i>{debug_msg}</i>", parse_mode="HTML", reply_markup=main_kb())
+            return
 
         report_id = str(uuid.uuid4())[:8]
         REPORTS_CACHE[report_id] = data
@@ -691,16 +708,9 @@ async def process_search(msg: Message, state: FSMContext):
     note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
     data = await search_everywhere(q)
     
-    if not data:
-        data = {
-            "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-            "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", 
-            "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%"
-        }
-    else:
-        data["query"] = q
-        data["date"] = datetime.now().strftime("%d.%m.%Y %H:%M")
+    if not data or data.get("fio") == "НЕ НАЙДЕНО":
+        debug_msg = data.get("debug", "Данные не найдены в базе Nebula.") if data else "Ошибка"
+        return await note.edit_text(f"❌ <b>Данные не найдены.</b>\n\n<i>{debug_msg}</i>", parse_mode="HTML", reply_markup=main_kb())
 
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
