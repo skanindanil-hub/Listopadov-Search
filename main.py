@@ -78,6 +78,7 @@ def init_users_db():
         CREATE TABLE IF NOT EXISTS mirrors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bot_username TEXT UNIQUE,
+            bot_token TEXT,
             added_by INTEGER,
             added_at TEXT,
             is_active INTEGER DEFAULT 1
@@ -85,6 +86,10 @@ def init_users_db():
     ''')
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE mirrors ADD COLUMN bot_token TEXT")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -280,8 +285,9 @@ def country_kb():
 
 # --- API ЗАПРОСЫ ---
 async def fetch_mobius(q: str):
+    clean_q = q.strip().replace("@", "")
     headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
-    payload = {"query": q, "type": "auto"}
+    payload = {"query": clean_q, "type": "auto"}
     timeout = aiohttp.ClientTimeout(total=90)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -582,7 +588,14 @@ async def search_everywhere(q: str):
     final_data["stats"]["phones"] = len(final_data["phones"])
     final_data["stats"]["sources"] = len(final_data["sources_list"])
 
-    if found_something:
+    has_data = (
+        final_data["fio"] not in ("Нет", "НЕ НАЙДЕНО", "-") or
+        final_data["phone_main"] not in ("Нет", "-", "") or
+        final_data["tg_info"] or
+        len(final_data["sources_list"]) > 0
+    )
+
+    if has_data:
         filled = sum(1 for k in ("fio", "phone_main", "dob") if final_data[k] not in ("Нет", "-", ""))
         if final_data["emails"]:
             filled += 1
@@ -962,6 +975,40 @@ async def run_web():
     await server.serve()
 
 
+# --- ЗЕРКАЛА ---
+async def run_mirror_bot(token: str, bot_username: str):
+    log.info(f"Запуск зеркала @{bot_username}...")
+    mirror_bot = Bot(token=token)
+    mirror_dp = Dispatcher(storage=MemoryStorage())
+    
+    @mirror_dp.message(CommandStart())
+    async def mirror_start(message: Message):
+        main_username = (await bot.get_me()).username
+        await message.answer(
+            f"🕵‍♂ <b>Добро пожаловать в зеркало Oasis Digital!</b>\n\n"
+            f"Главный бот: @{main_username}\n"
+            f"Сайт: https://oasissearchcom.localhost.cc",
+            parse_mode="HTML"
+        )
+
+    @mirror_dp.message(F.text)
+    async def mirror_echo(message: Message):
+        main_username = (await bot.get_me()).username
+        await message.answer(
+            f"🕵‍♂ <b>Это зеркало Oasis Digital.</b>\n\n"
+            f"Для полноценного поиска перейдите в главный бот: @{main_username}",
+            parse_mode="HTML"
+        )
+
+    try:
+        await mirror_bot.delete_webhook(drop_pending_updates=True)
+        await mirror_dp.start_polling(mirror_bot)
+    except Exception as e:
+        log.exception(f"Зеркало @{bot_username} упало: {e}")
+    finally:
+        await mirror_bot.session.close()
+
+
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -1233,22 +1280,32 @@ async def process_mirror_token(msg: Message, state: FSMContext):
     test_bot = Bot(token=token)
     try:
         bot_info = await test_bot.get_me()
+        
         conn = sqlite3.connect(USERS_DB)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR IGNORE INTO mirrors (bot_username, added_by, added_at) VALUES (?, ?, ?)",
-            (bot_info.username, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
+            "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
+            (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        )
+        # Если зеркало уже было, обновляем токен
+        cursor.execute(
+            "UPDATE mirrors SET bot_token = ? WHERE bot_username = ?",
+            (token, bot_info.username)
         )
         conn.commit()
         conn.close()
+        
+        asyncio.create_task(run_mirror_bot(token, bot_info.username))
+        
     except Exception as e:
         log.exception("Mirror token validation failed")
-        return await msg.answer("❌ Неверный токен.", reply_markup=main_kb())
+        return await msg.answer("❌ Неверный токен или бот заблокирован.", reply_markup=main_kb())
     finally:
         await test_bot.session.close()
 
     await msg.answer(
-        f"🕵‍♂ <b>Зеркало @{bot_info.username} добавлено в базу!</b>\n\nОно появится на сайте автоматически.",
+        f"🕵‍♂ <b>Зеркало @{bot_info.username} успешно запущено!</b>\n\n"
+        f"Оно добавлено на сайт и готово к работе.",
         parse_mode="HTML", reply_markup=main_kb()
     )
 
@@ -1578,6 +1635,17 @@ async def cb_adm_maintenance(cb: CallbackQuery):
 async def main():
     log.info("Бот запускается на Polling...")
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # Восстанавливаем зеркала при старте
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT bot_username, bot_token FROM mirrors WHERE is_active = 1 AND bot_token IS NOT NULL")
+    mirrors = cursor.fetchall()
+    conn.close()
+
+    for username, token in mirrors:
+        if token:
+            asyncio.create_task(run_mirror_bot(token, username))
 
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
