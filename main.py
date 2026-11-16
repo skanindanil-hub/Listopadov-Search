@@ -201,9 +201,9 @@ HIDE_DATA_TEXT = """🛡️ <b>Скрытие данных</b>
 # --- КЛАВИАТУРЫ ---
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info")],
+        [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info", style="primary")],
         [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
-        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests")],
+        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests", style="primary")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🤖 Зеркало", callback_data="create_mirror")],
         [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
@@ -216,7 +216,7 @@ def back_kb():
 
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Веб-отчет (Граф)", url=f"{WEBHOOK_HOST}/report/{report_id}")],
+        [InlineKeyboardButton(text="🌐 Веб-отчет (Граф)", url=f"{WEBHOOK_HOST}/report/{report_id}", style="primary")],
         [
             InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
             InlineKeyboardButton(text="📦 Скачать JSON", callback_data=f"get_json_{report_id}")
@@ -228,7 +228,7 @@ def result_kb(report_id: str):
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
-        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
+        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give", style="success"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take", style="danger")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
@@ -248,7 +248,7 @@ def partial_search_kb(data: dict):
         [InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"), InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")],
         [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic")],
         [InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"), InlineKeyboardButton(text=f"Страна: {country}", callback_data="select_country")],
-        [InlineKeyboardButton(text="Очистить", callback_data="clear_fields"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")],
+        [InlineKeyboardButton(text="Очистить", callback_data="clear_fields", style="danger"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search", style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
     ])
 
@@ -299,8 +299,9 @@ async def search_everywhere(q: str):
                 return {
                     "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
                     "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет",
-                    "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-",
-                    "passport": "-", "inn": "-", "snils": "-",
+                    "operator": "-", "region": "-", "country": "-",
+                    "emails": [], "addresses": [], "phones": [row[2]] if row[2] else [],
+                    "dob": "-", "passport": "-", "inn": "-", "snils": "-",
                     "sources_list": [{"name": "Local DB", "count": 1}],
                     "stats": {"sources": 1, "phones": 1, "records": 1},
                     "completeness": "20%"
@@ -311,8 +312,12 @@ async def search_everywhere(q: str):
     res_mobius = await fetch_mobius(q)
 
     final_data = {
-        "fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет",
-        "email": "Нет", "address": "Нет", "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
+        "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "fio": "Нет", "phone_main": q, "username": "Нет",
+        "operator": "Нет", "region": "Нет", "country": "Нет",
+        "emails": [], "addresses": [], "phones": [],
+        "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
+        "activity": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
     found_something = False
@@ -324,8 +329,8 @@ async def search_everywhere(q: str):
         debug_info = f"API Mobius вернул ошибку: {res_mobius.get('message', 'Unknown')}"
     else:
         results = res_mobius.get("results", {})
-        kratos_data = results.get("mobius-kratos-phone", {}).get("result", {}).get("data", {}).get("results", [])
 
+        kratos_data = results.get("mobius-kratos-phone", {}).get("result", {}).get("data", {}).get("results", [])
         if kratos_data:
             found_something = True
             final_data["stats"]["records"] = len(kratos_data)
@@ -349,39 +354,137 @@ async def search_everywhere(q: str):
                         final_data["inn"] = val_str
                     elif "дата рождения" in k_low and final_data["dob"] == "Нет":
                         final_data["dob"] = val_str
-                    elif "адрес" in k_low and final_data["address"] == "Нет":
-                        final_data["address"] = val_str
+                    elif "адрес" in k_low:
+                        if val_str not in final_data["addresses"]:
+                            final_data["addresses"].append(val_str)
                     elif "телефон" in k_low and final_data["phone_main"] == q:
                         final_data["phone_main"] = val_str
-
-            nebula_data = results.get("mobius-nebula-phone", {}).get("result", {}).get("data", {}).get("results", {})
-            if nebula_data:
-                phone_info = nebula_data.get("phone_info", {})
-                if phone_info.get("operator"):
-                    final_data["operator"] = phone_info["operator"]
-                if phone_info.get("region"):
-                    final_data["region"] = phone_info["region"]
-                emails = nebula_data.get("emails", [])
-                if emails and final_data["email"] == "Нет":
-                    final_data["email"] = emails[0]
+                        if val_str not in final_data["phones"]:
+                            final_data["phones"].append(val_str)
 
             final_data["sources_list"].append({"name": "Mobius (Kratos)", "count": len(kratos_data)})
 
+        nebula_raw = results.get("mobius-nebula-phone", {}).get("result", {}).get("data", {}).get("results", {})
+        if nebula_raw:
+            found_something = True
+
+            phone_info = nebula_raw.get("phone_info", {}) or {}
+            if phone_info.get("operator"):
+                final_data["operator"] = phone_info["operator"]
+            if phone_info.get("region"):
+                final_data["region"] = phone_info["region"]
+            if phone_info.get("country"):
+                final_data["country"] = phone_info["country"]
+
+            if final_data["phone_main"] in (q, "Нет") and phone_info.get("phone"):
+                final_data["phone_main"] = phone_info["phone"]
+            if final_data["phone_main"] and final_data["phone_main"] not in final_data["phones"]:
+                final_data["phones"].insert(0, final_data["phone_main"])
+
+            for em in nebula_raw.get("emails", []) or []:
+                if em and em not in final_data["emails"]:
+                    final_data["emails"].append(em)
+
+            for ad in nebula_raw.get("addresses", []) or []:
+                if isinstance(ad, dict):
+                    ad = ad.get("address") or ad.get("value") or str(ad)
+                if ad and ad not in final_data["addresses"]:
+                    final_data["addresses"].append(ad)
+
+            for pb in nebula_raw.get("phonebooks", []) or []:
+                name = pb.get("name") if isinstance(pb, dict) else str(pb)
+                if name:
+                    if final_data["fio"] in ("Нет", final_data["fio"]):
+                        final_data["fio"] = name
+                    elif name not in final_data["fio"]:
+                        final_data["fio"] = f"{final_data['fio']}; {name}"
+
+            if nebula_raw.get("dob") and final_data["dob"] == "Нет":
+                final_data["dob"] = nebula_raw["dob"]
+
+            act = nebula_raw.get("activity") or {}
+            if isinstance(act, dict):
+                final_data["activity"] = act
+
+            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
+
     if found_something:
-        filled = sum(1 for k in ("fio", "phone_main", "email", "address", "dob") if final_data[k] != "Нет")
+        filled = sum(1 for k in ("fio", "phone_main", "dob") if final_data[k] != "Нет")
+        if final_data["emails"]:
+            filled += 1
+        if final_data["addresses"]:
+            filled += 1
         final_data["completeness"] = f"{int((filled / 5) * 100)}%"
-        final_data["query"] = q
-        final_data["date"] = datetime.now().strftime("%d.%m.%Y %H:%M")
         return final_data
 
     return {
         "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-        "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-",
-        "passport": "-", "inn": "-", "snils": "-",
+        "operator": "-", "region": "-", "country": "-",
+        "emails": [], "addresses": [], "phones": [],
+        "dob": "-", "passport": "-", "inn": "-", "snils": "-",
+        "activity": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0},
         "completeness": "0%", "debug": debug_info
     }
+
+
+# --- ФОРМАТ ОТЧЕТА (как на скрине) ---
+def format_report_text(data: dict) -> str:
+    def tree(label: str, value: str, last: bool = False) -> str:
+        branch = "└" if last else "├"
+        return f"{branch} {label}: {value}\n"
+
+    parts = []
+    q = data.get("query", "—")
+    parts.append(f"🔍 <b>Отчёт по запросу:</b> <code>{q}</code>\n")
+
+    phone = data.get("phone_main") or "—"
+    operator = data.get("operator") or "—"
+    region = data.get("region") or "—"
+    country = data.get("country") or "—"
+    if phone != "—":
+        block = "📞\n"
+        block += tree("Телефон", phone)
+        block += tree("Оператор", operator)
+        block += tree("Регион", region)
+        block += tree("Страна", country, last=True)
+        parts.append(block)
+
+    fio = data.get("fio") or "Нет"
+    dob = data.get("dob") or "Нет"
+    if fio not in ("Нет", "НЕ НАЙДЕНО"):
+        block = "👤 <b>Основные данные</b>\n"
+        block += tree("ФИО", fio)
+        block += tree("Дата рождения", dob, last=True)
+        parts.append(block)
+
+    if fio not in ("Нет", "НЕ НАЙДЕНО"):
+        parts.append(f"🔍 <b>Телефонные книги:</b> {fio}\n")
+
+    emails = data.get("emails") or []
+    if emails:
+        joined = ", ".join(f'<a href="mailto:{e}">{e}</a>' for e in emails)
+        parts.append(f"📧 <b>E-mail:</b> {joined}\n")
+
+    addresses = data.get("addresses") or []
+    if addresses:
+        parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
+
+    activity = data.get("activity") or {}
+    if activity:
+        block = "📊 <b>Активность:</b>\n"
+        items = list(activity.items())
+        for i, (k, v) in enumerate(items):
+            label = k.replace("_", " ").capitalize()
+            block += tree(label, str(v), last=(i == len(items) - 1))
+        parts.append(block)
+
+    if not parts[1:]:
+        parts.append("❌ Данные не найдены.\n")
+
+    footer = f"\n<i>Источники: {', '.join(s['name'] for s in data.get('sources_list', [])) or '—'}</i>"
+    return "".join(parts) + footer
 
 
 # --- HTML ---
@@ -395,13 +498,16 @@ def generate_html_report(data: dict, report_id: str) -> str:
         nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('operator') and data['operator'] != "Нет":
         nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('email') and data['email'] != "Нет":
+    if data.get('emails'):
         nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('passport') and data['passport'] != "Нет":
         nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     if data.get('inn') and data['inn'] != "Нет":
         nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
+
+    email_display = ", ".join(data.get('emails', [])) or data.get('email', '-')
+    addr_display = "; ".join(data.get('addresses', [])) or data.get('address', '-')
 
     return f"""
     <!DOCTYPE html>
@@ -475,8 +581,8 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 <div class="data-item"><div class="d-icon">📞</div><div class="d-content"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div></div>
                 <div class="data-item"><div class="d-icon">📡</div><div class="d-content"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🎂</div><div class="d-content"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div></div>
-                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email / Банк</div><div class="d-value">{data['email']}</div></div></div>
-                <div class="data-item"><div class="d-icon">🏠</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{data['address']}</div></div></div>
+                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email / Банк</div><div class="d-value">{email_display}</div></div></div>
+                <div class="data-item"><div class="d-icon">🏠</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{addr_display}</div></div></div>
                 <div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">ИНН</div><div class="d-value">{data['inn']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">СНИЛС</div><div class="d-value">{data['snils']}</div></div></div>
@@ -591,7 +697,7 @@ async def cb_profile(cb: CallbackQuery):
 @dp.callback_query(F.data == "hide_data_menu")
 async def cb_hide_data_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
+        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper", style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
     ])
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
@@ -616,7 +722,7 @@ async def cb_pay_tonkeeper(cb: CallbackQuery):
     tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link)],
+        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link, style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
     ])
 
@@ -752,10 +858,13 @@ async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
     if data_result.get("fio") == "НЕ НАЙДЕНО":
         await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
     else:
-        await note.edit_text(
-            f"✅ <b>Отчет готов!</b>\nФИО: <b>{data_result['fio']}</b>",
-            parse_mode="HTML", reply_markup=result_kb(report_id)
-        )
+        body = format_report_text(data_result)
+        chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
+        await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
+        for extra in chunks[1:-1]:
+            await cb.message.answer(extra, parse_mode="HTML")
+        if len(chunks) > 1:
+            await cb.message.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
     await cb.answer()
 
 
@@ -826,14 +935,13 @@ async def process_search(msg: Message, state: FSMContext):
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
 
-    await note.edit_text(
-        f"✅ <b>Отчет готов!</b>\n"
-        f"ФИО: <b>{data['fio']}</b>\n"
-        f"Тел: <b>{data['phone_main']}</b>\n"
-        f"Оператор: {data['operator']}\n\n"
-        f"<i>Выберите формат отчета:</i>",
-        parse_mode="HTML", reply_markup=result_kb(report_id)
-    )
+    body = format_report_text(data)
+    chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
+    await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
+    for extra in chunks[1:-1]:
+        await msg.answer(extra, parse_mode="HTML")
+    if len(chunks) > 1:
+        await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
 
 
 # --- СКАЧИВАНИЕ ---
@@ -844,7 +952,7 @@ async def cb_send_txt(cb: CallbackQuery):
     if not data:
         return await cb.answer("Отчет устарел", show_alert=True)
 
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {data['email']}\nАдрес: {data['address']}\nПаспорт: {data['passport']}\nИНН: {data['inn']}\nСНИЛС: {data['snils']}"
+    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {', '.join(data.get('emails', [])) or '-'}\nАдрес: {'; '.join(data.get('addresses', [])) or '-'}\nПаспорт: {data['passport']}\nИНН: {data['inn']}\nСНИЛС: {data['snils']}"
     file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
     await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await cb.answer()
@@ -1033,7 +1141,6 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
 
 
-# --- Заглушки под кнопки без хендлеров ---
 @dp.callback_query(F.data == "adm_stats")
 async def cb_adm_stats(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
