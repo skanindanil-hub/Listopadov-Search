@@ -17,6 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # --- НАСТРОЙКИ ---
@@ -59,7 +60,7 @@ class SearchStates(StatesGroup):
     wait_admin_raw = State()
 
 
-# --- БАЗА ЮЗЕРОВ ---
+# --- БАЗА ЮЗЕРОВ И ЗЕРКАЛ ---
 def init_users_db():
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
@@ -71,6 +72,15 @@ def init_users_db():
             referrer_id INTEGER,
             joined_at TEXT,
             is_banned INTEGER DEFAULT 0
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mirrors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_username TEXT UNIQUE,
+            added_by INTEGER,
+            added_at TEXT,
+            is_active INTEGER DEFAULT 1
         )
     ''')
     try:
@@ -779,6 +789,21 @@ def generate_html_report(data: dict, report_id: str) -> str:
 # --- FASTAPI ---
 web_app = FastAPI()
 
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@web_app.get("/api/mirrors")
+async def get_mirrors():
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT bot_username FROM mirrors WHERE is_active = 1 ORDER BY added_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"mirrors": [row[0] for row in rows]}
 
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
@@ -1054,15 +1079,23 @@ async def process_mirror_token(msg: Message, state: FSMContext):
 
     test_bot = Bot(token=token)
     try:
-        await test_bot.get_me()
-    except Exception:
+        bot_info = await test_bot.get_me()
+        conn = sqlite3.connect(USERS_DB)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO mirrors (bot_username, added_by, added_at) VALUES (?, ?, ?)",
+            (bot_info.username, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
         log.exception("Mirror token validation failed")
         return await msg.answer("❌ Неверный токен.", reply_markup=main_kb())
     finally:
         await test_bot.session.close()
 
     await msg.answer(
-        "🕵‍♂ <b>Токен принят.</b>\n\nСоздание зеркал находится в разработке — мы уведомим вас, когда функция станет доступна.",
+        f"🕵‍♂ <b>Зеркало @{bot_info.username} добавлено в базу!</b>\n\nОно появится на сайте автоматически.",
         parse_mode="HTML", reply_markup=main_kb()
     )
 
