@@ -29,8 +29,13 @@ USERS_DB = "users.db"
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
+# Mobius
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_MOBIUS = os.getenv("MOBIUS_API_KEY", "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk")
+
+# Black-Box
+API_URL_BLACKBOX = "https://api.black-box.cc"
+API_KEY_BLACKBOX = os.getenv("BLACKBOX_API_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("oasis")
@@ -228,6 +233,7 @@ def result_kb(report_id: str):
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
+        [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis", style="primary")],
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give", style="success"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take", style="danger")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
         [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
@@ -260,13 +266,12 @@ def country_kb():
     ])
 
 
-# --- API ЗАПРОС (MOBIUS) ---
+# --- API ЗАПРОСЫ ---
 async def fetch_mobius(q: str):
     headers = {"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}
     payload = {"query": q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=90)
     try:
-        await asyncio.sleep(2)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
                 if resp.status == 200:
@@ -276,6 +281,64 @@ async def fetch_mobius(q: str):
     except Exception:
         log.exception("Mobius request failed for query=%r", q)
     return None
+
+
+async def fetch_blackbox(q: str):
+    headers = {"X-API-Key": API_KEY_BLACKBOX, "Accept": "application/json"}
+    params = {"q": q, "type": "auto"}
+    timeout = aiohttp.ClientTimeout(total=90)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_URL_BLACKBOX}/v1.1/search", headers=headers, params=params) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                body = await resp.text()
+                log.warning("BlackBox HTTP %s: %s", resp.status, body[:500])
+    except Exception:
+        log.exception("BlackBox request failed for query=%r", q)
+    return None
+
+
+# --- ПРОВЕРКА API ---
+async def check_api_health(name, url, method="GET", headers=None, payload=None):
+    timeout = aiohttp.ClientTimeout(total=20)
+    start = asyncio.get_event_loop().time()
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            if method == "GET":
+                req = session.get(url, headers=headers, params=payload)
+            else:
+                req = session.post(url, headers=headers, json=payload)
+            async with req as resp:
+                elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
+                status = resp.status
+                text = await resp.text()
+                preview = text[:200].replace("\n", " ")
+                return {"name": name, "healthy": 200 <= status < 300, "status": status, "latency_ms": elapsed, "preview": preview}
+    except asyncio.TimeoutError:
+        return {"name": name, "healthy": False, "status": "TIMEOUT", "latency_ms": int((asyncio.get_event_loop().time() - start) * 1000), "preview": "Превышено время ожидания"}
+    except Exception as e:
+        return {"name": name, "healthy": False, "status": "ERROR", "latency_ms": int((asyncio.get_event_loop().time() - start) * 1000), "preview": str(e)[:200]}
+
+
+async def run_all_api_checks():
+    checks = [
+        check_api_health(
+            "Mobius",
+            API_URL_MOBIUS,
+            method="POST",
+            headers={"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"},
+            payload={"query": "79999999999", "type": "auto"}
+        ),
+        check_api_health(
+            "Black-Box",
+            f"{API_URL_BLACKBOX}/v1.1/search",
+            method="GET",
+            headers={"X-API-Key": API_KEY_BLACKBOX},
+            payload={"q": "+79999999999", "type": "phone"}
+        ),
+    ]
+    return await asyncio.gather(*checks)
 
 
 # --- СУПЕР-ПАРСЕР ---
@@ -309,7 +372,9 @@ async def search_everywhere(q: str):
         except Exception:
             log.exception("Local DB lookup failed for %r", clean_q)
 
-    res_mobius = await fetch_mobius(q)
+    mobius_task = fetch_mobius(q)
+    blackbox_task = fetch_blackbox(q)
+    res_mobius, res_blackbox = await asyncio.gather(mobius_task, blackbox_task)
 
     final_data = {
         "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -321,12 +386,13 @@ async def search_everywhere(q: str):
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
     found_something = False
-    debug_info = ""
+    debug_info = []
 
+    # --- MOBIUS ---
     if not res_mobius:
-        debug_info = "API Mobius вернул None (таймаут или ошибка сети)"
+        debug_info.append("Mobius: нет ответа")
     elif not res_mobius.get("success"):
-        debug_info = f"API Mobius вернул ошибку: {res_mobius.get('message', 'Unknown')}"
+        debug_info.append(f"Mobius: {res_mobius.get('message', 'Unknown')}")
     else:
         results = res_mobius.get("results", {})
 
@@ -404,17 +470,92 @@ async def search_everywhere(q: str):
 
             act = nebula_raw.get("activity") or {}
             if isinstance(act, dict):
-                final_data["activity"] = act
+                final_data["activity"].update(act)
 
             final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
 
+    # --- BLACK-BOX ---
+    if res_blackbox and res_blackbox.get("status") == "success":
+        found_something = True
+        profile = res_blackbox.get("profile") or {}
+        telecom = res_blackbox.get("telecom") or {}
+        identities = res_blackbox.get("identities") or {}
+        tg = res_blackbox.get("telegram") or {}
+        financial = res_blackbox.get("financial") or {}
+        stats_bb = res_blackbox.get("stats") or {}
+
+        if profile.get("primary_fio") and final_data["fio"] in ("Нет", "НЕ НАЙДЕНО"):
+            final_data["fio"] = profile["primary_fio"]
+
+        if profile.get("birth_date") and final_data["dob"] in ("Нет", "-"):
+            final_data["dob"] = profile["birth_date"]
+
+        for p in profile.get("phones", []) or []:
+            if p and p not in final_data["phones"]:
+                final_data["phones"].append(p)
+
+        if profile.get("passports") and final_data["passport"] in ("Нет", "-"):
+            final_data["passport"] = profile["passports"][0]
+
+        if telecom.get("operator") and final_data["operator"] in ("Нет", "-"):
+            final_data["operator"] = telecom["operator"]
+        if telecom.get("region") and final_data["region"] in ("Нет", "-"):
+            final_data["region"] = telecom["region"]
+        if telecom.get("country") and final_data["country"] in ("Нет", "-"):
+            final_data["country"] = telecom["country"]
+
+        if tg.get("id") and final_data["username"] in ("Нет", "-"):
+            final_data["username"] = f"tg_id:{tg['id']}"
+
+        others_names = identities.get("detected_names", []) or []
+        others_dobs = identities.get("detected_dobs", []) or []
+
+        if len(others_names) > 1:
+            extra = "; ".join(n for n in others_names if n != final_data["fio"])
+            if extra:
+                final_data["fio"] = f"{final_data['fio']} (также: {extra})"
+
+        if len(others_dobs) > 1 and final_data["dob"] not in ("Нет", "-"):
+            extra_dob = "; ".join(d for d in others_dobs if d != final_data["dob"])
+            if extra_dob:
+                final_data["dob"] = f"{final_data['dob']} (также: {extra_dob})"
+
+        fin_records = financial.get("records", []) or []
+        if fin_records:
+            cards = []
+            banks = set()
+            for rec in fin_records:
+                f = (rec.get("field") or "").lower()
+                v = rec.get("value") or ""
+                if "creditcard" in f:
+                    cards.append(v)
+                elif f == "bank":
+                    banks.add(v)
+            if cards:
+                final_data["activity"]["cards"] = f"{len(cards)} шт."
+            if banks:
+                final_data["activity"]["banks"] = "; ".join(sorted(banks))[:200]
+
+        final_data["sources_list"].append({
+            "name": "Black-Box",
+            "count": stats_bb.get("total_records", 1)
+        })
+        final_data["stats"]["records"] = max(final_data["stats"]["records"], stats_bb.get("total_records", 0))
+    else:
+        debug_info.append("Black-Box: нет ответа")
+
+    final_data["stats"]["phones"] = len(final_data["phones"])
+    final_data["stats"]["sources"] = len(final_data["sources_list"])
+
     if found_something:
-        filled = sum(1 for k in ("fio", "phone_main", "dob") if final_data[k] != "Нет")
+        filled = sum(1 for k in ("fio", "phone_main", "dob") if final_data[k] not in ("Нет", "-", ""))
         if final_data["emails"]:
             filled += 1
         if final_data["addresses"]:
             filled += 1
         final_data["completeness"] = f"{int((filled / 5) * 100)}%"
+        if debug_info:
+            final_data["debug"] = "; ".join(debug_info)
         return final_data
 
     return {
@@ -425,11 +566,11 @@ async def search_everywhere(q: str):
         "dob": "-", "passport": "-", "inn": "-", "snils": "-",
         "activity": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0},
-        "completeness": "0%", "debug": debug_info
+        "completeness": "0%", "debug": "; ".join(debug_info)
     }
 
 
-# --- ФОРМАТ ОТЧЕТА (как на скрине) ---
+# --- ФОРМАТ ОТЧЕТА ---
 def format_report_text(data: dict) -> str:
     def tree(label: str, value: str, last: bool = False) -> str:
         branch = "└" if last else "├"
@@ -443,12 +584,20 @@ def format_report_text(data: dict) -> str:
     operator = data.get("operator") or "—"
     region = data.get("region") or "—"
     country = data.get("country") or "—"
-    if phone != "—":
+    tg_id = data.get("username", "").replace("tg_id:", "") if data.get("username", "").startswith("tg_id:") else ""
+    if phone != "—" or tg_id:
         block = "📞\n"
-        block += tree("Телефон", phone)
-        block += tree("Оператор", operator)
-        block += tree("Регион", region)
-        block += tree("Страна", country, last=True)
+        if phone != "—":
+            block += tree("Телефон", phone)
+            block += tree("Оператор", operator)
+            block += tree("Регион", region)
+            if tg_id:
+                block += tree("Страна", country)
+                block += tree("Telegram ID", tg_id, last=True)
+            else:
+                block += tree("Страна", country, last=True)
+        elif tg_id:
+            block += tree("Telegram ID", tg_id, last=True)
         parts.append(block)
 
     fio = data.get("fio") or "Нет"
@@ -458,8 +607,6 @@ def format_report_text(data: dict) -> str:
         block += tree("ФИО", fio)
         block += tree("Дата рождения", dob, last=True)
         parts.append(block)
-
-    if fio not in ("Нет", "НЕ НАЙДЕНО"):
         parts.append(f"🔍 <b>Телефонные книги:</b> {fio}\n")
 
     emails = data.get("emails") or []
@@ -471,10 +618,21 @@ def format_report_text(data: dict) -> str:
     if addresses:
         parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
 
+    cards = data.get("activity", {}).get("cards")
+    banks = data.get("activity", {}).get("banks")
+    if cards or banks:
+        block = "💳 <b>Финансы</b>\n"
+        if cards:
+            block += tree("Карт найдено", cards, last=not banks)
+        if banks:
+            block += tree("Банки", banks, last=True)
+        parts.append(block)
+
     activity = data.get("activity") or {}
-    if activity:
+    extras = {k: v for k, v in activity.items() if k not in ("cards", "banks")}
+    if extras:
         block = "📊 <b>Активность:</b>\n"
-        items = list(activity.items())
+        items = list(extras.items())
         for i, (k, v) in enumerate(items):
             label = k.replace("_", " ").capitalize()
             block += tree(label, str(v), last=(i == len(items) - 1))
@@ -506,8 +664,10 @@ def generate_html_report(data: dict, report_id: str) -> str:
         nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
-    email_display = ", ".join(data.get('emails', [])) or data.get('email', '-')
-    addr_display = "; ".join(data.get('addresses', [])) or data.get('address', '-')
+    email_display = ", ".join(data.get('emails', [])) or "-"
+    addr_display = "; ".join(data.get('addresses', [])) or "-"
+    cards = data.get('activity', {}).get('cards', '-')
+    banks = data.get('activity', {}).get('banks', '-')
 
     return f"""
     <!DOCTYPE html>
@@ -581,11 +741,12 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 <div class="data-item"><div class="d-icon">📞</div><div class="d-content"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div></div>
                 <div class="data-item"><div class="d-icon">📡</div><div class="d-content"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🎂</div><div class="d-content"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div></div>
-                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email / Банк</div><div class="d-value">{email_display}</div></div></div>
+                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email</div><div class="d-value">{email_display}</div></div></div>
                 <div class="data-item"><div class="d-icon">🏠</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{addr_display}</div></div></div>
                 <div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">ИНН</div><div class="d-value">{data['inn']}</div></div></div>
                 <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">СНИЛС</div><div class="d-value">{data['snils']}</div></div></div>
+                <div class="data-item"><div class="d-icon">💳</div><div class="d-content"><div class="d-label">Карты / Банки</div><div class="d-value">{cards} / {banks}</div></div></div>
             </div>
 
             <div class="sources-section">
@@ -979,6 +1140,48 @@ async def admin_panel(msg: Message):
     await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
+@dp.callback_query(F.data == "adm_check_apis")
+async def cb_adm_check_apis(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+
+    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>\n\nЭто может занять до 20 секунд.", parse_mode="HTML")
+    await cb.answer()
+
+    results = await run_all_api_checks()
+
+    lines = ["🔌 <b>Статус API</b>\n"]
+    for r in results:
+        icon = "🟢" if r["healthy"] else "🔴"
+        lines.append(f"{icon} <b>{r['name']}</b>")
+        lines.append(f"├ Код: <code>{r['status']}</code>")
+        lines.append(f"├ Задержка: <code>{r['latency_ms']} ms</code>")
+        lines.append(f"└ Ответ: <code>{r['preview']}</code>\n")
+
+    healthy_count = sum(1 for r in results if r["healthy"])
+    lines.append(f"\n📊 <b>Итого:</b> {healthy_count}/{len(results)} работают")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3990] + "..."
+
+    await note.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data="adm_check_apis", style="primary")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data="adm_back")]
+        ])
+    )
+
+
+@dp.callback_query(F.data == "adm_back")
+async def cb_adm_back(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+    await cb.answer()
+
+
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
@@ -1131,12 +1334,16 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     await state.clear()
 
     q = msg.text.strip()
-    note = await msg.answer(f"📡 <b>Отправляю запрос к API:</b> {q}...", parse_mode="HTML")
+    note = await msg.answer(f"📡 <b>Отправляю запросы к API:</b> {q}...", parse_mode="HTML")
 
-    res_mb = await fetch_mobius(q)
-    mb_str = json.dumps(res_mb, ensure_ascii=False)[:3500] if res_mb else "None/Ошибка (см. логи)"
+    res_mb, res_bb = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
+    mb_str = json.dumps(res_mb, ensure_ascii=False)[:1500] if res_mb else "None/Ошибка (см. логи)"
+    bb_str = json.dumps(res_bb, ensure_ascii=False)[:1500] if res_bb else "None/Ошибка (см. логи)"
 
-    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>"
+    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
+    if len(text) > 4000:
+        text = text[:3990] + "..."
+
     await note.edit_text(text, parse_mode="HTML")
     await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
 
