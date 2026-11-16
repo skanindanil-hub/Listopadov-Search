@@ -26,13 +26,9 @@ WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 DB_FILE = "oasis.db" 
 USERS_DB = "users.db" 
 
-# --- РЕКВИЗИТЫ ---
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
-
-# --- СТИКЕР ---
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
-# --- API КЛЮЧИ ---
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
 API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
@@ -53,7 +49,6 @@ class SearchStates(StatesGroup):
     wait_admin_take = State()
     wait_admin_ban = State()
     wait_admin_broadcast = State()
-    wait_admin_raw = State()
 
 # --- БАЗА ЮЗЕРОВ ---
 def init_users_db():
@@ -155,8 +150,8 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 <i>Отправьте запрос сообщением.</i>"""
 
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
-Вы можете указать любое количество данных: фамилию, имя, отчество, дату или год рождения.
-Все поля необязательны. Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
+Вы можете указать любое количество данных.
+Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
 
 SUPPORT_TEXT = """🆘 <b>Связь с нами</b>
 Пожалуйста, напишите ваше сообщение прямо в чат."""
@@ -170,7 +165,7 @@ MIRROR_TEXT = """🔧 <b>Инструкция по созданию бота:</b
 
 HIDE_DATA_TEXT = """🛡️ <b>Скрытие данных</b>
 
-Скрытие данных позволяет навсегда исключить ваши персональные данные (телефон, паспорт, авто, username и т.д.) из поисковой выдачи бота во всех базах сервиса.
+Скрытие данных позволяет навсегда исключить ваши персональные данные (телефон, паспорт, авто, username и т.д.) из поисковой выдачи бота.
 
 💳 <b>Стоимость скрытия данных: $7 (навсегда)</b>"""
 
@@ -200,7 +195,6 @@ def result_kb(report_id: str):
 
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
@@ -472,22 +466,8 @@ async def run_mirror_bot(token: str, admin_id: int):
         except: pass
         await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
-    @mirror_dp.callback_query(F.data == "search_partial")
-    async def mirror_search_partial(cb: CallbackQuery, state: FSMContext):
-        await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-        await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-        await cb.answer()
-        
-    @mirror_dp.callback_query(F.data == "back_to_start")
-    async def mirror_back(cb: CallbackQuery, state: FSMContext):
-        await state.clear()
-        await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
-        await cb.answer()
-
     @mirror_dp.message(F.text & ~F.text.startswith("/"))
-    async def mirror_process_search(msg: Message, state: FSMContext):
-        current_state = await state.get_state()
-        if current_state is not None: return
+    async def mirror_process_search(msg: Message):
         if msg.from_user.is_bot: return
         
         if not deduct_request(msg.from_user.id):
@@ -580,24 +560,18 @@ async def cb_pay_tonkeeper(cb: CallbackQuery):
         f"⚠️ <b>ОБЯЗАТЕЛЬНО укажите подпись (комментарий / memo) к переводу:</b>\n"
         f"<code>{memo}</code> (или число {cb.from_user.id})\n\n"
         f"📲 Самый удобный способ: нажмите кнопку «📲 Оплатить в 1 клик» ниже — кошелёк Tonkeeper / Telegram Wallet откроется с уже введённой суммой и memo!\n\n"
-        f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки. Вы также можете нажать кнопку «🔄 Проверить оплату» или «🔗 Ввести хеш (TXID)»."
+        f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки."
     )
     
     tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link)],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment")],
-        [InlineKeyboardButton(text="🔗 Ввести хеш (TXID)", callback_data="enter_txid")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
     ])
     
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
-
-@dp.callback_query(F.data.in_({"check_payment", "enter_txid"}))
-async def cb_payment_stub(cb: CallbackQuery):
-    await cb.answer("Функция автопроверки в разработке. Ожидайте или напишите в поддержку.", show_alert=True)
 
 @dp.callback_query(F.data == "buy_requests")
 async def cb_buy_requests(cb: CallbackQuery):
@@ -715,7 +689,7 @@ async def process_mirror_token(msg: Message, state: FSMContext):
     token = msg.text.strip()
     
     if ":" not in token:
-        return await msg.answer("❌ Это не похоже на токен. Скопируй его из BotFather.", reply_markup=main_kb())
+        return await msg.answer("❌ Это не похоже на токен.", reply_markup=main_kb())
         
     try:
         test_bot = Bot(token=token)
@@ -724,7 +698,7 @@ async def process_mirror_token(msg: Message, state: FSMContext):
     except Exception:
         return await msg.answer("❌ Неверный токен.", reply_markup=main_kb())
         
-    await msg.answer("🕵‍♂ <b>Зеркало успешно создано!</b>\n\nБот-клон запускается в фоне. Пожалуйста, подождите...", reply_markup=main_kb())
+    await msg.answer("🕵‍♂ <b>Зеркало успешно создано!</b>", reply_markup=main_kb())
     task = asyncio.create_task(run_mirror_bot(token, msg.from_user.id))
 
 # --- ОБЫЧНЫЙ ПОИСК ---
@@ -735,7 +709,7 @@ async def process_search(msg: Message, state: FSMContext):
     if msg.from_user.is_bot: return
     
     if not deduct_request(msg.from_user.id):
-        return await msg.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.")
+        return await msg.answer("❌ У вас закончились запросы.")
     
     q = msg.text.strip()
     
@@ -792,37 +766,12 @@ async def cb_send_json(cb: CallbackQuery):
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID: return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>\nВыберите действие:", parse_mode="HTML", reply_markup=admin_menu_kb())
-
-@dp.callback_query(F.data == "adm_test_api")
-async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API</b>\n\nВведите запрос (например, номер телефона, ФИО или ник):", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
-    await state.set_state(SearchStates.wait_admin_raw)
-    await cb.answer()
-
-@dp.message(SearchStates.wait_admin_raw)
-async def process_admin_raw(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID: return
-    await state.clear()
-    
-    q = msg.text.strip()
-    note = await msg.answer(f"📡 <b>Отправляю запрос к API:</b> {q}...", parse_mode="HTML")
-    
-    res_bb = await fetch_blackbox(q)
-    res_mb = await fetch_mobius(q)
-    
-    bb_str = json.dumps(res_bb, ensure_ascii=False)[:1500] if res_bb else "None/Ошибка"
-    mb_str = json.dumps(res_mb, ensure_ascii=False)[:1500] if res_mb else "None/Ошибка"
-    
-    text = f"<b>BLACKBOX:</b>\n<pre>{bb_str}</pre>\n\n<b>MOBIUS:</b>\n<pre>{mb_str}</pre>"
-    await note.edit_text(text, parse_mode="HTML")
-    await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
+    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 @dp.callback_query(F.data == "adm_give")
 async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID количество</code> для выдачи:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await cb.message.edit_text("Введите <code>ID количество</code>:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
     await state.set_state(SearchStates.wait_admin_give)
     await cb.answer()
 
@@ -858,7 +807,7 @@ async def process_admin_take(msg: Message, state: FSMContext):
 @dp.callback_query(F.data == "adm_ban")
 async def cb_adm_ban(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID: return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("Введите <code>ID</code> для бана/разбана:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
+    await cb.message.edit_text("Введите <code>ID</code>:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]]))
     await state.set_state(SearchStates.wait_admin_ban)
     await cb.answer()
 
