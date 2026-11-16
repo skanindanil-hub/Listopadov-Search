@@ -29,7 +29,6 @@ USERS_DB = "users.db"
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
-# Оставляем только Nebula
 API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
 API_KEY_NEBULA = "NEBULA-A11ACE72F6559A2E268CE1CBA39AA881"
 
@@ -219,23 +218,23 @@ def country_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
-# --- API ЗАПРОС (ТОЛЬКО NEBULA) ---
+# --- API ЗАПРОС (NEBULA) С ЗАДЕРЖКОЙ 60 СЕК ---
 async def fetch_nebula(q: str):
     headers = {"X-API-Key": API_KEY_NEBULA}
     params = {"query": q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=45)
+    timeout = aiohttp.ClientTimeout(total=60)
     try:
+        await asyncio.sleep(2) 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(API_URL_NEBULA, params=params, headers=headers) as resp:
                 if resp.status == 200: return await resp.json()
     except: pass
     return None
 
-# --- СУПЕР-ПАРСЕР (ПОД NEBULA) ---
+# --- СУПЕР-ПАРСЕР ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     
-    # 1. Поиск в локальной базе (если ТГ)
     is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     if os.path.exists(DB_FILE) and is_tg_query:
         try:
@@ -255,7 +254,6 @@ async def search_everywhere(q: str):
                 }
         except: pass
 
-    # 2. Поиск в Nebula
     res_nebula = await fetch_nebula(q)
     
     final_data = {
@@ -269,7 +267,6 @@ async def search_everywhere(q: str):
         found_something = True
         res_data = res_nebula.get("results", {})
         
-        # Базовые данные
         phone_info = res_data.get("phone_info", {})
         if phone_info.get("phone"): final_data["phone_main"] = phone_info["phone"]
         if phone_info.get("operator"): final_data["operator"] = phone_info["operator"]
@@ -284,7 +281,6 @@ async def search_everywhere(q: str):
         addresses = res_data.get("addresses", [])
         if addresses: final_data["address"] = addresses[0]
 
-        # Разбор базы breaches
         breaches = res_data.get("breaches", [])
         final_data["stats"]["records"] = len(breaches)
         final_data["stats"]["sources"] = len(breaches)
