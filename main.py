@@ -378,6 +378,7 @@ async def search_everywhere(q: str):
                     "emails": [], "addresses": [], "phones": [row[2]] if row[2] else [],
                     "dob": "-", "passport": "-", "inn": "-", "snils": "-",
                     "activity": {},
+                    "tg_info": {},
                     "sources_list": [{"name": "Local DB", "count": 1}],
                     "stats": {"sources": 1, "phones": 1, "records": 1},
                     "completeness": "20%"
@@ -396,6 +397,7 @@ async def search_everywhere(q: str):
         "emails": [], "addresses": [], "phones": [],
         "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
         "activity": {},
+        "tg_info": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
     found_something = False
@@ -517,8 +519,31 @@ async def search_everywhere(q: str):
         if telecom.get("country") and final_data["country"] in ("Нет", "-"):
             final_data["country"] = telecom["country"]
 
-        if tg.get("id") and final_data["username"] in ("Нет", "-"):
-            final_data["username"] = f"tg_id:{tg['id']}"
+        # --- ПАРСИНГ TELEGRAM ---
+        if tg or (is_tg_id or is_tg_username):
+            if tg:
+                final_data["tg_info"] = {
+                    "id": tg.get("id", clean_q if is_tg_id else "-"),
+                    "username": tg.get("username", clean_q if is_tg_username else "-"),
+                    "first_name": tg.get("first_name", "-"),
+                    "last_name": tg.get("last_name", "-"),
+                    "bio": tg.get("bio", "-"),
+                    "phone": tg.get("phone", "-"),
+                    "reg_date": tg.get("registration_date", "-"),
+                }
+                
+                gifts = tg.get("gifts") or {}
+                if gifts:
+                    final_data["tg_info"]["gifts_sent"] = gifts.get("sent", [])
+                    final_data["tg_info"]["gifts_received"] = gifts.get("received", [])
+
+                act = tg.get("activity") or {}
+                if act:
+                    final_data["tg_info"]["activity"] = act
+
+                history = tg.get("history") or []
+                if history:
+                    final_data["tg_info"]["history"] = history
 
         others_names = identities.get("detected_names", []) or []
         others_dobs = identities.get("detected_dobs", []) or []
@@ -578,6 +603,7 @@ async def search_everywhere(q: str):
         "emails": [], "addresses": [], "phones": [],
         "dob": "-", "passport": "-", "inn": "-", "snils": "-",
         "activity": {},
+        "tg_info": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0},
         "completeness": "0%", "debug": "; ".join(debug_info)
     }
@@ -591,36 +617,36 @@ def format_report_text(data: dict) -> str:
 
     parts = []
     q = data.get("query", "—")
-    parts.append(f"🔍 <b>Отчёт по запросу:</b> <code>{q}</code>\n")
+    tg_data = data.get("tg_info") or {}
+    
+    if tg_data:
+        parts.append(f"✈️ <b>Telegram</b> · {tg_data.get('id', '-')}\n\n")
+        parts.append(tree("Юзернейм", f"@{tg_data.get('username', '-')}" if tg_data.get('username') != '-' else '-'))
+        
+        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip()
+        if fio_tg: parts.append(tree("Имя", fio_tg))
+        
+        if tg_data.get('bio') != '-': parts.append(tree("Описание", tg_data.get('bio')))
+        if tg_data.get('reg_date') != '-': parts.append(tree("Регистрация", tg_data.get('reg_date')))
+        if tg_data.get('phone') != '-': parts.append(tree("Телефон", tg_data.get('phone'), last=True))
+        parts.append("\n")
 
     phone = data.get("phone_main") or "—"
     operator = data.get("operator") or "—"
     region = data.get("region") or "—"
-    country = data.get("country") or "—"
-    tg_id = data.get("username", "").replace("tg_id:", "") if data.get("username", "").startswith("tg_id:") else ""
-    if phone != "—" or tg_id:
-        block = "📞\n"
-        if phone != "—":
-            block += tree("Телефон", phone)
-            block += tree("Оператор", operator)
-            block += tree("Регион", region)
-            if tg_id:
-                block += tree("Страна", country)
-                block += tree("Telegram ID", tg_id, last=True)
-            else:
-                block += tree("Страна", country, last=True)
-        elif tg_id:
-            block += tree("Telegram ID", tg_id, last=True)
-        parts.append(block)
+    if phone != "—" and not tg_data:
+        block = "📱 <b>Информация о номере телефона</b>\n"
+        block += tree("Оператор", operator)
+        block += tree("Регион", region, last=True)
+        parts.append(block + "\n")
 
     fio = data.get("fio") or "Нет"
     dob = data.get("dob") or "Нет"
-    if fio not in ("Нет", "НЕ НАЙДЕНО"):
+    if fio not in ("Нет", "НЕ НАЙДЕНО") and not tg_data:
         block = "👤 <b>Основные данные</b>\n"
         block += tree("ФИО", fio)
         block += tree("Дата рождения", dob, last=True)
-        parts.append(block)
-        parts.append(f"🔍 <b>Телефонные книги:</b> {fio}\n")
+        parts.append(block + "\n")
 
     emails = data.get("emails") or []
     if emails:
@@ -630,26 +656,43 @@ def format_report_text(data: dict) -> str:
     addresses = data.get("addresses") or []
     if addresses:
         parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
-
+        
     cards = data.get("activity", {}).get("cards")
-    banks = data.get("activity", {}).get("banks")
-    if cards or banks:
-        block = "💳 <b>Финансы</b>\n"
-        if cards:
-            block += tree("Карт найдено", cards, last=not banks)
-        if banks:
-            block += tree("Банки", banks, last=True)
-        parts.append(block)
+    if cards:
+        parts.append(f"💳 <b>Карты:</b> {cards}\n")
 
-    activity = data.get("activity") or {}
-    extras = {k: v for k, v in activity.items() if k not in ("cards", "banks")}
-    if extras:
-        block = "📊 <b>Активность:</b>\n"
-        items = list(extras.items())
-        for i, (k, v) in enumerate(items):
-            label = k.replace("_", " ").capitalize()
-            block += tree(label, str(v), last=(i == len(items) - 1))
-        parts.append(block)
+    if tg_data:
+        act = tg_data.get('activity', {})
+        if act:
+            parts.append("📊 <b>Активность:</b>\n")
+            for k, v in act.items():
+                parts.append(tree(k.capitalize(), str(v)))
+            parts.append("\n")
+
+        hist = tg_data.get('history', [])
+        if hist:
+            parts.append(f"🕒 <b>История изменений [{len(hist)}]:</b>\n")
+            for item in hist[:10]:
+                parts.append(f"├ {item}\n")
+            if len(hist) > 10:
+                parts.append("└ <i>...и другие</i>\n")
+            parts.append("\n")
+
+        gifts_sent = tg_data.get('gifts_sent', [])
+        if gifts_sent:
+            parts.append(f"⬆️ <b>Кому отправлял(-а) подарки ({len(gifts_sent)}):</b>\n")
+            chunks = [" ".join(gifts_sent[i:i+3]) for i in range(0, len(gifts_sent), 3)]
+            for c in chunks:
+                parts.append(f"<code>{c}</code>\n")
+            parts.append("\n")
+
+        gifts_rec = tg_data.get('gifts_received', [])
+        if gifts_rec:
+            parts.append(f"⬇️ <b>От кого получал(-а) подарки ({len(gifts_rec)}):</b>\n")
+            chunks = [" ".join(gifts_rec[i:i+3]) for i in range(0, len(gifts_rec), 3)]
+            for c in chunks:
+                parts.append(f"<code>{c}</code>\n")
+            parts.append("\n")
 
     if not parts[1:]:
         parts.append("❌ Данные не найдены.\n")
@@ -685,7 +728,10 @@ def generate_html_report(data: dict, report_id: str) -> str:
     add_branch("ИНН", data.get('inn'))
     add_branch("СНИЛС", data.get('snils'))
     add_branch("Карты", data.get('activity', {}).get('cards'))
-    add_branch("Telegram", data.get('username'))
+    
+    tg_data = data.get('tg_info') or {}
+    if tg_data:
+        add_branch("Telegram", f"@{tg_data.get('username', '-')}")
 
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
@@ -708,6 +754,32 @@ def generate_html_report(data: dict, report_id: str) -> str:
     dob = data.get('dob', '-')
     query = data.get('query', '-')
     records_count = data.get('stats', {}).get('records', 0)
+
+    tg_html = ""
+    if tg_data:
+        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip() or "-"
+        tg_html = f"""
+        <div class="data-card">
+            <div class="data-row"><div class="data-label">ID</div><div class="data-value">{tg_data.get('id')}</div></div>
+            <div class="data-row"><div class="data-label">Username</div><div class="data-value">@{tg_data.get('username', '-')}</div></div>
+            <div class="data-row"><div class="data-label">Имя</div><div class="data-value">{fio_tg}</div></div>
+            <div class="data-row"><div class="data-label">Описание</div><div class="data-value">{tg_data.get('bio', '-')}</div></div>
+            <div class="data-row"><div class="data-label">Дата рег.</div><div class="data-value">{tg_data.get('reg_date', '-')}</div></div>
+            <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{tg_data.get('phone', '-')}</div></div>
+        </div>
+        """
+        
+        gifts_sent = tg_data.get('gifts_sent', [])
+        if gifts_sent:
+            ids_str = " • ".join(gifts_sent)
+            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (отправ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
+            
+        gifts_rec = tg_data.get('gifts_received', [])
+        if gifts_rec:
+            ids_str = " • ".join(gifts_rec)
+            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (получ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
+    else:
+        tg_html = '<div class="data-card"><div class="data-row"><div class="data-value">Telegram данные не найдены.</div></div></div>'
 
     return f"""
     <!DOCTYPE html>
@@ -732,15 +804,15 @@ def generate_html_report(data: dict, report_id: str) -> str:
             .nav-item.active {{ background-color: #8b5cf6; color: #fff; }}
             .nav-icon {{ font-size: 18px; opacity: 0.7; }}
 
-            .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow: hidden; background-color: #0f1015; }}
-            .tab-content {{ display: none; height: 100%; flex-direction: column; }}
+            .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow-y: auto; background-color: #0f1015; }}
+            .tab-content {{ display: none; flex-direction: column; }}
             .tab-content.active {{ display: flex; }}
             
             .header-text {{ font-size: 14px; color: #94a3b8; margin-bottom: 15px; }}
             .header-text b {{ color: #fff; }}
             
-            .graph-container {{ flex: 1; background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; position: relative; overflow: hidden; }}
-            #mynetwork {{ width: 100%; height: 100%; }}
+            .graph-container {{ flex: 1; background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; position: relative; overflow: hidden; min-height: 500px; }}
+            #mynetwork {{ width: 100%; height: 100%; position: absolute; }}
 
             .data-card {{ background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
             .data-row {{ display: flex; padding: 12px 0; border-bottom: 1px solid #1f2232; }}
@@ -760,6 +832,9 @@ def generate_html_report(data: dict, report_id: str) -> str:
             </div>
             <div class="nav-item active" onclick="openTab('tab-graph', this)">
                 <span class="nav-icon">🕸️</span> Граф связей
+            </div>
+            <div class="nav-item" onclick="openTab('tab-tg', this)">
+                <span class="nav-icon">✈️</span> Telegram
             </div>
             <div class="nav-item" onclick="openTab('tab-contacts', this)">
                 <span class="nav-icon">📞</span> Контакты
@@ -790,12 +865,18 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 </div>
             </div>
 
+            <div id="tab-tg" class="tab-content">
+                <div class="header-text">Данные профиля Telegram и активность.</div>
+                <div style="max-width: 800px;">
+                    {tg_html}
+                </div>
+            </div>
+
             <div id="tab-contacts" class="tab-content">
                 <div class="header-text">Телефоны, соцсети и электронные адреса.</div>
                 <div class="data-card" style="max-width: 800px;">
                     <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{phone_display}</div></div>
                     <div class="data-row"><div class="data-label">Оператор / Регион</div><div class="data-value">{operator} / {region} ({country})</div></div>
-                    <div class="data-row"><div class="data-label">Telegram ID</div><div class="data-value">{data.get('username', 'Нет')}</div></div>
                     <div class="data-row"><div class="data-label">E-mail</div><div class="data-value">{email_display}</div></div>
                 </div>
             </div>
@@ -835,22 +916,12 @@ def generate_html_report(data: dict, report_id: str) -> str:
             
             var options = {{
                 nodes: {{ 
-                    shape: 'box', 
-                    margin: 10,
-                    widthConstraint: {{ maximum: 150 }},
-                    font: {{ size: 12, face: 'Inter', color: '#fff' }},
-                    borderWidth: 0,
+                    shape: 'box', margin: 10, widthConstraint: {{ maximum: 150 }},
+                    font: {{ size: 12, face: 'Inter', color: '#fff' }}, borderWidth: 0,
                     shadow: {{ enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 }}
                 }},
-                edges: {{ 
-                    color: {{ color: '#334155', highlight: '#8b5cf6' }}, 
-                    width: 1, 
-                    smooth: {{ type: 'continuous' }} 
-                }},
-                physics: {{ 
-                    barnesHut: {{ gravitationalConstant: -4000, centralGravity: 0.3, springLength: 150, springConstant: 0.04 }},
-                    stabilization: {{ iterations: 150 }}
-                }},
+                edges: {{ color: {{ color: '#334155', highlight: '#8b5cf6' }}, width: 1, smooth: {{ type: 'continuous' }} }},
+                physics: {{ barnesHut: {{ gravitationalConstant: -4000, centralGravity: 0.3, springLength: 150, springConstant: 0.04 }}, stabilization: {{ iterations: 150 }} }},
                 interaction: {{ hover: true, dragNodes: true, zoomView: true, dragView: true }}
             }};
             
