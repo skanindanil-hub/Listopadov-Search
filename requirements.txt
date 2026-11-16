@@ -2,6 +2,3 @@ fastapi
 uvicorn
 aiogram
 aiohttp
-matplotlib
-networkx
-jinja2
