@@ -660,13 +660,13 @@ def format_report_text(data: dict) -> str:
 
 # --- HTML (DASHBOARD) ---
 def generate_html_report(data: dict, report_id: str) -> str:
-    nodes = [{"id": 1, "label": f"Цель\n{data['query']}", "color": "#c084fc", "font": {"color": "#ffffff", "size": 16}, "shape": "box", "borderWidth": 0}]
+    nodes = [{"id": 1, "label": f"Цель\n{data.get('query', '—')}", "color": "#c084fc", "font": {"color": "#ffffff", "size": 16}, "shape": "box", "borderWidth": 0}]
     edges = []
     node_id = 2
 
     def add_branch(label, value, color="#4ade80"):
         nonlocal node_id
-        if value and value not in ("Нет", "-", ""):
+        if value and str(value) not in ("Нет", "-", "", "None"):
             nodes.append({"id": node_id, "label": label, "color": color, "font": {"color": "#ffffff"}, "shape": "box", "borderWidth": 0})
             edges.append({"from": 1, "to": node_id, "color": "#334155", "width": 1})
             
@@ -682,11 +682,10 @@ def generate_html_report(data: dict, report_id: str) -> str:
     add_branch("Email", ", ".join(data.get('emails', [])))
     add_branch("Паспорт", data.get('passport'))
     add_branch("Адрес", "; ".join(data.get('addresses', []))[:40])
-    
-    if data.get('inn') != "Нет": add_branch("ИНН", data.get('inn'))
-    if data.get('snils') != "Нет": add_branch("СНИЛС", data.get('snils'))
-    if data.get('activity', {}).get('cards'): add_branch("Карты", data.get('activity', {}).get('cards'))
-    if data.get('username') and data.get('username') != "Нет": add_branch("Telegram", data.get('username'))
+    add_branch("ИНН", data.get('inn'))
+    add_branch("СНИЛС", data.get('snils'))
+    add_branch("Карты", data.get('activity', {}).get('cards'))
+    add_branch("Telegram", data.get('username'))
 
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
@@ -697,10 +696,18 @@ def generate_html_report(data: dict, report_id: str) -> str:
     country = data.get('country', '-')
     email_display = ", ".join(data.get('emails', [])) or "-"
     addr_display = "<br>".join(data.get('addresses', [])) or "-"
-    passport_display = f"Серия: {data.get('passport', '-')[:4] if data.get('passport') != 'Нет' else '-'}<br>Номер: {data.get('passport', '-')[4:] if data.get('passport') != 'Нет' else '-'}"
     
+    passport_raw = data.get('passport', '-')
+    if passport_raw and passport_raw != "Нет" and len(str(passport_raw)) >= 10:
+        passport_display = f"Серия: {str(passport_raw)[:4]}<br>Номер: {str(passport_raw)[4:]}"
+    else:
+        passport_display = passport_raw
+        
     cards = data.get('activity', {}).get('cards', '-')
     banks = data.get('activity', {}).get('banks', '-')
+    dob = data.get('dob', '-')
+    query = data.get('query', '-')
+    records_count = data.get('stats', {}).get('records', 0)
 
     return f"""
     <!DOCTYPE html>
@@ -708,7 +715,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Oasis Digital — Отчет по {data['query']}</title>
+        <title>Oasis Digital — Отчет по {query}</title>
         <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -757,9 +764,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
             <div class="nav-item" onclick="openTab('tab-contacts', this)">
                 <span class="nav-icon">📞</span> Контакты
             </div>
-            <div class="nav-item" onclick="openTab('tab-sources', this)">
-                <span class="nav-icon">🗄️</span> Источники
-            </div>
             <div class="nav-item" onclick="openTab('tab-addresses', this)">
                 <span class="nav-icon">🏠</span> Адреса
             </div>
@@ -770,13 +774,12 @@ def generate_html_report(data: dict, report_id: str) -> str:
 
         <div class="main-content">
             <div id="tab-summary" class="tab-content">
-                <div class="header-text">Быстрый обзор найденных данных по запросу <b>{data['query']}</b>.</div>
+                <div class="header-text">Быстрый обзор найденных данных по запросу <b>{query}</b>.</div>
                 <div class="data-card" style="max-width: 600px;">
-                    <div class="data-row"><div class="data-label">Цель запроса</div><div class="data-value">{data['query']}</div></div>
+                    <div class="data-row"><div class="data-label">Цель запроса</div><div class="data-value">{query}</div></div>
                     <div class="data-row"><div class="data-label">ФИО</div><div class="data-value">{fio_display}</div></div>
-                    <div class="data-row"><div class="data-label">Дата рождения</div><div class="data-value">{data['dob']}</div></div>
-                    <div class="data-row"><div class="data-label">Найдено записей</div><div class="data-value">{data['stats']['records']}</div></div>
-                    <div class="data-row"><div class="data-label">Источников</div><div class="data-value">{data['stats']['sources']}</div></div>
+                    <div class="data-row"><div class="data-label">Дата рождения</div><div class="data-value">{dob}</div></div>
+                    <div class="data-row"><div class="data-label">Найдено записей</div><div class="data-value">{records_count}</div></div>
                 </div>
             </div>
 
@@ -797,13 +800,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 </div>
             </div>
 
-            <div id="tab-sources" class="tab-content">
-                <div class="header-text">Базы данных, в которых найдены совпадения.</div>
-                <div class="data-card" style="max-width: 600px;">
-                    {''.join([f'<div class="data-row"><div class="data-label">Источник</div><div class="data-value">{src["name"]} <span style="color:#8b5cf6">({src["count"]} зап.)</span></div></div>' for src in data.get('sources_list', [])])}
-                </div>
-            </div>
-
             <div id="tab-addresses" class="tab-content">
                 <div class="header-text">Найденные адреса регистрации и проживания.</div>
                 <div class="data-card" style="max-width: 800px;">
@@ -815,8 +811,8 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 <div class="header-text">Паспортные данные, ИНН, СНИЛС и финансовая информация.</div>
                 <div class="data-card" style="max-width: 800px;">
                     <div class="data-row"><div class="data-label">Паспорт</div><div class="data-value">{passport_display}</div></div>
-                    <div class="data-row"><div class="data-label">ИНН</div><div class="data-value">{data['inn']}</div></div>
-                    <div class="data-row"><div class="data-label">СНИЛС</div><div class="data-value">{data['snils']}</div></div>
+                    <div class="data-row"><div class="data-label">ИНН</div><div class="data-value">{data.get('inn', '-')}</div></div>
+                    <div class="data-row"><div class="data-label">СНИЛС</div><div class="data-value">{data.get('snils', '-')}</div></div>
                     <div class="data-row"><div class="data-label">Банковские карты</div><div class="data-value">{cards}</div></div>
                     <div class="data-row"><div class="data-label">Банки</div><div class="data-value">{banks}</div></div>
                 </div>
@@ -914,26 +910,21 @@ async def cmd_start(message: Message, state: FSMContext):
             referrer_id = int(parts[1])
         add_user(message.from_user.id, message.from_user.username, referrer_id)
 
-    # 1. Стикер
     try:
         await message.answer_sticker(STICKER_ID)
     except Exception:
         pass
 
-    # 2. Ждем секунду
     await asyncio.sleep(1)
 
-    # 3. Отправляем текст с закрепом
     intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
     try:
         await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
     except Exception:
         log.exception("Не удалось закрепить сообщение")
 
-    # 4. Ждем еще секунду
     await asyncio.sleep(1)
 
-    # 5. Главное меню
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 
