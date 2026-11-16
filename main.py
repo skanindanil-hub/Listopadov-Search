@@ -313,7 +313,7 @@ async def fetch_blackbox(q: str):
 
 # --- ПРОВЕРКА API ---
 async def check_api_health(name, url, method="GET", headers=None, payload=None):
-    timeout = aiohttp.ClientTimeout(total=20)
+    timeout = aiohttp.ClientTimeout(total=60)
     start = asyncio.get_event_loop().time()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
