@@ -6,7 +6,6 @@ import uuid
 import sqlite3
 import aiohttp
 from datetime import datetime
-from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -231,7 +230,7 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- СУПЕР-ПАРСЕР (NEBULA) ---
+# --- СУПЕР-ПАРСЕР (ПОИСК ЛЮБЫХ ДАННЫХ) ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     
@@ -262,13 +261,9 @@ async def search_everywhere(q: str):
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
     found_something = False
-    debug_info = ""
 
-    if not res_nebula:
-        debug_info = "API вернул None (таймаут или ошибка сети)"
-    elif not res_nebula.get("success"):
-        debug_info = f"API вернул ошибку: {res_nebula.get('message', 'Unknown')}"
-    else:
+    if res_nebula and res_nebula.get("success"):
+        found_something = True
         res_data = res_nebula.get("results", {})
         
         phone_info = res_data.get("phone_info", {})
@@ -289,9 +284,6 @@ async def search_everywhere(q: str):
         final_data["stats"]["records"] = len(breaches)
         final_data["stats"]["sources"] = len(breaches)
         
-        if breaches:
-            found_something = True
-            
         for b in breaches:
             rec = b.get("record", {})
             for k, v in rec.items():
@@ -320,15 +312,9 @@ async def search_everywhere(q: str):
         final_data["completeness"] = f"{int((filled / 5) * 100)}%"
         return final_data
     
-    return {
-        "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-        "operator": "-", "region": "-", "email": "-", "address": "-", "dob": "-", "passport": "-", "inn": "-", "snils": "-", 
-        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}, "completeness": "0%",
-        "debug": debug_info
-    }
+    return None
 
-# --- HTML ---
+# --- ГЕНЕРАЦИЯ ВЕБ-СТРАНИЦЫ (ВНУТРИ КОДА) ---
 def generate_html_report(data: dict, report_id: str) -> str:
     nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
     edges = []
@@ -446,45 +432,19 @@ def generate_html_report(data: dict, report_id: str) -> str:
     </html>
     """
 
-# --- ЗЕРКАЛО ---
-async def run_mirror_bot(token: str, admin_id: int):
-    mirror_bot = Bot(token=token)
-    mirror_dp = Dispatcher(storage=MemoryStorage())
-    
-    @mirror_dp.message(CommandStart())
-    async def mirror_start(message: Message):
-        user = get_user(message.from_user.id)
-        if not user: add_user(message.from_user.id, message.from_user.username)
-        try: await message.answer_sticker(STICKER_ID)
-        except: pass
-        await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+# --- FASTAPI ДЛЯ ВЕБ-ОТЧЕТОВ ---
+web_app = FastAPI()
 
-    @mirror_dp.message(F.text & ~F.text.startswith("/"))
-    async def mirror_process_search(msg: Message):
-        if msg.from_user.is_bot: return
-        
-        if not deduct_request(msg.from_user.id):
-            return await msg.answer("❌ У вас закончились запросы.")
-        
-        q = msg.text.strip()
-        note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
-        data = await search_everywhere(q)
-        
-        if not data or data.get("fio") == "НЕ НАЙДЕНО":
-            debug_msg = data.get("debug", "Данные не найдены в базе Nebula.") if data else "Ошибка"
-            await note.edit_text(f"❌ <b>Данные не найдены.</b>\n\n<i>{debug_msg}</i>", parse_mode="HTML", reply_markup=main_kb())
-            return
+@web_app.get("/report/{report_id}", response_class=HTMLResponse)
+async def web_report(report_id: str):
+    data = REPORTS_CACHE.get(report_id)
+    if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
+    return HTMLResponse(content=generate_html_report(data, report_id))
 
-        report_id = str(uuid.uuid4())[:8]
-        REPORTS_CACHE[report_id] = data
-        await note.edit_text(f"✅ <b>Отчет готов!</b>\nФИО: <b>{data['fio']}</b>\nТел: <b>{data['phone_main']}</b>\n\n<i>Выберите формат отчета:</i>", parse_mode="HTML", reply_markup=result_kb(report_id))
-
-    try:
-        await mirror_dp.start_polling(mirror_bot)
-    except Exception as e:
-        logging.error(f"Ошибка клона: {e}")
-    finally:
-        await mirror_bot.session.close()
+async def run_web():
+    config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 # --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
@@ -708,9 +668,8 @@ async def process_search(msg: Message, state: FSMContext):
     note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto", parse_mode="HTML")
     data = await search_everywhere(q)
     
-    if not data or data.get("fio") == "НЕ НАЙДЕНО":
-        debug_msg = data.get("debug", "Данные не найдены в базе Nebula.") if data else "Ошибка"
-        return await note.edit_text(f"❌ <b>Данные не найдены.</b>\n\n<i>{debug_msg}</i>", parse_mode="HTML", reply_markup=main_kb())
+    if not data:
+        return await note.edit_text(f"❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
 
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
@@ -873,20 +832,6 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     text = f"<b>NEBULA:</b>\n<pre>{nb_str}</pre>"
     await note.edit_text(text, parse_mode="HTML")
     await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
-
-# --- ВЕБ-СЕРВЕР ДЛЯ ОТЧЕТОВ ---
-web_app = FastAPI()
-
-@web_app.get("/report/{report_id}", response_class=HTMLResponse)
-async def web_report(report_id: str):
-    data = REPORTS_CACHE.get(report_id)
-    if not data: return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
-    return HTMLResponse(content=generate_html_report(data, report_id))
-
-async def run_web():
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
 
 async def main():
     print("Бот запускается на Polling...")
