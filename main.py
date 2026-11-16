@@ -29,12 +29,9 @@ USERS_DB = "users.db"
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
-API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
-API_KEY_MOBIUS = "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk"
+# Оставляем только Nebula
 API_URL_NEBULA = "https://nebula.bot.cd/api/v1/search"
 API_KEY_NEBULA = "NEBULA-A11ACE72F6559A2E268CE1CBA39AA881"
-API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
-API_KEY_BLACKBOX = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -222,29 +219,7 @@ def country_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
-# --- API ЗАПРОСЫ ---
-async def fetch_blackbox(q: str):
-    headers = {"X-API-Key": API_KEY_BLACKBOX}
-    params = {"q": q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=45)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(API_URL_BLACKBOX, params=params, headers=headers) as resp:
-                if resp.status == 200: return await resp.json()
-    except: pass
-    return None
-
-async def fetch_mobius(q: str):
-    headers = {"X-API-Key": API_KEY_MOBIUS}
-    payload = {"query": q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=45)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
-                if resp.status == 200: return await resp.json()
-    except: pass
-    return None
-
+# --- API ЗАПРОС (ТОЛЬКО NEBULA) ---
 async def fetch_nebula(q: str):
     headers = {"X-API-Key": API_KEY_NEBULA}
     params = {"query": q, "type": "auto"}
@@ -256,11 +231,12 @@ async def fetch_nebula(q: str):
     except: pass
     return None
 
-# --- СУПЕР-ПАРСЕР ---
+# --- СУПЕР-ПАРСЕР (ПОД NEBULA) ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
-    is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     
+    # 1. Поиск в локальной базе (если ТГ)
+    is_tg_query = (not clean_q.isdigit() and clean_q.isalpha()) or (clean_q.isdigit() and len(clean_q) <= 12)
     if os.path.exists(DB_FILE) and is_tg_query:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -279,8 +255,8 @@ async def search_everywhere(q: str):
                 }
         except: pass
 
-    tasks = [fetch_blackbox(q), fetch_mobius(q), fetch_nebula(q)]
-    results = await asyncio.gather(*tasks)
+    # 2. Поиск в Nebula
+    res_nebula = await fetch_nebula(q)
     
     final_data = {
         "fio": "Нет", "phone_main": q, "username": "Нет", "operator": "Нет", "region": "Нет", 
@@ -289,50 +265,49 @@ async def search_everywhere(q: str):
     }
     found_something = False
 
-    for res in results:
-        if not res or not isinstance(res, dict): continue
+    if res_nebula and res_nebula.get("success"):
+        found_something = True
+        res_data = res_nebula.get("results", {})
+        
+        # Базовые данные
+        phone_info = res_data.get("phone_info", {})
+        if phone_info.get("phone"): final_data["phone_main"] = phone_info["phone"]
+        if phone_info.get("operator"): final_data["operator"] = phone_info["operator"]
+        if phone_info.get("region"): final_data["region"] = phone_info["region"]
+        
+        names = res_data.get("names", [])
+        if names: final_data["fio"] = names[0]
+        
+        emails = res_data.get("emails", [])
+        if emails: final_data["email"] = emails[0]
+        
+        addresses = res_data.get("addresses", [])
+        if addresses: final_data["address"] = addresses[0]
 
-        if "profile" in res and res.get("status") == "success":
-            found_something = True
-            prof = res.get("profile", {})
-            tel = res.get("telecom", {})
-            locs = res.get("locations", [])
-            fin = res.get("financial", {})
-            
-            if prof.get("primary_fio"): final_data["fio"] = prof["primary_fio"]
-            if prof.get("birth_date"): final_data["dob"] = prof["birth_date"]
-            if prof.get("passports") and isinstance(prof["passports"], list): final_data["passport"] = prof["passports"][0]
-            if prof.get("inn"): final_data["inn"] = prof["inn"]
-            if prof.get("snils"): final_data["snils"] = prof["snils"]
-            
-            if tel.get("query_phone"): final_data["phone_main"] = tel["query_phone"]
-            if tel.get("operator"): final_data["operator"] = tel["operator"]
-            if tel.get("region"): final_data["region"] = tel["region"]
-            
-            if locs: final_data["address"] = locs[0].get("address", "Нет")
-            if fin.get("records"): final_data["email"] = str(fin["records"])
-                
-            final_data["stats"]["sources"] += res.get("stats", {}).get("sources_count", 1)
-            final_data["stats"]["phones"] += len(prof.get("phones", []))
-            final_data["stats"]["records"] += res.get("stats", {}).get("total_records", 1)
-            
-            final_data["sources_list"].append({"name": "BlackBox", "count": res.get("stats", {}).get("sources_count", 1)})
+        # Разбор базы breaches
+        breaches = res_data.get("breaches", [])
+        final_data["stats"]["records"] = len(breaches)
+        final_data["stats"]["sources"] = len(breaches)
+        
+        for b in breaches:
+            rec = b.get("record", {})
+            for k, v in rec.items():
+                k_low = k.lower()
+                val_str = str(v)
+                if not val_str: continue
 
-        elif res.get("success") and "results" in res:
-            found_something = True
-            for key, val in res["results"].items():
-                if isinstance(val, dict) and "result" in val and isinstance(val["result"], dict):
-                    inner_data = val["result"].get("data", {}).get("results", {})
-                    if inner_data:
-                        if inner_data.get("names") and final_data["fio"] == "Нет": final_data["fio"] = inner_data["names"][0]
-                        if inner_data.get("emails") and final_data["email"] == "Нет": final_data["email"] = inner_data["emails"][0]
-                        if inner_data.get("addresses") and final_data["address"] == "Нет": final_data["address"] = inner_data["addresses"][0]
-                        if inner_data.get("phone_info") and final_data["operator"] == "Нет":
-                            final_data["operator"] = inner_data["phone_info"].get("operator", "Нет")
-                            final_data["region"] = inner_data["phone_info"].get("region", "Нет")
-                            
-            final_data["stats"]["sources"] += 1
-            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": res.get("results_count", 1)})
+                if "паспорт" in k_low and "серия" not in k_low and final_data["passport"] == "Нет":
+                    final_data["passport"] = val_str
+                elif "снилс" in k_low and final_data["snils"] == "Нет":
+                    final_data["snils"] = val_str
+                elif "инн" in k_low and final_data["inn"] == "Нет":
+                    final_data["inn"] = val_str
+                elif ("дата рождения" in k_low or k_low == "др") and final_data["dob"] == "Нет":
+                    final_data["dob"] = val_str
+                elif "почта" in k_low or "email" in k_low:
+                    if final_data["email"] == "Нет": final_data["email"] = val_str
+
+        final_data["sources_list"].append({"name": "Nebula (OSINT)", "count": len(breaches)})
 
     filled = sum(1 for k in ["fio", "phone_main", "email", "address", "dob"] if final_data[k] != "Нет")
     final_data["completeness"] = f"{int((filled / 5) * 100)}%"
@@ -885,13 +860,11 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     q = msg.text.strip()
     note = await msg.answer(f"📡 <b>Отправляю запрос к API:</b> {q}...", parse_mode="HTML")
     
-    res_bb = await fetch_blackbox(q)
-    res_mb = await fetch_mobius(q)
+    res_nb = await fetch_nebula(q)
     
-    bb_str = json.dumps(res_bb, ensure_ascii=False)[:1500] if res_bb else "None/Ошибка"
-    mb_str = json.dumps(res_mb, ensure_ascii=False)[:1500] if res_mb else "None/Ошибка"
+    nb_str = json.dumps(res_nb, ensure_ascii=False)[:3500] if res_nb else "None/Ошибка"
     
-    text = f"<b>BLACKBOX:</b>\n<pre>{bb_str}</pre>\n\n<b>MOBIUS:</b>\n<pre>{mb_str}</pre>"
+    text = f"<b>NEBULA:</b>\n<pre>{nb_str}</pre>"
     await note.edit_text(text, parse_mode="HTML")
     await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
 
