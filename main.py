@@ -313,7 +313,7 @@ async def fetch_blackbox(q: str):
 
 # --- ПРОВЕРКА API ---
 async def check_api_health(name, url, method="GET", headers=None, payload=None):
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=90)
     start = asyncio.get_event_loop().time()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -522,14 +522,18 @@ async def search_everywhere(q: str):
         # --- ПАРСИНГ TELEGRAM ---
         if tg or (is_tg_id or is_tg_username):
             if tg:
+                tg_username = tg.get("username") or tg.get("login") or clean_q
+                tg_first = tg.get("first_name") or tg.get("name") or "-"
+                tg_last = tg.get("last_name") or ""
+                
                 final_data["tg_info"] = {
-                    "id": tg.get("id", clean_q if is_tg_id else "-"),
-                    "username": tg.get("username", clean_q if is_tg_username else "-"),
-                    "first_name": tg.get("first_name", "-"),
-                    "last_name": tg.get("last_name", "-"),
-                    "bio": tg.get("bio", "-"),
-                    "phone": tg.get("phone", "-"),
-                    "reg_date": tg.get("registration_date", "-"),
+                    "id": tg.get("id") or tg.get("user_id") or (clean_q if is_tg_id else "-"),
+                    "username": tg_username,
+                    "first_name": tg_first,
+                    "last_name": tg_last,
+                    "bio": tg.get("bio") or tg.get("description") or "-",
+                    "phone": tg.get("phone") or "-",
+                    "reg_date": tg.get("registration_date") or tg.get("reg_date") or "-",
                 }
                 
                 gifts = tg.get("gifts") or {}
@@ -541,22 +545,15 @@ async def search_everywhere(q: str):
                 if act:
                     final_data["tg_info"]["activity"] = act
 
-                history = tg.get("history") or []
+                history = tg.get("history") or tg.get("changes") or []
                 if history:
                     final_data["tg_info"]["history"] = history
 
         others_names = identities.get("detected_names", []) or []
-        others_dobs = identities.get("detected_dobs", []) or []
-
         if len(others_names) > 1:
             extra = "; ".join(n for n in others_names if n != final_data["fio"])
             if extra:
                 final_data["fio"] = f"{final_data['fio']} (также: {extra})"
-
-        if len(others_dobs) > 1 and final_data["dob"] not in ("Нет", "-"):
-            extra_dob = "; ".join(d for d in others_dobs if d != final_data["dob"])
-            if extra_dob:
-                final_data["dob"] = f"{final_data['dob']} (также: {extra_dob})"
 
         fin_records = financial.get("records", []) or []
         if fin_records:
@@ -743,9 +740,9 @@ def generate_html_report(data: dict, report_id: str) -> str:
     email_display = ", ".join(data.get('emails', [])) or "-"
     addr_display = "<br>".join(data.get('addresses', [])) or "-"
     
-    passport_raw = data.get('passport', '-')
-    if passport_raw and passport_raw != "Нет" and len(str(passport_raw)) >= 10:
-        passport_display = f"Серия: {str(passport_raw)[:4]}<br>Номер: {str(passport_raw)[4:]}"
+    passport_raw = str(data.get('passport', '-'))
+    if passport_raw and passport_raw != "Нет" and len(passport_raw) >= 10:
+        passport_display = f"Серия: {passport_raw[:4]}<br>Номер: {passport_raw[4:]}"
     else:
         passport_display = passport_raw
         
@@ -1334,7 +1331,7 @@ async def cb_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
 
-    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>\n\nЭто может занять до 20 секунд.", parse_mode="HTML")
+    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>\n\nЭто может занять до 90 секунд.", parse_mode="HTML")
     await cb.answer()
 
     results = await run_all_api_checks()
