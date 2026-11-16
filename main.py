@@ -353,7 +353,7 @@ async def run_all_api_checks():
             f"{API_URL_BLACKBOX}/v1.1/search",
             method="GET",
             headers={"X-API-Key": API_KEY_BLACKBOX},
-            payload={"q": "+79999999999", "type": "phone"}
+            payload={"q": "+79825207224", "type": "phone"}
         ),
     ]
     return await asyncio.gather(*checks)
@@ -1287,7 +1287,6 @@ async def process_mirror_token(msg: Message, state: FSMContext):
             "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
             (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
         )
-        # Если зеркало уже было, обновляем токен
         cursor.execute(
             "UPDATE mirrors SET bot_token = ? WHERE bot_username = ?",
             (token, bot_info.username)
