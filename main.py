@@ -127,12 +127,9 @@ def calculate_days(joined_str):
         days = delta.days
         months = days // 30
         rem_days = days % 30
-        if months > 0:
-            return f"{months} мес. {rem_days} дн."
-        else:
-            return f"{rem_days} дн."
-    except:
-        return "0 дн."
+        if months > 0: return f"{months} мес. {rem_days} дн."
+        return f"{rem_days} дн."
+    except: return "0 дн."
 
 # --- ТЕКСТЫ ---
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
@@ -158,21 +155,18 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 <i>Отправьте запрос сообщением.</i>"""
 
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
-Вы можете указать любое количество данных: фамилию, имя, отчество, дату или год рождения, возраст, место рождения и т.д.
-Достаточно заполнить то, что у вас есть — все поля необязательны.
-Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
+Вы можете указать любое количество данных: фамилию, имя, отчество, дату или год рождения.
+Все поля необязательны. Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
 
 SUPPORT_TEXT = """🆘 <b>Связь с нами</b>
 Пожалуйста, напишите ваше сообщение прямо в чат."""
 
 MIRROR_TEXT = """🔧 <b>Инструкция по созданию бота:</b>
-1. Перейди в Telegram-бота 👉 @BotFather
-2. Нажми кнопку «Start» или напиши команду /start
-3. Отправь команду: /newbot
-4. Введи любое имя для своего бота
-5. Придумай уникальный username для бота, который должен оканчиваться на Bot
-6. @BotFather пришлёт тебе сообщение с API Token
-Скопируй этот токен и отправь его сюда — и всё готово!"""
+1. Перейди в @BotFather
+2. Нажми «Start» или напиши /newbot
+3. Введи имя для бота
+4. Придумай username, оканчивающийся на Bot
+5. Скопируй API Token и отправь его сюда."""
 
 HIDE_DATA_TEXT = """🛡️ <b>Скрытие данных</b>
 
@@ -492,7 +486,10 @@ async def run_mirror_bot(token: str, admin_id: int):
 
     @mirror_dp.message(F.text & ~F.text.startswith("/"))
     async def mirror_process_search(msg: Message, state: FSMContext):
+        current_state = await state.get_state()
+        if current_state is not None: return
         if msg.from_user.is_bot: return
+        
         if not deduct_request(msg.from_user.id):
             return await msg.answer("❌ У вас закончились запросы.")
         
@@ -586,8 +583,6 @@ async def cb_pay_tonkeeper(cb: CallbackQuery):
         f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки. Вы также можете нажать кнопку «🔄 Проверить оплату» или «🔗 Ввести хеш (TXID)»."
     )
     
-    # Ссылка для Tonkeeper (ton://transfer/адрес?amount=нанотоны&text=memo)
-    # 13.04 TON = 13040000000 нанотонов
     tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -735,6 +730,8 @@ async def process_mirror_token(msg: Message, state: FSMContext):
 # --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None: return
     if msg.from_user.is_bot: return
     
     if not deduct_request(msg.from_user.id):
