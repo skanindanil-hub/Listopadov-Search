@@ -192,6 +192,8 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 
 <i>Отправьте запрос сообщением.</i>"""
 
+INTRO_TEXT = '<a href="https://oasissearchcom.localhost.cc">Oasis Digital</a> - это отличный инструмент для поиска информации по открытым источникам.'
+
 PARTIAL_TEXT = """📄 <b>Поиск по неполным данным</b>
 Вы можете указать любое количество данных.
 Нажмите на поле и введите значение. Когда всё готово — нажмите «Поиск»."""
@@ -375,6 +377,7 @@ async def search_everywhere(q: str):
                     "operator": "-", "region": "-", "country": "-",
                     "emails": [], "addresses": [], "phones": [row[2]] if row[2] else [],
                     "dob": "-", "passport": "-", "inn": "-", "snils": "-",
+                    "activity": {},
                     "sources_list": [{"name": "Local DB", "count": 1}],
                     "stats": {"sources": 1, "phones": 1, "records": 1},
                     "completeness": "20%"
@@ -655,27 +658,47 @@ def format_report_text(data: dict) -> str:
     return "".join(parts) + footer
 
 
-# --- HTML ---
+# --- HTML (DASHBOARD) ---
 def generate_html_report(data: dict, report_id: str) -> str:
-    nodes = [{"id": 1, "label": f"Цель: {data['query']}", "color": "#38bdf8", "font": {"color": "white"}}]
+    nodes = [{"id": 1, "label": f"Цель\n{data['query']}", "color": "#c084fc", "font": {"color": "#ffffff", "size": 16}, "shape": "box", "borderWidth": 0}]
     edges = []
     node_id = 2
-    if data.get('fio') and data['fio'] != "Нет":
-        nodes.append({"id": node_id, "label": "ФИО", "color": "#4ade80"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('phone_main') and data['phone_main'] != "Нет":
-        nodes.append({"id": node_id, "label": "Тел", "color": "#38bdf8"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('operator') and data['operator'] != "Нет":
-        nodes.append({"id": node_id, "label": "Оператор", "color": "#facc15"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('emails'):
-        nodes.append({"id": node_id, "label": "Email/Банк", "color": "#a78bfa"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('passport') and data['passport'] != "Нет":
-        nodes.append({"id": node_id, "label": "Паспорт", "color": "#f87171"}); edges.append({"from": 1, "to": node_id}); node_id += 1
-    if data.get('inn') and data['inn'] != "Нет":
-        nodes.append({"id": node_id, "label": "ИНН", "color": "#fbbf24"}); edges.append({"from": 1, "to": node_id}); node_id += 1
+
+    def add_branch(label, value, color="#4ade80"):
+        nonlocal node_id
+        if value and value not in ("Нет", "-", ""):
+            nodes.append({"id": node_id, "label": label, "color": color, "font": {"color": "#ffffff"}, "shape": "box", "borderWidth": 0})
+            edges.append({"from": 1, "to": node_id, "color": "#334155", "width": 1})
+            
+            leaf_id = node_id + 1
+            val_str = str(value)[:30] + "..." if len(str(value)) > 30 else str(value)
+            nodes.append({"id": leaf_id, "label": val_str, "color": "#1e293b", "font": {"color": "#94a3b8"}, "shape": "box", "borderWidth": 0})
+            edges.append({"from": node_id, "to": leaf_id, "color": "#334155", "width": 1})
+            node_id += 2
+
+    add_branch("ФИО", data.get('fio'))
+    add_branch("Тел", data.get('phone_main'))
+    add_branch("Оператор", data.get('operator'))
+    add_branch("Email", ", ".join(data.get('emails', [])))
+    add_branch("Паспорт", data.get('passport'))
+    add_branch("Адрес", "; ".join(data.get('addresses', []))[:40])
+    
+    if data.get('inn') != "Нет": add_branch("ИНН", data.get('inn'))
+    if data.get('snils') != "Нет": add_branch("СНИЛС", data.get('snils'))
+    if data.get('activity', {}).get('cards'): add_branch("Карты", data.get('activity', {}).get('cards'))
+    if data.get('username') and data.get('username') != "Нет": add_branch("Telegram", data.get('username'))
+
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
 
+    fio_display = data.get('fio', 'Нет')
+    phone_display = data.get('phone_main', '-')
+    operator = data.get('operator', '-')
+    region = data.get('region', '-')
+    country = data.get('country', '-')
     email_display = ", ".join(data.get('emails', [])) or "-"
-    addr_display = "; ".join(data.get('addresses', [])) or "-"
+    addr_display = "<br>".join(data.get('addresses', [])) or "-"
+    passport_display = f"Серия: {data.get('passport', '-')[:4] if data.get('passport') != 'Нет' else '-'}<br>Номер: {data.get('passport', '-')[4:] if data.get('passport') != 'Нет' else '-'}"
+    
     cards = data.get('activity', {}).get('cards', '-')
     banks = data.get('activity', {}).get('banks', '-')
 
@@ -685,100 +708,156 @@ def generate_html_report(data: dict, report_id: str) -> str:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Oasis Digital - {data['query']}</title>
+        <title>Oasis Digital — Отчет по {data['query']}</title>
         <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-            body {{ font-family: 'Inter', sans-serif; background-color: #f5f6f8; color: #1a1a1a; margin: 0; padding: 20px; line-height: 1.5; }}
-            .container {{ max-width: 600px; margin: 0 auto; }}
-            .header {{ display: flex; align-items: center; gap: 10px; margin-bottom: 20px; color: #888; font-size: 14px; }}
-            .header-logo {{ font-weight: 700; color: #000; font-size: 18px; }}
-            .profile-card {{ display: flex; align-items: center; gap: 20px; background: #fff; border-radius: 16px; padding: 24px; border: 1px solid #e0e0e0; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); }}
-            .avatar {{ width: 70px; height: 70px; border-radius: 50%; background: #333; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 600; flex-shrink: 0; }}
-            .profile-info h2 {{ margin: 0 0 5px 0; font-size: 22px; font-weight: 700; text-transform: uppercase; }}
-            .sub-info {{ color: #888; font-size: 14px; }}
-            .badges {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }}
-            .badge {{ background: #fff; border: 1px solid #e0e0e0; padding: 8px 14px; border-radius: 20px; font-size: 14px; color: #333; font-weight: 500; }}
-            .completeness {{ margin-bottom: 25px; }}
-            .c-header {{ display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; color: #555; }}
-            .c-bar {{ height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; }}
-            .c-fill {{ height: 100%; background: #333; border-radius: 4px; width: {data['completeness']}; }}
-            .graph-section {{ height: 400px; background: #0f172a; border-radius: 12px; margin: 20px 0; border: 1px solid #334155; }}
-            .data-section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 16px; margin-bottom: 15px; padding: 10px 20px; }}
-            .data-item {{ display: flex; align-items: center; gap: 15px; padding: 15px 0; border-bottom: 1px solid #f0f0f0; }}
-            .data-item:last-child {{ border-bottom: none; }}
-            .d-icon {{ font-size: 20px; color: #888; width: 30px; text-align: center; }}
-            .d-content {{ flex: 1; }}
-            .d-label {{ font-size: 11px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 4px; }}
-            .d-value {{ font-size: 16px; font-weight: 500; color: #000; word-break: break-word; }}
-            .sources-section {{ margin-top: 30px; }}
-            .sources-section h3 {{ font-size: 13px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 15px; }}
-            .source-item {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; }}
-            .source-item:last-child {{ border-bottom: none; }}
-            .source-count {{ color: #888; }}
-            .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }}
+            
+            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+            body {{ font-family: 'Inter', sans-serif; background-color: #0f1015; color: #e2e8f0; height: 100vh; display: flex; overflow: hidden; }}
+            
+            .sidebar {{ width: 260px; background-color: #0b0c10; border-right: 1px solid #1f2232; display: flex; flex-direction: column; padding: 20px 10px; flex-shrink: 0; }}
+            .brand {{ padding: 0 10px 20px 10px; font-size: 18px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1f2232; margin-bottom: 15px; }}
+            .brand-icon {{ background: #fff; color: #000; border-radius: 4px; padding: 2px 6px; font-size: 14px; }}
+            
+            .nav-item {{ padding: 12px 15px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 10px; color: #94a3b8; font-size: 14px; font-weight: 500; transition: 0.2s; margin-bottom: 4px; }}
+            .nav-item:hover {{ background-color: #1a1c29; color: #fff; }}
+            .nav-item.active {{ background-color: #8b5cf6; color: #fff; }}
+            .nav-icon {{ font-size: 18px; opacity: 0.7; }}
+
+            .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow: hidden; background-color: #0f1015; }}
+            .tab-content {{ display: none; height: 100%; flex-direction: column; }}
+            .tab-content.active {{ display: flex; }}
+            
+            .header-text {{ font-size: 14px; color: #94a3b8; margin-bottom: 15px; }}
+            .header-text b {{ color: #fff; }}
+            
+            .graph-container {{ flex: 1; background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; position: relative; overflow: hidden; }}
+            #mynetwork {{ width: 100%; height: 100%; }}
+
+            .data-card {{ background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
+            .data-row {{ display: flex; padding: 12px 0; border-bottom: 1px solid #1f2232; }}
+            .data-row:last-child {{ border-bottom: none; }}
+            .data-label {{ width: 160px; font-size: 13px; color: #94a3b8; flex-shrink: 0; }}
+            .data-value {{ font-size: 14px; color: #fff; word-break: break-word; line-height: 1.5; }}
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="header">
-                <div class="header-logo">OASIS DIGITAL</div>
-                <div>/ Report</div>
+        <div class="sidebar">
+            <div class="brand">
+                <span class="brand-icon">O</span> Oasis Report
             </div>
+            
+            <div class="nav-item" onclick="openTab('tab-summary', this)">
+                <span class="nav-icon">📋</span> Краткая сводка
+            </div>
+            <div class="nav-item active" onclick="openTab('tab-graph', this)">
+                <span class="nav-icon">🕸️</span> Граф связей
+            </div>
+            <div class="nav-item" onclick="openTab('tab-contacts', this)">
+                <span class="nav-icon">📞</span> Контакты
+            </div>
+            <div class="nav-item" onclick="openTab('tab-sources', this)">
+                <span class="nav-icon">🗄️</span> Источники
+            </div>
+            <div class="nav-item" onclick="openTab('tab-addresses', this)">
+                <span class="nav-icon">🏠</span> Адреса
+            </div>
+            <div class="nav-item" onclick="openTab('tab-docs', this)">
+                <span class="nav-icon">📄</span> Документы
+            </div>
+        </div>
 
-            <div class="profile-card">
-                <div class="avatar">{data['fio'][:2] if data['fio'] != 'Нет' else '??'}</div>
-                <div class="profile-info">
-                    <h2>{data['fio']}</h2>
-                    <div class="sub-info">{data['query']} • {data['date']}</div>
+        <div class="main-content">
+            <div id="tab-summary" class="tab-content">
+                <div class="header-text">Быстрый обзор найденных данных по запросу <b>{data['query']}</b>.</div>
+                <div class="data-card" style="max-width: 600px;">
+                    <div class="data-row"><div class="data-label">Цель запроса</div><div class="data-value">{data['query']}</div></div>
+                    <div class="data-row"><div class="data-label">ФИО</div><div class="data-value">{fio_display}</div></div>
+                    <div class="data-row"><div class="data-label">Дата рождения</div><div class="data-value">{data['dob']}</div></div>
+                    <div class="data-row"><div class="data-label">Найдено записей</div><div class="data-value">{data['stats']['records']}</div></div>
+                    <div class="data-row"><div class="data-label">Источников</div><div class="data-value">{data['stats']['sources']}</div></div>
                 </div>
             </div>
 
-            <div class="badges">
-                <div class="badge">{data['stats']['sources']} источников</div>
-                <div class="badge">{data['stats']['phones']} телефонов</div>
-                <div class="badge">{data['stats']['records']} записей</div>
+            <div id="tab-graph" class="tab-content active">
+                <div class="header-text">Интерактивный граф. Узлы можно свободно перетаскивать по горизонтали и вертикали. Масштабирование — колесиком мыши.</div>
+                <div class="graph-container">
+                    <div id="mynetwork"></div>
+                </div>
             </div>
 
-            <div class="completeness">
-                <div class="c-header"><span>Полнота профиля</span><span>{data['completeness']}</span></div>
-                <div class="c-bar"><div class="c-fill"></div></div>
+            <div id="tab-contacts" class="tab-content">
+                <div class="header-text">Телефоны, соцсети и электронные адреса.</div>
+                <div class="data-card" style="max-width: 800px;">
+                    <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{phone_display}</div></div>
+                    <div class="data-row"><div class="data-label">Оператор / Регион</div><div class="data-value">{operator} / {region} ({country})</div></div>
+                    <div class="data-row"><div class="data-label">Telegram ID</div><div class="data-value">{data.get('username', 'Нет')}</div></div>
+                    <div class="data-row"><div class="data-label">E-mail</div><div class="data-value">{email_display}</div></div>
+                </div>
             </div>
 
-            <div id="mynetwork" class="graph-section"></div>
-
-            <div class="data-section">
-                <div class="data-item"><div class="d-icon">📞</div><div class="d-content"><div class="d-label">Телефон</div><div class="d-value">{data['phone_main']}</div></div></div>
-                <div class="data-item"><div class="d-icon">📡</div><div class="d-content"><div class="d-label">Оператор / Регион</div><div class="d-value">{data['operator']} / {data['region']}</div></div></div>
-                <div class="data-item"><div class="d-icon">🎂</div><div class="d-content"><div class="d-label">Дата рождения</div><div class="d-value">{data['dob']}</div></div></div>
-                <div class="data-item"><div class="d-icon">📧</div><div class="d-content"><div class="d-label">Email</div><div class="d-value">{email_display}</div></div></div>
-                <div class="data-item"><div class="d-icon">🏠</div><div class="d-content"><div class="d-label">Адрес</div><div class="d-value">{addr_display}</div></div></div>
-                <div class="data-item"><div class="d-icon">📄</div><div class="d-content"><div class="d-label">Паспорт</div><div class="d-value">{data['passport']}</div></div></div>
-                <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">ИНН</div><div class="d-value">{data['inn']}</div></div></div>
-                <div class="data-item"><div class="d-icon">🆔</div><div class="d-content"><div class="d-label">СНИЛС</div><div class="d-value">{data['snils']}</div></div></div>
-                <div class="data-item"><div class="d-icon">💳</div><div class="d-content"><div class="d-label">Карты / Банки</div><div class="d-value">{cards} / {banks}</div></div></div>
+            <div id="tab-sources" class="tab-content">
+                <div class="header-text">Базы данных, в которых найдены совпадения.</div>
+                <div class="data-card" style="max-width: 600px;">
+                    {''.join([f'<div class="data-row"><div class="data-label">Источник</div><div class="data-value">{src["name"]} <span style="color:#8b5cf6">({src["count"]} зап.)</span></div></div>' for src in data.get('sources_list', [])])}
+                </div>
             </div>
 
-            <div class="sources-section">
-                <h3>Источники</h3>
-                {''.join([f'<div class="source-item"><span>{src["name"]}</span><span class="source-count">{src["count"]}</span></div>' for src in data.get('sources_list', [])])}
+            <div id="tab-addresses" class="tab-content">
+                <div class="header-text">Найденные адреса регистрации и проживания.</div>
+                <div class="data-card" style="max-width: 800px;">
+                    <div class="data-row"><div class="data-label">Адреса</div><div class="data-value">{addr_display}</div></div>
+                </div>
             </div>
 
-            <div class="footer">Сгенерировано автоматически • Oasis Digital</div>
+            <div id="tab-docs" class="tab-content">
+                <div class="header-text">Паспортные данные, ИНН, СНИЛС и финансовая информация.</div>
+                <div class="data-card" style="max-width: 800px;">
+                    <div class="data-row"><div class="data-label">Паспорт</div><div class="data-value">{passport_display}</div></div>
+                    <div class="data-row"><div class="data-label">ИНН</div><div class="data-value">{data['inn']}</div></div>
+                    <div class="data-row"><div class="data-label">СНИЛС</div><div class="data-value">{data['snils']}</div></div>
+                    <div class="data-row"><div class="data-label">Банковские карты</div><div class="data-value">{cards}</div></div>
+                    <div class="data-row"><div class="data-label">Банки</div><div class="data-value">{banks}</div></div>
+                </div>
+            </div>
         </div>
 
         <script type="text/javascript">
+            function openTab(tabId, el) {{
+                document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+                document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+                document.getElementById(tabId).classList.add('active');
+                el.classList.add('active');
+            }}
+
             var graphData = {graph_json};
             var nodes = new vis.DataSet(graphData.nodes);
             var edges = new vis.DataSet(graphData.edges);
             var container = document.getElementById('mynetwork');
             var data = {{ nodes: nodes, edges: edges }};
+            
             var options = {{
-                nodes: {{ shape: 'dot', size: 20, font: {{ size: 14, color: '#ffffff' }}, borderWidth: 2 }},
-                edges: {{ color: '#475569', width: 2, smooth: {{ type: 'continuous' }} }},
-                physics: {{ barnesHut: {{ gravitationalConstant: -3000, centralGravity: 0.3, springLength: 150 }} }},
-                interaction: {{ hover: true }}
+                nodes: {{ 
+                    shape: 'box', 
+                    margin: 10,
+                    widthConstraint: {{ maximum: 150 }},
+                    font: {{ size: 12, face: 'Inter', color: '#fff' }},
+                    borderWidth: 0,
+                    shadow: {{ enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 }}
+                }},
+                edges: {{ 
+                    color: {{ color: '#334155', highlight: '#8b5cf6' }}, 
+                    width: 1, 
+                    smooth: {{ type: 'continuous' }} 
+                }},
+                physics: {{ 
+                    barnesHut: {{ gravitationalConstant: -4000, centralGravity: 0.3, springLength: 150, springConstant: 0.04 }},
+                    stabilization: {{ iterations: 150 }}
+                }},
+                interaction: {{ hover: true, dragNodes: true, zoomView: true, dragView: true }}
             }};
+            
             var network = new vis.Network(container, data, options);
         </script>
     </body>
@@ -835,11 +914,26 @@ async def cmd_start(message: Message, state: FSMContext):
             referrer_id = int(parts[1])
         add_user(message.from_user.id, message.from_user.username, referrer_id)
 
+    # 1. Стикер
     try:
         await message.answer_sticker(STICKER_ID)
     except Exception:
         pass
 
+    # 2. Ждем секунду
+    await asyncio.sleep(1)
+
+    # 3. Отправляем текст с закрепом
+    intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    try:
+        await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
+    except Exception:
+        log.exception("Не удалось закрепить сообщение")
+
+    # 4. Ждем еще секунду
+    await asyncio.sleep(1)
+
+    # 5. Главное меню
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 
