@@ -72,9 +72,11 @@ class SearchStates(StatesGroup):
     wait_admin_ban = State()
     wait_admin_broadcast = State()
     wait_admin_raw = State()
+    wait_promo_input = State()
+    wait_admin_create_promo = State()
 
 
-# --- БАЗА ЮЗЕРОВ И ЗЕРКАЛ ---
+# --- БАЗА ДАННЫХ И ТАБЛИЦЫ ---
 def init_users_db():
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
@@ -98,6 +100,22 @@ def init_users_db():
             is_active INTEGER DEFAULT 1
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS promos (
+            code TEXT PRIMARY KEY,
+            reward INTEGER,
+            max_uses INTEGER DEFAULT 1,
+            uses_count INTEGER DEFAULT 0,
+            created_by INTEGER
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS promo_activations (
+            user_id INTEGER,
+            code TEXT,
+            PRIMARY KEY (user_id, code)
+        )
+    ''')
     try:
         cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
@@ -108,7 +126,6 @@ def init_users_db():
         pass
     conn.commit()
     conn.close()
-
 
 init_users_db()
 
@@ -241,6 +258,7 @@ def main_kb():
         [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
         [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests", style="primary")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="🎟 Активировать промокод", callback_data="use_promo")],
         [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🤖 Зеркало", callback_data="create_mirror")],
         [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
     ])
@@ -266,8 +284,8 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
         [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis", style="primary")],
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give", style="success"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take", style="danger")],
-        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
-        [InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban"), InlineKeyboardButton(text="🛠 Тех. перерыв", callback_data="adm_maintenance")],
+        [InlineKeyboardButton(text="🎟 Создать чек/промо", callback_data="adm_promo", style="primary")],
+        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
@@ -287,13 +305,6 @@ def partial_search_kb(data: dict):
         [InlineKeyboardButton(text=f"Страна: {country}", callback_data="select_country")],
         [InlineKeyboardButton(text="Очистить", callback_data="clear_fields", style="danger"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search", style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
-
-
-def country_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇷🇺 RU", callback_data="set_country_RU"), InlineKeyboardButton(text="🇺🇦 UA", callback_data="set_country_UA"), InlineKeyboardButton(text="🇰🇿 KZ", callback_data="set_country_KZ"), InlineKeyboardButton(text="🇧🇾 BY", callback_data="set_country_BY")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_partial")]
     ])
 
 
@@ -574,15 +585,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
 web_app = FastAPI()
 web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@web_app.get("/api/mirrors")
-async def get_mirrors():
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT bot_username FROM mirrors WHERE is_active = 1 ORDER BY added_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"mirrors": [row[0] for row in rows]}
-
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
     data = REPORTS_CACHE.get(report_id)
@@ -598,31 +600,14 @@ async def run_web():
 
 # --- ЗЕРКАЛА ---
 async def run_mirror_bot(token: str, bot_username: str):
-    log.info(f"Запуск зеркала @{bot_username}...")
     mirror_bot = Bot(token=token)
     mirror_dp = Dispatcher(storage=MemoryStorage())
-    
     @mirror_dp.message(CommandStart())
     async def mirror_start(message: Message):
-        main_username = (await bot.get_me()).username
-        await message.answer(
-            f"🕵‍♂ <b>Добро пожаловать в зеркало Oasis Digital!</b>\n\nГлавный бот: @{main_username}",
-            parse_mode="HTML"
-        )
-
-    @mirror_dp.message(F.text)
-    async def mirror_echo(message: Message):
-        main_username = (await bot.get_me()).username
-        await message.answer(
-            f"🕵‍♂ <b>Это зеркало Oasis Digital.</b>\n\nПерейдите в главный бот: @{main_username}",
-            parse_mode="HTML"
-        )
-
+        await message.answer(f"Зеркало Oasis Digital. Главный бот: @{(await bot.get_me()).username}")
     try:
         await mirror_bot.delete_webhook(drop_pending_updates=True)
         await mirror_dp.start_polling(mirror_bot)
-    except Exception as e:
-        log.exception(f"Зеркало @{bot_username} упало: {e}")
     finally:
         await mirror_bot.session.close()
 
@@ -633,27 +618,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if is_banned(message.from_user.id):
         return await message.answer("🚫 Вы заблокированы.")
-
-    user = get_user(message.from_user.id)
-    referrer_id = None
-    if not user:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) == 2 and parts[1].isdigit():
-            referrer_id = int(parts[1])
-        add_user(message.from_user.id, message.from_user.username, referrer_id)
-
-    try:
-        await message.answer_sticker(STICKER_ID)
-    except Exception:
-        pass
-
-    await asyncio.sleep(1)
-    intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
-    try:
-        await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
-    except Exception:
-        pass
-    await asyncio.sleep(1)
+    add_user(message.from_user.id, message.from_user.username)
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 
@@ -701,17 +666,12 @@ async def cb_hide_data_menu(cb: CallbackQuery):
 @dp.callback_query(F.data == "pay_tonkeeper")
 async def cb_pay_tonkeeper(cb: CallbackQuery):
     memo = f"Oasis_Digital_{cb.from_user.id}"
-    text = (
-        f"💎 <b>Счёт на оплату через USDT (TON) / TON</b>\n\n"
-        f"📍 <b>Кошелёк TON:</b>\n<code>{TON_WALLET}</code>\n\n"
-        f"⚠️ <b>Memo / Комментарий:</b> <code>{memo}</code>"
-    )
     tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link, style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
     ])
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await cb.message.edit_text(f"💎 <b>Оплата через TON</b>\n\nКошелек: <code>{TON_WALLET}</code>\nMemo: <code>{memo}</code>", parse_mode="HTML", reply_markup=kb)
     await cb.answer()
 
 
@@ -731,67 +691,146 @@ async def cb_support(cb: CallbackQuery, state: FSMContext):
 @dp.message(SearchStates.wait_support_msg)
 async def process_support_msg(msg: Message, state: FSMContext):
     await state.clear()
-    admin_text = f"📩 <b>Поддержка</b>\nОт: {msg.from_user.full_name} (`{msg.from_user.id}`)\n\n{msg.text}"
     try:
-        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
-        await msg.answer("✅ Отправлено администрации.", reply_markup=main_kb())
+        await bot.send_message(MAIN_ADMIN_ID, f"📩 Поддержка от {msg.from_user.full_name} (`{msg.from_user.id}`):\n\n{msg.text}", parse_mode="HTML")
+        await msg.answer("✅ Отправлено.", reply_markup=main_kb())
     except Exception:
-        await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
+        await msg.answer("❌ Ошибка.", reply_markup=main_kb())
 
 
-@dp.callback_query(F.data == "search_partial")
-async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+# --- СИСТЕМА ПРОМОКОДОВ (КЛИЕНТ) ---
+@dp.callback_query(F.data == "use_promo")
+async def cb_use_promo(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(SearchStates.wait_promo_input)
+    await cb.message.edit_text(
+        "🎟 <b>Активация промокода / чека</b>\n\nВведите ваш промокод или код чека сообщением:",
+        parse_mode="HTML",
+        reply_markup=back_kb()
+    )
     await cb.answer()
 
 
-@dp.callback_query(F.data == "ref_link")
-async def cb_ref_link(cb: CallbackQuery):
-    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
-    await cb.message.edit_text(f"🔗 <b>Реферальная ссылка:</b>\n\n<code>{ref_link}</code>", parse_mode="HTML", reply_markup=back_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "create_mirror")
-async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
-    await state.set_state(SearchStates.wait_mirror_token)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_mirror_token)
-async def process_mirror_token(msg: Message, state: FSMContext):
+@dp.message(SearchStates.wait_promo_input)
+async def process_promo_input(msg: Message, state: FSMContext):
     await state.clear()
-    token = msg.text.strip() if msg.text else ""
-    if ":" not in token:
-        return await msg.answer("❌ Неверный формат токена.", reply_markup=main_kb())
+    code = msg.text.strip()
+    user_id = msg.from_user.id
 
-    test_bot = Bot(token=token)
-    try:
-        bot_info = await test_bot.get_me()
-        conn = sqlite3.connect(USERS_DB)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
-            (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
-        )
-        cursor.execute("UPDATE mirrors SET bot_token = ? WHERE bot_username = ?", (token, bot_info.username))
-        conn.commit()
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT reward, max_uses, uses_count FROM promos WHERE code = ?", (code,))
+    promo = cursor.fetchone()
+
+    if not promo:
         conn.close()
-        asyncio.create_task(run_mirror_bot(token, bot_info.username))
-    except Exception:
-        return await msg.answer("❌ Ошибка запуска бота-зеркала.", reply_markup=main_kb())
-    finally:
-        await test_bot.session.close()
+        return await msg.answer("❌ Промокод не найден или не существует.", reply_markup=main_kb())
 
-    await msg.answer(f"🕵‍♂ <b>Зеркало @{bot_info.username} запущено!</b>", parse_mode="HTML", reply_markup=main_kb())
+    reward, max_uses, uses_count = promo
+
+    # Проверяем, активировал ли уже юзер этот чек
+    cursor.execute("SELECT 1 FROM promo_activations WHERE user_id = ? AND code = ?", (user_id, code))
+    if cursor.fetchone():
+        conn.close()
+        return await msg.answer("⚠️ Вы уже активировали этот промокод!", reply_markup=main_kb())
+
+    if uses_count >= max_uses:
+        conn.close()
+        return await msg.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_kb())
+
+    # Начисляем запросы и фиксируем активацию
+    add_requests(user_id, reward)
+    cursor.execute("UPDATE promos SET uses_count = uses_count + 1 WHERE code = ?", (code,))
+    cursor.execute("INSERT INTO promo_activations (user_id, code) VALUES (?, ?)", (user_id, code))
+    conn.commit()
+    conn.close()
+
+    await msg.answer(f"🎉 <b>Успешно!</b> Промокод активирован.\nВам начислено: <b>+{reward} запросов</b> ⚡️", parse_mode="HTML", reply_markup=main_kb())
+
+
+# --- АДМИНКА: СОЗДАНИЕ ЧЕКОВ / ПРОМОКОДОВ ---
+@dp.message(Command("admin"))
+async def admin_panel(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
+    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+
+@dp.callback_query(F.data == "adm_promo")
+async def cb_adm_promo(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "🎟 <b>Создание чека / промокода</b>\n\n"
+        "Отправьте данные в формате:\n<code>КОД НАГРАДА ЛИМИТ_АКТИВАЦИЙ</code>\n\n"
+        "<i>Пример:</i> <code>BONUS100 5 1</code> (код BONUS100, 5 запросов, 1 активация)",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_back")]])
+    )
+    await state.set_state(SearchStates.wait_admin_create_promo)
+    await cb.answer()
+
+
+@dp.message(SearchStates.wait_admin_create_promo)
+async def process_admin_create_promo(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    parts = msg.text.strip().split()
+    if len(parts) < 2:
+        return await msg.answer("❌ Неверный формат. Нужно: <code>КОД НАГРАДА [ЛИМИТ]</code>", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+    code = parts[0]
+    try:
+        reward = int(parts[1])
+        max_uses = int(parts[2]) if len(parts) > 2 else 1
+    except ValueError:
+        return await msg.answer("❌ Награда и лимит должны быть числами.", reply_markup=admin_menu_kb())
+
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, ?, 0, ?)",
+            (code, reward, max_uses, msg.from_user.id)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return await msg.answer("❌ Такой промокод уже существует в базе!", reply_markup=admin_menu_kb())
+    conn.close()
+
+    await msg.answer(
+        f"✅ <b>Чек / промокод создан!</b>\n\n"
+        f"🎟 Код: <code>{code}</code>\n"
+        f"⚡️ Награда: <b>+{reward} запросов</b>\n"
+        f"👥 Лимит активаций: <b>{max_uses}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_menu_kb()
+    )
+
+
+@dp.callback_query(F.data == "adm_check_apis")
+async def cb_adm_check_apis(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    note = await cb.message.edit_text("🔌 Проверяю API...", parse_mode="HTML")
+    results = await run_all_api_checks()
+    healthy = sum(1 for r in results if r["healthy"])
+    await note.edit_text(f"🔌 <b>Статус API:</b> {healthy}/{len(results)} активны", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+
+@dp.callback_query(F.data == "adm_back")
+async def cb_adm_back(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await state.clear()
+    await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+    await cb.answer()
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None or msg.from_user.is_bot:
+    if await state.get_state() is not None or msg.from_user.is_bot:
         return
     if is_banned(msg.from_user.id):
         return await msg.answer("🚫 Вы заблокированы.")
@@ -812,47 +851,6 @@ async def process_search(msg: Message, state: FSMContext):
         await msg.answer(extra, parse_mode="HTML")
     if len(chunks) > 1:
         await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
-
-
-@dp.callback_query(F.data.startswith("get_txt_"))
-async def cb_send_txt(cb: CallbackQuery):
-    report_id = cb.data.replace("get_txt_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}"
-    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
-    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("get_json_"))
-async def cb_send_json(cb: CallbackQuery):
-    report_id = cb.data.replace("get_json_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
-    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
-    await cb.answer()
-
-
-@dp.message(Command("admin"))
-async def admin_panel(msg: Message):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
-
-
-@dp.callback_query(F.data == "adm_check_apis")
-async def cb_adm_check_apis(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>", parse_mode="HTML")
-    results = await run_all_api_checks()
-    healthy_count = sum(1 for r in results if r["healthy"])
-    await note.edit_text(f"🔌 <b>Статус API:</b> {healthy_count}/{len(results)} активны", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 async def main():
