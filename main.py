@@ -74,6 +74,7 @@ class SearchStates(StatesGroup):
     wait_admin_raw = State()
     wait_promo_input = State()
     wait_admin_create_promo = State()
+    wait_admin_create_check = State()
 
 
 # --- БАЗА ДАННЫХ И ТАБЛИЦЫ ---
@@ -284,7 +285,7 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
         [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis", style="primary")],
         [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give", style="success"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take", style="danger")],
-        [InlineKeyboardButton(text="🎟 Создать чек/промо", callback_data="adm_promo", style="primary")],
+        [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="adm_promo"), InlineKeyboardButton(text="💳 Создать чек", callback_data="adm_check", style="primary")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
@@ -364,7 +365,7 @@ async def run_all_api_checks():
     )
 
 
-# --- СУПЕР-ПАРСЕР ---
+# --- СУПЕР-ПАРСЕР (УНИВЕРСАЛЬНЫЙ) ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     is_tg_id = bool(TG_ID_RE.fullmatch(clean_q))
@@ -382,36 +383,50 @@ async def search_everywhere(q: str):
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
 
-    bb_res = res_blackbox
-    if bb_res and (bb_res.get("status") == "success" or "telegram" in bb_res):
-        tg = bb_res.get("telegram") or {}
-        if tg:
-            tg_username = tg.get("username") or clean_q
-            tg_first = tg.get("first_name") or "-"
-            tg_last = tg.get("last_name") or ""
-            
-            final_data["tg_info"] = {
-                "id": str(tg.get("id") or (clean_q if is_tg_id else "-")),
-                "username": tg_username,
-                "first_name": tg_first,
-                "last_name": tg_last,
-                "full_name": tg.get("full_name") or f"{tg_first} {tg_last}".strip(),
-                "bio": tg.get("bio") or "-",
-                "phone": (tg.get("phones")[0] if tg.get("phones") else "-"),
-                "reg_date": tg.get("reg_date") or "-",
-                "reg_age": tg.get("reg_age") or "-",
-                "gifts_total": tg.get("gifts_total", 0),
-                "gifts": tg.get("gifts", []) or [],
-                "sent_gifts": tg.get("sent_gifts", []) or [],
-                "names_history": tg.get("names_history", []) or [],
-                "usernames_history": tg.get("usernames_history", []) or []
-            }
-            final_data["fio"] = final_data["tg_info"]["full_name"]
-            final_data["username"] = tg_username
+    found = False
 
-        stats_bb = bb_res.get("stats") or {}
-        final_data["stats"]["records"] = stats_bb.get("total_records", 1)
-        final_data["sources_list"].append({"name": "Black-Box (Telegram)", "count": final_data["stats"]["records"]})
+    # Универсальное сканирование ответов
+    for resp in [res_blackbox, res_mobius]:
+        if not isinstance(resp, dict):
+            continue
+        
+        # Ищем блок telegram или profile повсюду в ответе
+        tg = resp.get("telegram") or resp.get("profile") or resp.get("result") or resp.get("data") or resp
+        if isinstance(tg, dict):
+            if "telegram" in tg:
+                tg = tg["telegram"]
+
+            tg_id = tg.get("id") or tg.get("user_id") or tg.get("tg_id") or (clean_q if is_tg_id else "")
+            tg_username = tg.get("username") or tg.get("login") or (clean_q if is_tg_username else "")
+            tg_first = tg.get("first_name") or tg.get("name") or ""
+            tg_last = tg.get("last_name") or ""
+            full_name = tg.get("full_name") or f"{tg_first} {tg_last}".strip()
+
+            if tg_id or tg_username or full_name:
+                found = True
+                final_data["tg_info"] = {
+                    "id": str(tg_id or "-"),
+                    "username": tg_username or "-",
+                    "first_name": tg_first or "-",
+                    "last_name": tg_last or "",
+                    "full_name": full_name if full_name else (tg_username or "-"),
+                    "bio": tg.get("bio") or tg.get("description") or "-",
+                    "phone": tg.get("phone") or (tg.get("phones")[0] if isinstance(tg.get("phones"), list) and tg.get("phones") else "-"),
+                    "reg_date": tg.get("reg_date") or tg.get("registration_date") or "-",
+                    "reg_age": tg.get("reg_age") or "-",
+                    "gifts_total": tg.get("gifts_total", len(tg.get("gifts", []))),
+                    "gifts": tg.get("gifts", []) or [],
+                    "sent_gifts": tg.get("sent_gifts", []) or [],
+                    "names_history": tg.get("names_history", []) or [],
+                    "usernames_history": tg.get("usernames_history", []) or []
+                }
+                final_data["fio"] = final_data["tg_info"]["full_name"]
+                final_data["username"] = tg_username
+                break
+
+    if found:
+        final_data["stats"]["records"] = 1
+        final_data["sources_list"].append({"name": "Oasis Deep Engine", "count": 1})
     else:
         final_data["fio"] = "НЕ НАЙДЕНО"
 
@@ -478,7 +493,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             edges.append({"from": node_id, "to": leaf_id, "color": "#334155", "width": 1})
             node_id += 2
 
-    add_branch("ФИО", data.get('fio'))
+    add_branch("ФИО / Название", data.get('fio'))
     tg_data = data.get('tg_info') or {}
     if tg_data:
         add_branch("Telegram", f"@{tg_data.get('username', '-')}")
@@ -727,7 +742,6 @@ async def process_promo_input(msg: Message, state: FSMContext):
 
     reward, max_uses, uses_count = promo
 
-    # Проверяем, активировал ли уже юзер этот чек
     cursor.execute("SELECT 1 FROM promo_activations WHERE user_id = ? AND code = ?", (user_id, code))
     if cursor.fetchone():
         conn.close()
@@ -737,7 +751,6 @@ async def process_promo_input(msg: Message, state: FSMContext):
         conn.close()
         return await msg.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_kb())
 
-    # Начисляем запросы и фиксируем активацию
     add_requests(user_id, reward)
     cursor.execute("UPDATE promos SET uses_count = uses_count + 1 WHERE code = ?", (code,))
     cursor.execute("INSERT INTO promo_activations (user_id, code) VALUES (?, ?)", (user_id, code))
@@ -747,7 +760,7 @@ async def process_promo_input(msg: Message, state: FSMContext):
     await msg.answer(f"🎉 <b>Успешно!</b> Промокод активирован.\nВам начислено: <b>+{reward} запросов</b> ⚡️", parse_mode="HTML", reply_markup=main_kb())
 
 
-# --- АДМИНКА: СОЗДАНИЕ ЧЕКОВ / ПРОМОКОДОВ ---
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
@@ -760,9 +773,7 @@ async def cb_adm_promo(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
     await cb.message.edit_text(
-        "🎟 <b>Создание чека / промокода</b>\n\n"
-        "Отправьте данные в формате:\n<code>КОД НАГРАДА ЛИМИТ_АКТИВАЦИЙ</code>\n\n"
-        "<i>Пример:</i> <code>BONUS100 5 1</code> (код BONUS100, 5 запросов, 1 активация)",
+        "🎟 <b>Создание промокода</b>\n\nОтправьте в формате:\n<code>КОД НАГРАДА ЛИМИТ</code>\n<i>Пример:</i> <code>START2026 5 10</code>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_back")]])
     )
@@ -777,36 +788,75 @@ async def process_admin_create_promo(msg: Message, state: FSMContext):
     await state.clear()
     parts = msg.text.strip().split()
     if len(parts) < 2:
-        return await msg.answer("❌ Неверный формат. Нужно: <code>КОД НАГРАДА [ЛИМИТ]</code>", parse_mode="HTML", reply_markup=admin_menu_kb())
-
-    code = parts[0]
-    try:
-        reward = int(parts[1])
-        max_uses = int(parts[2]) if len(parts) > 2 else 1
-    except ValueError:
-        return await msg.answer("❌ Награда и лимит должны быть числами.", reply_markup=admin_menu_kb())
+        return await msg.answer("❌ Неверный формат.", reply_markup=admin_menu_kb())
+    code, reward = parts[0], int(parts[1])
+    max_uses = int(parts[2]) if len(parts) > 2 else 1
 
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, ?, 0, ?)",
-            (code, reward, max_uses, msg.from_user.id)
-        )
+        cursor.execute("INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, ?, 0, ?)", (code, reward, max_uses, msg.from_user.id))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except Exception:
         conn.close()
-        return await msg.answer("❌ Такой промокод уже существует в базе!", reply_markup=admin_menu_kb())
+        return await msg.answer("❌ Такой код уже есть!", reply_markup=admin_menu_kb())
+    conn.close()
+    await msg.answer(f"✅ Промокод <code>{code}</code> на +{reward} запросов создан!", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+
+@dp.callback_query(F.data == "adm_check")
+async def cb_adm_check(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "💳 <b>Создание чека (одноразового)</b>\n\nОтправьте номинал (количество запросов в чеке):\n<i>Пример:</i> <code>10</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_back")]])
+    )
+    await state.set_state(SearchStates.wait_admin_create_check)
+    await cb.answer()
+
+
+@dp.message(SearchStates.wait_admin_create_check)
+async def process_admin_create_check(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    try:
+        reward = int(msg.text.strip())
+    except ValueError:
+        return await msg.answer("❌ Введите число (количество запросов).", reply_markup=admin_menu_kb())
+
+    # Генерируем уникальный код чека
+    check_code = f"CHECK-{uuid.uuid4().hex[:8].upper()}"
+
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, 1, 0, ?)", (check_code, reward, msg.from_user.id))
+    conn.commit()
     conn.close()
 
     await msg.answer(
-        f"✅ <b>Чек / промокод создан!</b>\n\n"
-        f"🎟 Код: <code>{code}</code>\n"
-        f"⚡️ Награда: <b>+{reward} запросов</b>\n"
-        f"👥 Лимит активаций: <b>{max_uses}</b>",
+        f"✅ <b>Чек успешно создан!</b>\n\n"
+        f"💳 Код чека: <code>{check_code}</code>\n"
+        f"⚡️ Номинал: <b>{reward} запросов</b>\n"
+        f"📌 Лимит активаций: <b>1 раз</b>",
         parse_mode="HTML",
         reply_markup=admin_menu_kb()
     )
+
+
+@dp.callback_query(F.data == "adm_test_api")
+async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    await cb.message.edit_text(
+        "📡 <b>Тест API (Raw)</b>\n\nВведите запрос для проверки (например, юзернейм или телефон):",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="adm_back")]])
+    )
+    await state.set_state(SearchStates.wait_admin_raw)
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "adm_check_apis")
@@ -826,6 +876,24 @@ async def cb_adm_back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
     await cb.answer()
+
+
+@dp.message(SearchStates.wait_admin_raw)
+async def process_admin_raw(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    q = msg.text.strip()
+    note = await msg.answer(f"📡 Запрос к API: <b>{q}</b>...", parse_mode="HTML")
+    
+    res_mb, res_bb = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
+    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:1500] if res_mb else "None / Ошибка"
+    bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1500] if res_bb else "None / Ошибка"
+
+    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
+    if len(text) > 4000:
+        text = text[:3990] + "..."
+    await note.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
