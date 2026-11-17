@@ -30,9 +30,11 @@ USERS_DB = "users.db"
 TON_WALLET = "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
+# Mobius
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_KEY_MOBIUS = os.getenv("MOBIUS_API_KEY", "MOBIUS-IO-IW5w3b4xKEY_dS8Kbt4FJswFEsTR97aGKhSEgfrJFjk")
 
+# Black-Box
 API_URL_BLACKBOX = "https://api.black-box.cc"
 API_KEY_BLACKBOX = os.getenv("BLACKBOX_API_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y")
 
@@ -523,41 +525,35 @@ async def search_everywhere(q: str):
         if telecom.get("country") and final_data["country"] in ("Нет", "-"):
             final_data["country"] = telecom["country"]
 
-        # --- ПАРСИНГ TELEGRAM (новая структура) ---
-        if tg:
-            tg_username = tg.get("username") or "-"
-            tg_first = tg.get("first_name") or ""
-            tg_last = tg.get("last_name") or ""
-            tg_full = tg.get("full_name") or f"{tg_first} {tg_last}".strip() or "-"
-            
-            tg_history = []
-            for h in tg.get("names_history", []):
-                if isinstance(h, dict) and h.get("firstName"):
-                    tg_history.append(h["firstName"])
-            
-            tg_usernames_history = []
-            for h in tg.get("usernames_history", []):
-                if isinstance(h, dict) and h.get("username"):
-                    tg_usernames_history.append(h["username"])
+        # --- ПАРСИНГ TELEGRAM ---
+        if tg or (is_tg_id or is_tg_username):
+            if tg:
+                tg_username = tg.get("username") or tg.get("login") or clean_q
+                tg_first = tg.get("first_name") or tg.get("name") or "-"
+                tg_last = tg.get("last_name") or ""
+                
+                final_data["tg_info"] = {
+                    "id": tg.get("id") or tg.get("user_id") or (clean_q if is_tg_id else "-"),
+                    "username": tg_username,
+                    "first_name": tg_first,
+                    "last_name": tg_last,
+                    "bio": tg.get("bio") or tg.get("description") or "-",
+                    "phone": tg.get("phone") or "-",
+                    "reg_date": tg.get("registration_date") or tg.get("reg_date") or "-",
+                }
+                
+                gifts = tg.get("gifts") or {}
+                if gifts:
+                    final_data["tg_info"]["gifts_sent"] = gifts.get("sent", [])
+                    final_data["tg_info"]["gifts_received"] = gifts.get("received", [])
 
-            final_data["tg_info"] = {
-                "id": tg.get("id") or "-",
-                "username": tg_username,
-                "first_name": tg_first,
-                "last_name": tg_last,
-                "full_name": tg_full,
-                "bio": tg.get("bio") or "-",
-                "reg_date": tg.get("reg_date") or "-",
-                "reg_age": tg.get("reg_age") or "-",
-                "phones": tg.get("phones", []) or [],
-                "current_usernames": tg.get("current_usernames", []) or [],
-                "names_history": tg_history,
-                "usernames_history": tg_usernames_history,
-                "gifts_total": tg.get("gifts_total", 0),
-                "gifts": tg.get("gifts", []) or [],
-                "sent_gifts": tg.get("sent_gifts", []) or [],
-                "in_system": tg.get("in_system"),
-            }
+                act = tg.get("activity") or {}
+                if act:
+                    final_data["tg_info"]["activity"] = act
+
+                history = tg.get("history") or tg.get("changes") or []
+                if history:
+                    final_data["tg_info"]["history"] = history
 
         others_names = identities.get("detected_names", []) or []
         if len(others_names) > 1:
@@ -623,7 +619,7 @@ async def search_everywhere(q: str):
     }
 
 
-# --- ФОРМАТ ОТЧЕТА (новая структура Telegram) ---
+# --- ФОРМАТ ОТЧЕТА ---
 def format_report_text(data: dict) -> str:
     def tree(label: str, value: str, last: bool = False) -> str:
         branch = "└" if last else "├"
@@ -632,50 +628,17 @@ def format_report_text(data: dict) -> str:
     parts = []
     q = data.get("query", "—")
     tg_data = data.get("tg_info") or {}
-
+    
     if tg_data:
-        parts.append("✈️ <b>Telegram</b>\n\n")
-
-        if tg_data.get("id"): parts.append(tree("ID", tg_data.get("id")))
-        if tg_data.get("username"): parts.append(tree("Юзернейм", f"@{tg_data.get('username')}"))
-        if tg_data.get("full_name"): parts.append(tree("Имя", tg_data.get("full_name")))
-
-        if tg_data.get("reg_date") and tg_data["reg_date"] != "-":
-            parts.append(tree("Регистрация", f"{tg_data.get('reg_date')} ({tg_data.get('reg_age', '-')})"))
-
-        phones = tg_data.get("phones") or []
-        if phones:
-            parts.append(tree("Телефон", ", ".join(phones), last=True))
-        else:
-            parts.append(tree("Телефон", "-", last=True))
-        parts.append("\n")
-
-        if tg_data.get("current_usernames"):
-            parts.append(f"🔗 <b>Текущие юзернеймы:</b> {', '.join(tg_data['current_usernames'])}\n")
-
-        if tg_data.get("names_history"):
-            parts.append(f"📝 <b>История имен:</b> {', '.join(tg_data['names_history'])}\n")
-
-        if tg_data.get("usernames_history"):
-            parts.append(f"🕒 <b>История ников:</b> {', '.join(tg_data['usernames_history'])}\n")
-
-        gifts = tg_data.get("gifts") or []
-        if gifts:
-            parts.append(f"\n🎁 <b>Подарки ({len(gifts)}):</b>\n")
-            for g in gifts[:10]:
-                from_user = g.get("from", {}).get("username") or g.get("from", {}).get("id") or "?"
-                stars = g.get("stars", 0)
-                parts.append(f"├ от @{from_user} — {stars} ⭐\n")
-            if len(gifts) > 10:
-                parts.append("└ <i>...и другие</i>\n")
-
-        sent_gifts = tg_data.get("sent_gifts") or []
-        if sent_gifts:
-            parts.append(f"\n📤 <b>Отправленные подарки ({len(sent_gifts)}):</b>\n")
-            chunks = [f"@{g.get('username') or g.get('id')}" for g in sent_gifts[:15]]
-            for i in range(0, len(chunks), 3):
-                parts.append(" • ".join(chunks[i:i+3]) + "\n")
-
+        parts.append(f"✈️ <b>Telegram</b> · {tg_data.get('id', '-')}\n\n")
+        parts.append(tree("Юзернейм", f"@{tg_data.get('username', '-')}" if tg_data.get('username') != '-' else '-'))
+        
+        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip()
+        if fio_tg: parts.append(tree("Имя", fio_tg))
+        
+        if tg_data.get('bio') != '-': parts.append(tree("Описание", tg_data.get('bio')))
+        if tg_data.get('reg_date') != '-': parts.append(tree("Регистрация", tg_data.get('reg_date')))
+        if tg_data.get('phone') != '-': parts.append(tree("Телефон", tg_data.get('phone'), last=True))
         parts.append("\n")
 
     phone = data.get("phone_main") or "—"
@@ -703,10 +666,43 @@ def format_report_text(data: dict) -> str:
     addresses = data.get("addresses") or []
     if addresses:
         parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
-
+        
     cards = data.get("activity", {}).get("cards")
     if cards:
         parts.append(f"💳 <b>Карты:</b> {cards}\n")
+
+    if tg_data:
+        act = tg_data.get('activity', {})
+        if act:
+            parts.append("📊 <b>Активность:</b>\n")
+            for k, v in act.items():
+                parts.append(tree(k.capitalize(), str(v)))
+            parts.append("\n")
+
+        hist = tg_data.get('history', [])
+        if hist:
+            parts.append(f"🕒 <b>История изменений [{len(hist)}]:</b>\n")
+            for item in hist[:10]:
+                parts.append(f"├ {item}\n")
+            if len(hist) > 10:
+                parts.append("└ <i>...и другие</i>\n")
+            parts.append("\n")
+
+        gifts_sent = tg_data.get('gifts_sent', [])
+        if gifts_sent:
+            parts.append(f"⬆️ <b>Кому отправлял(-а) подарки ({len(gifts_sent)}):</b>\n")
+            chunks = [" ".join(gifts_sent[i:i+3]) for i in range(0, len(gifts_sent), 3)]
+            for c in chunks:
+                parts.append(f"<code>{c}</code>\n")
+            parts.append("\n")
+
+        gifts_rec = tg_data.get('gifts_received', [])
+        if gifts_rec:
+            parts.append(f"⬇️ <b>От кого получал(-а) подарки ({len(gifts_rec)}):</b>\n")
+            chunks = [" ".join(gifts_rec[i:i+3]) for i in range(0, len(gifts_rec), 3)]
+            for c in chunks:
+                parts.append(f"<code>{c}</code>\n")
+            parts.append("\n")
 
     if not parts[1:]:
         parts.append("❌ Данные не найдены.\n")
@@ -715,7 +711,7 @@ def format_report_text(data: dict) -> str:
     return "".join(parts) + footer
 
 
-# --- HTML ---
+# --- HTML (DASHBOARD) ---
 def generate_html_report(data: dict, report_id: str) -> str:
     nodes = [{"id": 1, "label": f"Цель\n{data.get('query', '—')}", "color": "#c084fc", "font": {"color": "#ffffff", "size": 16}, "shape": "box", "borderWidth": 0}]
     edges = []
@@ -771,32 +767,27 @@ def generate_html_report(data: dict, report_id: str) -> str:
 
     tg_html = ""
     if tg_data:
-        fio_tg = tg_data.get('full_name') or f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip() or "-"
-        
-        history_names = ", ".join(tg_data.get('names_history', [])) or "-"
-        history_username = ", ".join(tg_data.get('usernames_history', [])) or "-"
-        
+        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip() or "-"
         tg_html = f"""
         <div class="data-card">
             <div class="data-row"><div class="data-label">ID</div><div class="data-value">{tg_data.get('id')}</div></div>
             <div class="data-row"><div class="data-label">Username</div><div class="data-value">@{tg_data.get('username', '-')}</div></div>
             <div class="data-row"><div class="data-label">Имя</div><div class="data-value">{fio_tg}</div></div>
             <div class="data-row"><div class="data-label">Описание</div><div class="data-value">{tg_data.get('bio', '-')}</div></div>
-            <div class="data-row"><div class="data-label">Дата рег.</div><div class="data-value">{tg_data.get('reg_date', '-')} ({tg_data.get('reg_age', '-')})</div></div>
-            <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{', '.join(tg_data.get('phones', [])) or '-'}</div></div>
-            <div class="data-row"><div class="data-label">История имен</div><div class="data-value">{history_names}</div></div>
-            <div class="data-row"><div class="data-label">История ников</div><div class="data-value">{history_username}</div></div>
+            <div class="data-row"><div class="data-label">Дата рег.</div><div class="data-value">{tg_data.get('reg_date', '-')}</div></div>
+            <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{tg_data.get('phone', '-')}</div></div>
         </div>
         """
         
-        gifts = tg_data.get('gifts', [])
-        if gifts:
-            gift_items = ""
-            for g in gifts:
-                from_u = g.get('from', {}).get('username') or g.get('from', {}).get('id') or "?"
-                gift_items += f"<div style='font-size:12px; color:#94a3b8; margin-bottom:4px;'>{from_u} — {g.get('stars', 0)}⭐</div>"
-            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label" style="color:#fff; font-weight:bold; width:100%; border-bottom:1px solid #334155; padding-bottom:8px; margin-bottom:10px;">🎁 Подарки ({len(gifts)})</div></div>{gift_items}</div>'
+        gifts_sent = tg_data.get('gifts_sent', [])
+        if gifts_sent:
+            ids_str = " • ".join(gifts_sent)
+            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (отправ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
             
+        gifts_rec = tg_data.get('gifts_received', [])
+        if gifts_rec:
+            ids_str = " • ".join(gifts_rec)
+            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (получ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
     else:
         tg_html = '<div class="data-card"><div class="data-row"><div class="data-value">Telegram данные не найдены.</div></div></div>'
 
@@ -1008,315 +999,6 @@ async def run_mirror_bot(token: str, bot_username: str):
             f"Для полноценного поиска перейдите в главный бот: @{main_username}",
             parse_mode="HTML"
         )
-
-    try:
-        await mirror_bot.delete_webhook(drop_pending_updates=True)
-        await mirror_dp.start_polling(mirror_bot)
-    except Exception as e:
-        log.exception(f"Зеркало @{bot_username} упало: {e}")
-    finally:
-        await mirror_bot.session.close()
-
-
-# --- БОТ ХЕНДЛЕРЫ ---
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-
-    if is_banned(message.from_user.id):
-        return await message.answer("🚫 Вы заблокированы.")
-
-    user = get_user(message.from_user.id)
-    referrer_id = None
-    if not user:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) == 2 and parts[1].isdigit():
-            referrer_id = int(parts[1])
-        add_user(message.from_user.id, message.from_user.username, referrer_id)
-
-    try:
-        await message.answer_sticker(STICKER_ID)
-    except Exception:
-        pass
-
-    await asyncio.sleep(1)
-
-    intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
-    try:
-        await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
-    except Exception:
-        log.exception("Не удалось закрепить сообщение")
-
-    await asyncio.sleep(1)
-
-    await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
-
-
-@dp.callback_query(F.data == "back_to_start")
-async def cb_back(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "search_info")
-async def cb_search_info(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=back_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "profile")
-async def cb_profile(cb: CallbackQuery):
-    user = get_user(cb.from_user.id)
-    days_str = calculate_days(user[4]) if user else "0 дн."
-
-    text = (
-        f"👤 <b>Мой профиль</b>\n\n"
-        f"ID: <code>{cb.from_user.id}</code>\n"
-        f"Доступно запросов: <b>{user[2] if user else 0}</b>\n"
-        f"Баланс: $0.00\n"
-        f"Реферальный баланс: $0.00\n"
-        f"Дата регистрации: {user[4] if user else '-'}\n"
-        f"<i>(Вы агент уже: {days_str})</i>"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡️ Скрытие данных (5$)", callback_data="hide_data_menu")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
-
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "hide_data_menu")
-async def cb_hide_data_menu(cb: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper", style="primary")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
-    ])
-    await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "pay_tonkeeper")
-async def cb_pay_tonkeeper(cb: CallbackQuery):
-    memo = f"Oasis_Digital_{cb.from_user.id}"
-    text = (
-        f"💎 <b>Счёт на оплату через USDT (TON) / TON</b>\n\n"
-        f"📦 <b>Тариф:</b> Скрытие личных данных из поиска\n"
-        f"📝 <b>Описание:</b> Скрытие личных данных из поиска за $14.0 (скидка 0%)\n"
-        f"💵 <b>Сумма к отправке:</b> 14.0$ USDT (или ~13.04 TON)\n\n"
-        f"📍 <b>Куда отправлять (кошелёк TON):</b>\n<code>{TON_WALLET}</code>\n\n"
-        f"⚠️ <b>ОБЯЗАТЕЛЬНО укажите подпись (комментарий / memo) к переводу:</b>\n"
-        f"<code>{memo}</code> (или число {cb.from_user.id})\n\n"
-        f"📲 Самый удобный способ: нажмите кнопку «📲 Оплатить в 1 клик» ниже — кошелёк Tonkeeper / Telegram Wallet откроется с уже введённой суммой и memo!\n\n"
-        f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки."
-    )
-
-    tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link, style="primary")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
-    ])
-
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "buy_requests")
-async def cb_buy_requests(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "💎 <b>Покупка запросов</b>\n\nДля покупки запросов напишите в поддержку или оплатите через профиль (функция в разработке).",
-        parse_mode="HTML",
-        reply_markup=back_kb()
-    )
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "support")
-async def cb_support(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(SearchStates.wait_support_msg)
-    await cb.message.edit_text(
-        SUPPORT_TEXT, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_support_msg)
-async def process_support_msg(msg: Message, state: FSMContext):
-    await state.clear()
-    admin_text = f"📩 <b>Новое сообщение в поддержку</b>\n\nОт: {msg.from_user.full_name} (@{msg.from_user.username})\nID: <code>{msg.from_user.id}</code>\n\nТекст: {msg.text}"
-    try:
-        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
-        await msg.answer("✅ Ваше сообщение отправлено администрации.", reply_markup=main_kb())
-    except Exception:
-        log.exception("Support forward failed")
-        await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
-
-
-# --- НЕПОЛНЫЙ ПОИСК ---
-@dp.callback_query(F.data == "search_partial")
-async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("field_"))
-async def cb_select_field(cb: CallbackQuery, state: FSMContext):
-    field = cb.data.replace("field_", "")
-    await state.update_data(editing_field=field)
-    field_names = {"surname": "Фамилию", "name": "Имя", "patronymic": "Отчество", "birth_date": "Дату рождения"}
-    await cb.message.edit_text(
-        f"Введите {field_names.get(field, 'значение')}:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]])
-    )
-    await state.set_state(SearchStates.wait_partial_field)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_partial_field)
-async def process_field_input(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    field = data.get("editing_field")
-    if field and msg.text:
-        await state.update_data({field: msg.text.strip()})
-    await state.set_state(None)
-    await msg.answer(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-
-
-@dp.callback_query(F.data == "clear_fields")
-async def cb_clear(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-    await cb.answer("Поля очищены")
-    await cb.message.edit_reply_markup(reply_markup=partial_search_kb(await state.get_data()))
-
-
-@dp.callback_query(F.data == "select_country")
-async def cb_select_country(cb: CallbackQuery):
-    await cb.message.edit_text("🌍 Выберите страну поиска:", reply_markup=country_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("set_country_"))
-async def cb_set_country(cb: CallbackQuery, state: FSMContext):
-    country = cb.data.replace("set_country_", "")
-    await state.update_data(country=country)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "back_to_partial")
-async def cb_back_to_partial(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(None)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "do_partial_search")
-async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
-    if is_banned(cb.from_user.id):
-        return await cb.answer("🚫 Вы заблокированы.", show_alert=True)
-
-    data = await state.get_data()
-    query_parts = []
-    if data.get('surname'):
-        query_parts.append(f"Фамилия: {data['surname']}")
-    if data.get('name'):
-        query_parts.append(f"Имя: {data['name']}")
-    if data.get('patronymic'):
-        query_parts.append(f"Отчество: {data['patronymic']}")
-    if data.get('birth_date'):
-        query_parts.append(f"Дата: {data['birth_date']}")
-    if data.get('country'):
-        query_parts.append(f"Страна: {data['country']}")
-
-    if not query_parts:
-        return await cb.answer("Заполните хотя бы одно поле.", show_alert=True)
-
-    if not deduct_request(cb.from_user.id):
-        return await cb.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.", show_alert=True)
-
-    query_str = ", ".join(query_parts)
-    note = await cb.message.edit_text(
-        f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial",
-        parse_mode="HTML"
-    )
-
-    data_result = await search_everywhere(query_str)
-    report_id = str(uuid.uuid4())[:8]
-    REPORTS_CACHE[report_id] = data_result
-
-    if data_result.get("fio") == "НЕ НАЙДЕНО":
-        await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
-    else:
-        body = format_report_text(data_result)
-        chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
-        await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
-        for extra in chunks[1:-1]:
-            await cb.message.answer(extra, parse_mode="HTML")
-        if len(chunks) > 1:
-            await cb.message.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "ref_link")
-async def cb_ref_link(cb: CallbackQuery):
-    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
-    text = f"🔗 <b>Ваша реферальная ссылка:</b>\n\n<code>{ref_link}</code>\n\n<i>За каждого приглашенного вы получаете +1 запрос!</i>"
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "create_mirror")
-async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
-    await state.set_state(SearchStates.wait_mirror_token)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_mirror_token)
-async def process_mirror_token(msg: Message, state: FSMContext):
-    await state.clear()
-    token = msg.text.strip() if msg.text else ""
-
-    if ":" not in token:
-        return await msg.answer("❌ Это не похоже на токен.", reply_markup=main_kb())
-
-    test_bot = Bot(token=token)
-    try:
-        bot_info = await test_bot.get_me()
-        
-        conn = sqlite3.connect(USERS_DB)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
-            (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
-        )
-        cursor.execute(
-            "UPDATE mirrors SET bot_token = ? WHERE bot_username = ?",
-            (token, bot_info.username)
-        )
-        conn.commit()
-        conn.close()
-        
-        asyncio.create_task(run_mirror_bot(token, bot_info.username))
-        
-    except Exception:
-        log.exception("Mirror token validation failed")
-        return await msg.answer("❌ Неверный токен или бот заблокирован.", reply_markup=main_kb())
-    finally:
-        await test_bot.session.close()
-
-    await msg.answer(
-        f"🕵‍♂ <b>Зеркало @{bot_info.username} успешно запущено!</b>\n\n"
-        f"Оно добавлено на сайт и готово к работе.",
-        parse_mode="HTML", reply_markup=main_kb()
-    )
-
 
     try:
         await mirror_bot.delete_webhook(drop_pending_updates=True)
