@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN","9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY")
 MAIN_ADMIN_ID = 8394631079
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 DB_FILE = "oasis.db"
@@ -371,7 +371,6 @@ async def search_everywhere(q: str):
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
 
-    # Обработка Black-Box (основная схема под твой ТГ JSON)
     bb_res = res_blackbox
     if bb_res and (bb_res.get("status") == "success" or "telegram" in bb_res):
         tg = bb_res.get("telegram") or {}
@@ -575,6 +574,15 @@ def generate_html_report(data: dict, report_id: str) -> str:
 web_app = FastAPI()
 web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@web_app.get("/api/mirrors")
+async def get_mirrors():
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT bot_username FROM mirrors WHERE is_active = 1 ORDER BY added_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return {"mirrors": [row[0] for row in rows]}
+
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
     data = REPORTS_CACHE.get(report_id)
@@ -588,52 +596,285 @@ async def run_web():
     await uvicorn.Server(config).serve()
 
 
-# --- ЗЕРКАЛА И БОТ ---
+# --- ЗЕРКАЛА ---
 async def run_mirror_bot(token: str, bot_username: str):
+    log.info(f"Запуск зеркала @{bot_username}...")
     mirror_bot = Bot(token=token)
     mirror_dp = Dispatcher(storage=MemoryStorage())
+    
     @mirror_dp.message(CommandStart())
     async def mirror_start(message: Message):
-        await message.answer(f"Зеркало Oasis Digital. Главный бот: @{(await bot.get_me()).username}")
+        main_username = (await bot.get_me()).username
+        await message.answer(
+            f"🕵‍♂ <b>Добро пожаловать в зеркало Oasis Digital!</b>\n\nГлавный бот: @{main_username}",
+            parse_mode="HTML"
+        )
+
+    @mirror_dp.message(F.text)
+    async def mirror_echo(message: Message):
+        main_username = (await bot.get_me()).username
+        await message.answer(
+            f"🕵‍♂ <b>Это зеркало Oasis Digital.</b>\n\nПерейдите в главный бот: @{main_username}",
+            parse_mode="HTML"
+        )
+
     try:
         await mirror_bot.delete_webhook(drop_pending_updates=True)
         await mirror_dp.start_polling(mirror_bot)
+    except Exception as e:
+        log.exception(f"Зеркало @{bot_username} упало: {e}")
     finally:
         await mirror_bot.session.close()
 
 
+# --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if is_banned(message.from_user.id):
-        return await message.answer("🚫 Заблокирован.")
-    add_user(message.from_user.id, message.from_user.username)
+        return await message.answer("🚫 Вы заблокированы.")
+
+    user = get_user(message.from_user.id)
+    referrer_id = None
+    if not user:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) == 2 and parts[1].isdigit():
+            referrer_id = int(parts[1])
+        add_user(message.from_user.id, message.from_user.username, referrer_id)
+
+    try:
+        await message.answer_sticker(STICKER_ID)
+    except Exception:
+        pass
+
+    await asyncio.sleep(1)
+    intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    try:
+        await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
+    except Exception:
+        pass
+    await asyncio.sleep(1)
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+
+
+@dp.callback_query(F.data == "back_to_start")
+async def cb_back(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "search_info")
+async def cb_search_info(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "profile")
+async def cb_profile(cb: CallbackQuery):
+    user = get_user(cb.from_user.id)
+    days_str = calculate_days(user[4]) if user else "0 дн."
+    text = (
+        f"👤 <b>Мой профиль</b>\n\nID: <code>{cb.from_user.id}</code>\n"
+        f"Доступно запросов: <b>{user[2] if user else 0}</b>\n"
+        f"Дата регистрации: {user[4] if user else '-'}\n"
+        f"<i>(Вы агент уже: {days_str})</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛡️ Скрытие данных (5$)", callback_data="hide_data_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
+    ])
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "hide_data_menu")
+async def cb_hide_data_menu(cb: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper", style="primary")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
+    ])
+    await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "pay_tonkeeper")
+async def cb_pay_tonkeeper(cb: CallbackQuery):
+    memo = f"Oasis_Digital_{cb.from_user.id}"
+    text = (
+        f"💎 <b>Счёт на оплату через USDT (TON) / TON</b>\n\n"
+        f"📍 <b>Кошелёк TON:</b>\n<code>{TON_WALLET}</code>\n\n"
+        f"⚠️ <b>Memo / Комментарий:</b> <code>{memo}</code>"
+    )
+    tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link, style="primary")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
+    ])
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "buy_requests")
+async def cb_buy_requests(cb: CallbackQuery):
+    await cb.message.edit_text("💎 <b>Покупка запросов</b>", parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "support")
+async def cb_support(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(SearchStates.wait_support_msg)
+    await cb.message.edit_text(SUPPORT_TEXT, parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
+
+
+@dp.message(SearchStates.wait_support_msg)
+async def process_support_msg(msg: Message, state: FSMContext):
+    await state.clear()
+    admin_text = f"📩 <b>Поддержка</b>\nОт: {msg.from_user.full_name} (`{msg.from_user.id}`)\n\n{msg.text}"
+    try:
+        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
+        await msg.answer("✅ Отправлено администрации.", reply_markup=main_kb())
+    except Exception:
+        await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
+
+
+@dp.callback_query(F.data == "search_partial")
+async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
+    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "ref_link")
+async def cb_ref_link(cb: CallbackQuery):
+    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
+    await cb.message.edit_text(f"🔗 <b>Реферальная ссылка:</b>\n\n<code>{ref_link}</code>", parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "create_mirror")
+async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
+    await state.set_state(SearchStates.wait_mirror_token)
+    await cb.answer()
+
+
+@dp.message(SearchStates.wait_mirror_token)
+async def process_mirror_token(msg: Message, state: FSMContext):
+    await state.clear()
+    token = msg.text.strip() if msg.text else ""
+    if ":" not in token:
+        return await msg.answer("❌ Неверный формат токена.", reply_markup=main_kb())
+
+    test_bot = Bot(token=token)
+    try:
+        bot_info = await test_bot.get_me()
+        conn = sqlite3.connect(USERS_DB)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
+            (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
+        )
+        cursor.execute("UPDATE mirrors SET bot_token = ? WHERE bot_username = ?", (token, bot_info.username))
+        conn.commit()
+        conn.close()
+        asyncio.create_task(run_mirror_bot(token, bot_info.username))
+    except Exception:
+        return await msg.answer("❌ Ошибка запуска бота-зеркала.", reply_markup=main_kb())
+    finally:
+        await test_bot.session.close()
+
+    await msg.answer(f"🕵‍♂ <b>Зеркало @{bot_info.username} запущено!</b>", parse_mode="HTML", reply_markup=main_kb())
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
-    if await state.get_state() is not None or is_banned(msg.from_user.id):
+    current_state = await state.get_state()
+    if current_state is not None or msg.from_user.is_bot:
         return
+    if is_banned(msg.from_user.id):
+        return await msg.answer("🚫 Вы заблокированы.")
     if not deduct_request(msg.from_user.id):
-        return await msg.answer("❌ Запросы закончились.")
+        return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 Поиск: <b>{q}</b>", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск...\n\n<b>Цель:</b> {q}", parse_mode="HTML")
     
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
 
     body = format_report_text(data)
-    await note.edit_text(body, parse_mode="HTML", reply_markup=result_kb(report_id))
+    chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
+    await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
+    for extra in chunks[1:-1]:
+        await msg.answer(extra, parse_mode="HTML")
+    if len(chunks) > 1:
+        await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
+
+
+@dp.callback_query(F.data.startswith("get_txt_"))
+async def cb_send_txt(cb: CallbackQuery):
+    report_id = cb.data.replace("get_txt_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}"
+    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
+    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("get_json_"))
+async def cb_send_json(cb: CallbackQuery):
+    report_id = cb.data.replace("get_json_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
+    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.message(Command("admin"))
+async def admin_panel(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
+    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+
+
+@dp.callback_query(F.data == "adm_check_apis")
+async def cb_adm_check_apis(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await cb.answer("Нет доступа", show_alert=True)
+    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>", parse_mode="HTML")
+    results = await run_all_api_checks()
+    healthy_count = sum(1 for r in results if r["healthy"])
+    await note.edit_text(f"🔌 <b>Статус API:</b> {healthy_count}/{len(results)} активны", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 async def main():
+    log.info("Бот запускается на Polling...")
     await bot.delete_webhook(drop_pending_updates=True)
+
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT bot_username, bot_token FROM mirrors WHERE is_active = 1 AND bot_token IS NOT NULL")
+    mirrors = cursor.fetchall()
+    conn.close()
+
+    for username, token in mirrors:
+        if token:
+            asyncio.create_task(run_mirror_bot(token, username))
+
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
