@@ -618,8 +618,7 @@ async def search_everywhere(q: str):
         "completeness": "0%", "debug": "; ".join(debug_info)
     }
 
-
-# --- ФОРМАТ ОТЧЕТА ---
+# --- ФОРМАТ ОТЧЕТА (новая структура Telegram) ---
 def format_report_text(data: dict) -> str:
     def tree(label: str, value: str, last: bool = False) -> str:
         branch = "└" if last else "├"
@@ -628,87 +627,49 @@ def format_report_text(data: dict) -> str:
     parts = []
     q = data.get("query", "—")
     tg_data = data.get("tg_info") or {}
-    
+
     if tg_data:
-        parts.append(f"✈️ <b>Telegram</b> · {tg_data.get('id', '-')}\n\n")
-        parts.append(tree("Юзернейм", f"@{tg_data.get('username', '-')}" if tg_data.get('username') != '-' else '-'))
-        
-        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip()
-        if fio_tg: parts.append(tree("Имя", fio_tg))
-        
-        if tg_data.get('bio') != '-': parts.append(tree("Описание", tg_data.get('bio')))
-        if tg_data.get('reg_date') != '-': parts.append(tree("Регистрация", tg_data.get('reg_date')))
-        if tg_data.get('phone') != '-': parts.append(tree("Телефон", tg_data.get('phone'), last=True))
+        parts.append("✈️ <b>Telegram</b>\n\n")
+
+        if tg_data.get("id"): parts.append(tree("ID", tg_data.get("id")))
+        if tg_data.get("username"): parts.append(tree("Юзернейм", f"@{tg_data.get('username')}"))
+        if tg_data.get("full_name"): parts.append(tree("Имя", tg_data.get("full_name")))
+
+        if tg_data.get("reg_date") and tg_data["reg_date"] != "-":
+            parts.append(tree("Регистрация", f"{tg_data.get('reg_date')} ({tg_data.get('reg_age', '-')})"))
+
+        phones = tg_data.get("phones") or []
+        if phones:
+            parts.append(tree("Телефон", ", ".join(phones), last=True))
+        else:
+            parts.append(tree("Телефон", "-", last=True))
         parts.append("\n")
 
-    phone = data.get("phone_main") or "—"
-    operator = data.get("operator") or "—"
-    region = data.get("region") or "—"
-    if phone != "—" and not tg_data:
-        block = "📱 <b>Информация о номере телефона</b>\n"
-        block += tree("Оператор", operator)
-        block += tree("Регион", region, last=True)
-        parts.append(block + "\n")
+        if tg_data.get("current_usernames"):
+            parts.append(f"🔗 <b>Текущие юзернеймы:</b> {', '.join(tg_data['current_usernames'])}\n")
 
-    fio = data.get("fio") or "Нет"
-    dob = data.get("dob") or "Нет"
-    if fio not in ("Нет", "НЕ НАЙДЕНО") and not tg_data:
-        block = "👤 <b>Основные данные</b>\n"
-        block += tree("ФИО", fio)
-        block += tree("Дата рождения", dob, last=True)
-        parts.append(block + "\n")
+        if tg_data.get("names_history"):
+            parts.append(f"📝 <b>История имен:</b> {', '.join(tg_data['names_history'])}\n")
 
-    emails = data.get("emails") or []
-    if emails:
-        joined = ", ".join(f'<a href="mailto:{e}">{e}</a>' for e in emails)
-        parts.append(f"📧 <b>E-mail:</b> {joined}\n")
+        if tg_data.get("usernames_history"):
+            parts.append(f"🕒 <b>История ников:</b> {', '.join(tg_data['usernames_history'])}\n")
 
-    addresses = data.get("addresses") or []
-    if addresses:
-        parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
-        
-    cards = data.get("activity", {}).get("cards")
-    if cards:
-        parts.append(f"💳 <b>Карты:</b> {cards}\n")
-
-    if tg_data:
-        act = tg_data.get('activity', {})
-        if act:
-            parts.append("📊 <b>Активность:</b>\n")
-            for k, v in act.items():
-                parts.append(tree(k.capitalize(), str(v)))
-            parts.append("\n")
-
-        hist = tg_data.get('history', [])
-        if hist:
-            parts.append(f"🕒 <b>История изменений [{len(hist)}]:</b>\n")
-            for item in hist[:10]:
-                parts.append(f"├ {item}\n")
-            if len(hist) > 10:
+        gifts = tg_data.get("gifts") or []
+        if gifts:
+            parts.append(f"\n🎁 <b>Подарки ({len(gifts)}):</b>\n")
+            for g in gifts[:10]:
+                from_user = g.get("from", {}).get("username") or g.get("from", {}).get("id") or "?"
+                stars = g.get("stars", 0)
+                parts.append(f"├ от @{from_user} — {stars} ⭐\n")
+            if len(gifts) > 10:
                 parts.append("└ <i>...и другие</i>\n")
-            parts.append("\n")
 
-        gifts_sent = tg_data.get('gifts_sent', [])
-        if gifts_sent:
-            parts.append(f"⬆️ <b>Кому отправлял(-а) подарки ({len(gifts_sent)}):</b>\n")
-            chunks = [" ".join(gifts_sent[i:i+3]) for i in range(0, len(gifts_sent), 3)]
-            for c in chunks:
-                parts.append(f"<code>{c}</code>\n")
-            parts.append("\n")
-
-        gifts_rec = tg_data.get('gifts_received', [])
-        if gifts_rec:
-            parts.append(f"⬇️ <b>От кого получал(-а) подарки ({len(gifts_rec)}):</b>\n")
-            chunks = [" ".join(gifts_rec[i:i+3]) for i in range(0, len(gifts_rec), 3)]
-            for c in chunks:
-                parts.append(f"<code>{c}</code>\n")
-            parts.append("\n")
-
-    if not parts[1:]:
-        parts.append("❌ Данные не найдены.\n")
-
-    footer = f"\n<i>Источники: {', '.join(s['name'] for s in data.get('sources_list', [])) or '—'}</i>"
-    return "".join(parts) + footer
+        sent_gifts = tg_data.get("sent_gifts") or []
+        if sent_gifts:
+            parts.append(f"\n📤 <b>Отправленные подарки ({len(sent_gifts)}):</b>\n")
+            chunks = [f"@{g.get('username') or g.get('id')}" for g in sent_gifts[:15]]
+            for i in range(0, len(chunks), 3):
+                parts.append(" • ".join(chunks[i:i+3]) + "\n")
 
 
 # --- HTML (DASHBOARD) ---
