@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY")
 MAIN_ADMIN_ID = 8394631079
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 DB_FILE = "oasis.db"
