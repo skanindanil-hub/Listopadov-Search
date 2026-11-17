@@ -7,6 +7,7 @@ import uuid
 import sqlite3
 import aiohttp
 from datetime import datetime
+from collections import OrderedDict
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -21,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9273738144:AAF_C8mNW5yRqpCcACaqLbvXLFdecy-t1cQ")
 MAIN_ADMIN_ID = 8394631079
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 DB_FILE = "oasis.db"
@@ -43,7 +44,20 @@ log = logging.getLogger("oasis")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-REPORTS_CACHE = {}
+
+class BoundedCache(OrderedDict):
+    def __init__(self, maxlen=1000, *args, **kwargs):
+        self.maxlen = maxlen
+        super().__init__(*args, **kwargs)
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > self.maxlen:
+            oldest = next(iter(self))
+            del self[oldest]
+
+REPORTS_CACHE = BoundedCache(maxlen=1000)
 
 TG_USERNAME_RE = re.compile(r"[a-zA-Z0-9_]{5,32}")
 TG_ID_RE = re.compile(r"\d{5,12}")
@@ -269,8 +283,8 @@ def partial_search_kb(data: dict):
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"Фамилия: {short(data.get('surname'))}", callback_data="field_surname"), InlineKeyboardButton(text=f"Имя: {short(data.get('name'))}", callback_data="field_name")],
-        [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic")],
-        [InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date"), InlineKeyboardButton(text=f"Страна: {country}", callback_data="select_country")],
+        [InlineKeyboardButton(text=f"Отчество: {short(data.get('patronymic'))}", callback_data="field_patronymic"), InlineKeyboardButton(text=f"Дата рожд.: {short(data.get('birth_date'))}", callback_data="field_birth_date")],
+        [InlineKeyboardButton(text=f"Страна: {country}", callback_data="select_country")],
         [InlineKeyboardButton(text="Очистить", callback_data="clear_fields", style="danger"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search", style="primary")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
     ])
@@ -294,10 +308,8 @@ async def fetch_mobius(q: str):
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
                 if resp.status == 200:
                     return await resp.json()
-                body = await resp.text()
-                log.warning("Mobius HTTP %s: %s", resp.status, body[:500])
     except Exception:
-        log.exception("Mobius request failed for query=%r", q)
+        log.exception("Mobius request failed")
     return None
 
 
@@ -310,10 +322,8 @@ async def fetch_blackbox(q: str):
             async with session.get(f"{API_URL_BLACKBOX}/v1.1/search", headers=headers, params=params) as resp:
                 if resp.status == 200:
                     return await resp.json()
-                body = await resp.text()
-                log.warning("BlackBox HTTP %s: %s", resp.status, body[:500])
     except Exception:
-        log.exception("BlackBox request failed for query=%r", q)
+        log.exception("BlackBox request failed")
     return None
 
 
@@ -331,70 +341,25 @@ async def check_api_health(name, url, method="GET", headers=None, payload=None):
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
                 status = resp.status
                 text = await resp.text()
-                preview = text[:200].replace("\n", " ")
-                return {"name": name, "healthy": 200 <= status < 300, "status": status, "latency_ms": elapsed, "preview": preview}
-    except asyncio.TimeoutError:
-        return {"name": name, "healthy": False, "status": "TIMEOUT", "latency_ms": int((asyncio.get_event_loop().time() - start) * 1000), "preview": "Превышено время ожидания"}
+                return {"name": name, "healthy": 200 <= status < 300, "status": status, "latency_ms": elapsed, "preview": text[:200]}
     except Exception as e:
-        return {"name": name, "healthy": False, "status": "ERROR", "latency_ms": int((asyncio.get_event_loop().time() - start) * 1000), "preview": str(e)[:200]}
+        return {"name": name, "healthy": False, "status": "ERROR", "latency_ms": 0, "preview": str(e)[:200]}
 
 
 async def run_all_api_checks():
-    checks = [
-        check_api_health(
-            "Mobius",
-            API_URL_MOBIUS,
-            method="POST",
-            headers={"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"},
-            payload={"query": "79999999999", "type": "auto"}
-        ),
-        check_api_health(
-            "Black-Box",
-            f"{API_URL_BLACKBOX}/v1.1/search",
-            method="GET",
-            headers={"X-API-Key": API_KEY_BLACKBOX},
-            payload={"q": "+79825207224", "type": "phone"}
-        ),
-    ]
-    return await asyncio.gather(*checks)
+    return await asyncio.gather(
+        check_api_health("Mobius", API_URL_MOBIUS, method="POST", headers={"X-API-Key": API_KEY_MOBIUS, "Content-Type": "application/json"}, payload={"query": "79999999999", "type": "auto"}),
+        check_api_health("Black-Box", f"{API_URL_BLACKBOX}/v1.1/search", method="GET", headers={"X-API-Key": API_KEY_BLACKBOX}, payload={"q": "+79825207224", "type": "phone"})
+    )
 
 
 # --- СУПЕР-ПАРСЕР ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
-
     is_tg_id = bool(TG_ID_RE.fullmatch(clean_q))
     is_tg_username = bool(TG_USERNAME_RE.fullmatch(clean_q)) and not clean_q.isdigit()
 
-    if os.path.exists(DB_FILE) and (is_tg_id or is_tg_username):
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            if is_tg_id:
-                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE tg_id = ? LIMIT 1", (clean_q,))
-            else:
-                cursor.execute("SELECT tg_id, username, phone, fio FROM tg_entities WHERE LOWER(username) = ? LIMIT 1", (clean_q.lower(),))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                return {
-                    "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-                    "fio": row[3] or "Нет", "phone_main": row[2] or "Нет", "username": row[1] or "Нет",
-                    "operator": "-", "region": "-", "country": "-",
-                    "emails": [], "addresses": [], "phones": [row[2]] if row[2] else [],
-                    "dob": "-", "passport": "-", "inn": "-", "snils": "-",
-                    "activity": {},
-                    "tg_info": {},
-                    "sources_list": [{"name": "Local DB", "count": 1}],
-                    "stats": {"sources": 1, "phones": 1, "records": 1},
-                    "completeness": "20%"
-                }
-        except Exception:
-            log.exception("Local DB lookup failed for %r", clean_q)
-
-    mobius_task = fetch_mobius(q)
-    blackbox_task = fetch_blackbox(q)
-    res_mobius, res_blackbox = await asyncio.gather(mobius_task, blackbox_task)
+    res_mobius, res_blackbox = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
 
     final_data = {
         "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
@@ -402,221 +367,46 @@ async def search_everywhere(q: str):
         "operator": "Нет", "region": "Нет", "country": "Нет",
         "emails": [], "addresses": [], "phones": [],
         "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
-        "activity": {},
-        "tg_info": {},
+        "activity": {}, "tg_info": {},
         "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
     }
-    found_something = False
-    debug_info = []
 
-    # --- MOBIUS ---
-    if not res_mobius:
-        debug_info.append("Mobius: нет ответа")
-    elif not res_mobius.get("success"):
-        debug_info.append(f"Mobius: {res_mobius.get('message', 'Unknown')}")
+    # Обработка Black-Box (основная схема под твой ТГ JSON)
+    bb_res = res_blackbox
+    if bb_res and (bb_res.get("status") == "success" or "telegram" in bb_res):
+        tg = bb_res.get("telegram") or {}
+        if tg:
+            tg_username = tg.get("username") or clean_q
+            tg_first = tg.get("first_name") or "-"
+            tg_last = tg.get("last_name") or ""
+            
+            final_data["tg_info"] = {
+                "id": str(tg.get("id") or (clean_q if is_tg_id else "-")),
+                "username": tg_username,
+                "first_name": tg_first,
+                "last_name": tg_last,
+                "full_name": tg.get("full_name") or f"{tg_first} {tg_last}".strip(),
+                "bio": tg.get("bio") or "-",
+                "phone": (tg.get("phones")[0] if tg.get("phones") else "-"),
+                "reg_date": tg.get("reg_date") or "-",
+                "reg_age": tg.get("reg_age") or "-",
+                "gifts_total": tg.get("gifts_total", 0),
+                "gifts": tg.get("gifts", []) or [],
+                "sent_gifts": tg.get("sent_gifts", []) or [],
+                "names_history": tg.get("names_history", []) or [],
+                "usernames_history": tg.get("usernames_history", []) or []
+            }
+            final_data["fio"] = final_data["tg_info"]["full_name"]
+            final_data["username"] = tg_username
+
+        stats_bb = bb_res.get("stats") or {}
+        final_data["stats"]["records"] = stats_bb.get("total_records", 1)
+        final_data["sources_list"].append({"name": "Black-Box (Telegram)", "count": final_data["stats"]["records"]})
     else:
-        results = res_mobius.get("results", {})
+        final_data["fio"] = "НЕ НАЙДЕНО"
 
-        kratos_data = results.get("mobius-kratos-phone", {}).get("result", {}).get("data", {}).get("results", [])
-        if kratos_data:
-            found_something = True
-            final_data["stats"]["records"] = len(kratos_data)
-            final_data["stats"]["sources"] = len(kratos_data)
-
-            for record in kratos_data:
-                for k, v in record.items():
-                    k_low = k.lower()
-                    val_str = str(v).strip("'")
-                    if not val_str or val_str == "None":
-                        continue
-
-                    if "фио" in k_low or k_low in ("имя", "фамилия", "отчество"):
-                        if final_data["fio"] == "Нет" or len(val_str) > len(final_data["fio"]):
-                            final_data["fio"] = val_str
-                    elif "паспорт" in k_low and "серия" not in k_low and final_data["passport"] == "Нет":
-                        final_data["passport"] = val_str
-                    elif "снилс" in k_low and final_data["snils"] == "Нет":
-                        final_data["snils"] = val_str
-                    elif "инн" in k_low and final_data["inn"] == "Нет":
-                        final_data["inn"] = val_str
-                    elif "дата рождения" in k_low and final_data["dob"] == "Нет":
-                        final_data["dob"] = val_str
-                    elif "адрес" in k_low:
-                        if val_str not in final_data["addresses"]:
-                            final_data["addresses"].append(val_str)
-                    elif "телефон" in k_low and final_data["phone_main"] == q:
-                        final_data["phone_main"] = val_str
-                        if val_str not in final_data["phones"]:
-                            final_data["phones"].append(val_str)
-
-            final_data["sources_list"].append({"name": "Mobius (Kratos)", "count": len(kratos_data)})
-
-        nebula_raw = results.get("mobius-nebula-phone", {}).get("result", {}).get("data", {}).get("results", {})
-        if nebula_raw:
-            found_something = True
-
-            phone_info = nebula_raw.get("phone_info", {}) or {}
-            if phone_info.get("operator"):
-                final_data["operator"] = phone_info["operator"]
-            if phone_info.get("region"):
-                final_data["region"] = phone_info["region"]
-            if phone_info.get("country"):
-                final_data["country"] = phone_info["country"]
-
-            if final_data["phone_main"] in (q, "Нет") and phone_info.get("phone"):
-                final_data["phone_main"] = phone_info["phone"]
-            if final_data["phone_main"] and final_data["phone_main"] not in final_data["phones"]:
-                final_data["phones"].insert(0, final_data["phone_main"])
-
-            for em in nebula_raw.get("emails", []) or []:
-                if em and em not in final_data["emails"]:
-                    final_data["emails"].append(em)
-
-            for ad in nebula_raw.get("addresses", []) or []:
-                if isinstance(ad, dict):
-                    ad = ad.get("address") or ad.get("value") or str(ad)
-                if ad and ad not in final_data["addresses"]:
-                    final_data["addresses"].append(ad)
-
-            for pb in nebula_raw.get("phonebooks", []) or []:
-                name = pb.get("name") if isinstance(pb, dict) else str(pb)
-                if name:
-                    if final_data["fio"] in ("Нет", final_data["fio"]):
-                        final_data["fio"] = name
-                    elif name not in final_data["fio"]:
-                        final_data["fio"] = f"{final_data['fio']}; {name}"
-
-            if nebula_raw.get("dob") and final_data["dob"] == "Нет":
-                final_data["dob"] = nebula_raw["dob"]
-
-            act = nebula_raw.get("activity") or {}
-            if isinstance(act, dict):
-                final_data["activity"].update(act)
-
-            final_data["sources_list"].append({"name": "Mobius (Nebula)", "count": 1})
-
-    # --- BLACK-BOX ---
-    if res_blackbox and res_blackbox.get("status") == "success":
-        found_something = True
-        profile = res_blackbox.get("profile") or {}
-        telecom = res_blackbox.get("telecom") or {}
-        identities = res_blackbox.get("identities") or {}
-        tg = res_blackbox.get("telegram") or {}
-        financial = res_blackbox.get("financial") or {}
-        stats_bb = res_blackbox.get("stats") or {}
-
-        if profile.get("primary_fio") and final_data["fio"] in ("Нет", "НЕ НАЙДЕНО"):
-            final_data["fio"] = profile["primary_fio"]
-
-        if profile.get("birth_date") and final_data["dob"] in ("Нет", "-"):
-            final_data["dob"] = profile["birth_date"]
-
-        for p in profile.get("phones", []) or []:
-            if p and p not in final_data["phones"]:
-                final_data["phones"].append(p)
-
-        if profile.get("passports") and final_data["passport"] in ("Нет", "-"):
-            final_data["passport"] = profile["passports"][0]
-
-        if telecom.get("operator") and final_data["operator"] in ("Нет", "-"):
-            final_data["operator"] = telecom["operator"]
-        if telecom.get("region") and final_data["region"] in ("Нет", "-"):
-            final_data["region"] = telecom["region"]
-        if telecom.get("country") and final_data["country"] in ("Нет", "-"):
-            final_data["country"] = telecom["country"]
-
-        # --- ПАРСИНГ TELEGRAM ---
-        if tg or (is_tg_id or is_tg_username):
-            if tg:
-                tg_username = tg.get("username") or tg.get("login") or clean_q
-                tg_first = tg.get("first_name") or tg.get("name") or "-"
-                tg_last = tg.get("last_name") or ""
-                
-                final_data["tg_info"] = {
-                    "id": tg.get("id") or tg.get("user_id") or (clean_q if is_tg_id else "-"),
-                    "username": tg_username,
-                    "first_name": tg_first,
-                    "last_name": tg_last,
-                    "bio": tg.get("bio") or tg.get("description") or "-",
-                    "phone": tg.get("phone") or "-",
-                    "reg_date": tg.get("registration_date") or tg.get("reg_date") or "-",
-                }
-                
-                gifts = tg.get("gifts") or {}
-                if gifts:
-                    final_data["tg_info"]["gifts_sent"] = gifts.get("sent", [])
-                    final_data["tg_info"]["gifts_received"] = gifts.get("received", [])
-
-                act = tg.get("activity") or {}
-                if act:
-                    final_data["tg_info"]["activity"] = act
-
-                history = tg.get("history") or tg.get("changes") or []
-                if history:
-                    final_data["tg_info"]["history"] = history
-
-        others_names = identities.get("detected_names", []) or []
-        if len(others_names) > 1:
-            extra = "; ".join(n for n in others_names if n != final_data["fio"])
-            if extra:
-                final_data["fio"] = f"{final_data['fio']} (также: {extra})"
-
-        fin_records = financial.get("records", []) or []
-        if fin_records:
-            cards = []
-            banks = set()
-            for rec in fin_records:
-                f = (rec.get("field") or "").lower()
-                v = rec.get("value") or ""
-                if "creditcard" in f:
-                    cards.append(v)
-                elif f == "bank":
-                    banks.add(v)
-            if cards:
-                final_data["activity"]["cards"] = f"{len(cards)} шт."
-            if banks:
-                final_data["activity"]["banks"] = "; ".join(sorted(banks))[:200]
-
-        final_data["sources_list"].append({
-            "name": "Black-Box",
-            "count": stats_bb.get("total_records", 1)
-        })
-        final_data["stats"]["records"] = max(final_data["stats"]["records"], stats_bb.get("total_records", 0))
-    else:
-        debug_info.append("Black-Box: нет ответа")
-
-    final_data["stats"]["phones"] = len(final_data["phones"])
     final_data["stats"]["sources"] = len(final_data["sources_list"])
-
-    has_data = (
-        final_data["fio"] not in ("Нет", "НЕ НАЙДЕНО", "-") or
-        final_data["phone_main"] not in ("Нет", "-", "") or
-        final_data["tg_info"] or
-        len(final_data["sources_list"]) > 0
-    )
-
-    if has_data:
-        filled = sum(1 for k in ("fio", "phone_main", "dob") if final_data[k] not in ("Нет", "-", ""))
-        if final_data["emails"]:
-            filled += 1
-        if final_data["addresses"]:
-            filled += 1
-        final_data["completeness"] = f"{int((filled / 5) * 100)}%"
-        if debug_info:
-            final_data["debug"] = "; ".join(debug_info)
-        return final_data
-
-    return {
-        "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "fio": "НЕ НАЙДЕНО", "phone_main": q, "username": "Нет",
-        "operator": "-", "region": "-", "country": "-",
-        "emails": [], "addresses": [], "phones": [],
-        "dob": "-", "passport": "-", "inn": "-", "snils": "-",
-        "activity": {},
-        "tg_info": {},
-        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0},
-        "completeness": "0%", "debug": "; ".join(debug_info)
-    }
+    return final_data
 
 
 # --- ФОРМАТ ОТЧЕТА ---
@@ -626,85 +416,35 @@ def format_report_text(data: dict) -> str:
         return f"{branch} {label}: {value}\n"
 
     parts = []
-    q = data.get("query", "—")
     tg_data = data.get("tg_info") or {}
     
     if tg_data:
         parts.append(f"✈️ <b>Telegram</b> · {tg_data.get('id', '-')}\n\n")
         parts.append(tree("Юзернейм", f"@{tg_data.get('username', '-')}" if tg_data.get('username') != '-' else '-'))
         
-        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip()
-        if fio_tg: parts.append(tree("Имя", fio_tg))
-        
-        if tg_data.get('bio') != '-': parts.append(tree("Описание", tg_data.get('bio')))
-        if tg_data.get('reg_date') != '-': parts.append(tree("Регистрация", tg_data.get('reg_date')))
-        if tg_data.get('phone') != '-': parts.append(tree("Телефон", tg_data.get('phone'), last=True))
+        full_name = tg_data.get('full_name') or "-"
+        if full_name != "-":
+            parts.append(tree("Имя", full_name))
+        if tg_data.get('reg_date') != '-':
+            reg_str = f"{tg_data.get('reg_date')}"
+            if tg_data.get('reg_age') != '-':
+                reg_str += f" ({tg_data.get('reg_age')})"
+            parts.append(tree("Регистрация", reg_str))
+        if tg_data.get('gifts_total', 0) > 0:
+            parts.append(tree("Всего подарков", str(tg_data.get('gifts_total'))))
         parts.append("\n")
 
-    phone = data.get("phone_main") or "—"
-    operator = data.get("operator") or "—"
-    region = data.get("region") or "—"
-    if phone != "—" and not tg_data:
-        block = "📱 <b>Информация о номере телефона</b>\n"
-        block += tree("Оператор", operator)
-        block += tree("Регион", region, last=True)
-        parts.append(block + "\n")
-
-    fio = data.get("fio") or "Нет"
-    dob = data.get("dob") or "Нет"
-    if fio not in ("Нет", "НЕ НАЙДЕНО") and not tg_data:
-        block = "👤 <b>Основные данные</b>\n"
-        block += tree("ФИО", fio)
-        block += tree("Дата рождения", dob, last=True)
-        parts.append(block + "\n")
-
-    emails = data.get("emails") or []
-    if emails:
-        joined = ", ".join(f'<a href="mailto:{e}">{e}</a>' for e in emails)
-        parts.append(f"📧 <b>E-mail:</b> {joined}\n")
-
-    addresses = data.get("addresses") or []
-    if addresses:
-        parts.append("🏠 <b>Адреса:</b> " + "; ".join(addresses) + "\n")
-        
-    cards = data.get("activity", {}).get("cards")
-    if cards:
-        parts.append(f"💳 <b>Карты:</b> {cards}\n")
-
-    if tg_data:
-        act = tg_data.get('activity', {})
-        if act:
-            parts.append("📊 <b>Активность:</b>\n")
-            for k, v in act.items():
-                parts.append(tree(k.capitalize(), str(v)))
+        gifts = tg_data.get('gifts', [])
+        if gifts:
+            parts.append(f"🎁 <b>Подарки ({len(gifts)}):</b>\n")
+            for g in gifts[:5]:
+                from_u = g.get('from', {})
+                u_str = f" от @{from_u.get('username', 'id:'+str(from_u.get('id', '')))}" if from_u else ""
+                stars = f" ({g.get('stars')} ⭐)" if g.get('stars') else ""
+                parts.append(f"├ Подарок{stars}{u_str}\n")
             parts.append("\n")
 
-        hist = tg_data.get('history', [])
-        if hist:
-            parts.append(f"🕒 <b>История изменений [{len(hist)}]:</b>\n")
-            for item in hist[:10]:
-                parts.append(f"├ {item}\n")
-            if len(hist) > 10:
-                parts.append("└ <i>...и другие</i>\n")
-            parts.append("\n")
-
-        gifts_sent = tg_data.get('gifts_sent', [])
-        if gifts_sent:
-            parts.append(f"⬆️ <b>Кому отправлял(-а) подарки ({len(gifts_sent)}):</b>\n")
-            chunks = [" ".join(gifts_sent[i:i+3]) for i in range(0, len(gifts_sent), 3)]
-            for c in chunks:
-                parts.append(f"<code>{c}</code>\n")
-            parts.append("\n")
-
-        gifts_rec = tg_data.get('gifts_received', [])
-        if gifts_rec:
-            parts.append(f"⬇️ <b>От кого получал(-а) подарки ({len(gifts_rec)}):</b>\n")
-            chunks = [" ".join(gifts_rec[i:i+3]) for i in range(0, len(gifts_rec), 3)]
-            for c in chunks:
-                parts.append(f"<code>{c}</code>\n")
-            parts.append("\n")
-
-    if not parts[1:]:
+    if not parts:
         parts.append("❌ Данные не найдены.\n")
 
     footer = f"\n<i>Источники: {', '.join(s['name'] for s in data.get('sources_list', [])) or '—'}</i>"
@@ -722,7 +462,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
         if value and str(value) not in ("Нет", "-", "", "None"):
             nodes.append({"id": node_id, "label": label, "color": color, "font": {"color": "#ffffff"}, "shape": "box", "borderWidth": 0})
             edges.append({"from": 1, "to": node_id, "color": "#334155", "width": 1})
-            
             leaf_id = node_id + 1
             val_str = str(value)[:30] + "..." if len(str(value)) > 30 else str(value)
             nodes.append({"id": leaf_id, "label": val_str, "color": "#1e293b", "font": {"color": "#94a3b8"}, "shape": "box", "borderWidth": 0})
@@ -730,64 +469,30 @@ def generate_html_report(data: dict, report_id: str) -> str:
             node_id += 2
 
     add_branch("ФИО", data.get('fio'))
-    add_branch("Тел", data.get('phone_main'))
-    add_branch("Оператор", data.get('operator'))
-    add_branch("Email", ", ".join(data.get('emails', [])))
-    add_branch("Паспорт", data.get('passport'))
-    add_branch("Адрес", "; ".join(data.get('addresses', []))[:40])
-    add_branch("ИНН", data.get('inn'))
-    add_branch("СНИЛС", data.get('snils'))
-    add_branch("Карты", data.get('activity', {}).get('cards'))
-    
     tg_data = data.get('tg_info') or {}
     if tg_data:
         add_branch("Telegram", f"@{tg_data.get('username', '-')}")
 
     graph_json = json.dumps({"nodes": nodes, "edges": edges})
-
-    fio_display = data.get('fio', 'Нет')
-    phone_display = data.get('phone_main', '-')
-    operator = data.get('operator', '-')
-    region = data.get('region', '-')
-    country = data.get('country', '-')
-    email_display = ", ".join(data.get('emails', [])) or "-"
-    addr_display = "<br>".join(data.get('addresses', [])) or "-"
-    
-    passport_raw = str(data.get('passport', '-'))
-    if passport_raw and passport_raw != "Нет" and len(passport_raw) >= 10:
-        passport_display = f"Серия: {passport_raw[:4]}<br>Номер: {passport_raw[4:]}"
-    else:
-        passport_display = passport_raw
-        
-    cards = data.get('activity', {}).get('cards', '-')
-    banks = data.get('activity', {}).get('banks', '-')
-    dob = data.get('dob', '-')
     query = data.get('query', '-')
     records_count = data.get('stats', {}).get('records', 0)
 
     tg_html = ""
     if tg_data:
-        fio_tg = f"{tg_data.get('first_name', '')} {tg_data.get('last_name', '')}".strip() or "-"
+        full_name = tg_data.get('full_name') or "-"
+        reg_info = f"{tg_data.get('reg_date', '-')}"
+        if tg_data.get('reg_age') != '-':
+            reg_info += f" ({tg_data.get('reg_age')})"
+
         tg_html = f"""
         <div class="data-card">
             <div class="data-row"><div class="data-label">ID</div><div class="data-value">{tg_data.get('id')}</div></div>
             <div class="data-row"><div class="data-label">Username</div><div class="data-value">@{tg_data.get('username', '-')}</div></div>
-            <div class="data-row"><div class="data-label">Имя</div><div class="data-value">{fio_tg}</div></div>
-            <div class="data-row"><div class="data-label">Описание</div><div class="data-value">{tg_data.get('bio', '-')}</div></div>
-            <div class="data-row"><div class="data-label">Дата рег.</div><div class="data-value">{tg_data.get('reg_date', '-')}</div></div>
-            <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{tg_data.get('phone', '-')}</div></div>
+            <div class="data-row"><div class="data-label">Имя</div><div class="data-value">{full_name}</div></div>
+            <div class="data-row"><div class="data-label">Регистрация</div><div class="data-value">{reg_info}</div></div>
+            <div class="data-row"><div class="data-label">Всего подарков</div><div class="data-value">{tg_data.get('gifts_total', 0)}</div></div>
         </div>
         """
-        
-        gifts_sent = tg_data.get('gifts_sent', [])
-        if gifts_sent:
-            ids_str = " • ".join(gifts_sent)
-            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (отправ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
-            
-        gifts_rec = tg_data.get('gifts_received', [])
-        if gifts_rec:
-            ids_str = " • ".join(gifts_rec)
-            tg_html += f'<div class="data-card"><div class="data-row"><div class="data-label">Подарки (получ)</div><div class="data-value" style="font-family:monospace; font-size:12px; color:#94a3b8;">{ids_str}</div></div></div>'
     else:
         tg_html = '<div class="data-card"><div class="data-row"><div class="data-value">Telegram данные не найдены.</div></div></div>'
 
@@ -801,115 +506,53 @@ def generate_html_report(data: dict, report_id: str) -> str:
         <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-            
             * {{ box-sizing: border-box; margin: 0; padding: 0; }}
             body {{ font-family: 'Inter', sans-serif; background-color: #0f1015; color: #e2e8f0; height: 100vh; display: flex; overflow: hidden; }}
-            
             .sidebar {{ width: 260px; background-color: #0b0c10; border-right: 1px solid #1f2232; display: flex; flex-direction: column; padding: 20px 10px; flex-shrink: 0; }}
             .brand {{ padding: 0 10px 20px 10px; font-size: 18px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #1f2232; margin-bottom: 15px; }}
             .brand-icon {{ background: #fff; color: #000; border-radius: 4px; padding: 2px 6px; font-size: 14px; }}
-            
             .nav-item {{ padding: 12px 15px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; gap: 10px; color: #94a3b8; font-size: 14px; font-weight: 500; transition: 0.2s; margin-bottom: 4px; }}
             .nav-item:hover {{ background-color: #1a1c29; color: #fff; }}
             .nav-item.active {{ background-color: #8b5cf6; color: #fff; }}
             .nav-icon {{ font-size: 18px; opacity: 0.7; }}
-
             .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow-y: auto; background-color: #0f1015; }}
             .tab-content {{ display: none; flex-direction: column; }}
             .tab-content.active {{ display: flex; }}
-            
             .header-text {{ font-size: 14px; color: #94a3b8; margin-bottom: 15px; }}
             .header-text b {{ color: #fff; }}
-            
             .graph-container {{ flex: 1; background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; position: relative; overflow: hidden; min-height: 500px; }}
             #mynetwork {{ width: 100%; height: 100%; position: absolute; }}
-
             .data-card {{ background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
             .data-row {{ display: flex; padding: 12px 0; border-bottom: 1px solid #1f2232; }}
             .data-row:last-child {{ border-bottom: none; }}
-            .data-label {{ width: 160px; font-size: 13px; color: #94a3b8; flex-shrink: 0; }}
+            .data-label {{ width: 180px; font-size: 13px; color: #94a3b8; flex-shrink: 0; }}
             .data-value {{ font-size: 14px; color: #fff; word-break: break-word; line-height: 1.5; }}
         </style>
     </head>
     <body>
         <div class="sidebar">
-            <div class="brand">
-                <span class="brand-icon">O</span> Oasis Report
-            </div>
-            
-            <div class="nav-item" onclick="openTab('tab-summary', this)">
-                <span class="nav-icon">📋</span> Краткая сводка
-            </div>
-            <div class="nav-item active" onclick="openTab('tab-graph', this)">
-                <span class="nav-icon">🕸️</span> Граф связей
-            </div>
-            <div class="nav-item" onclick="openTab('tab-tg', this)">
-                <span class="nav-icon">✈️</span> Telegram
-            </div>
-            <div class="nav-item" onclick="openTab('tab-contacts', this)">
-                <span class="nav-icon">📞</span> Контакты
-            </div>
-            <div class="nav-item" onclick="openTab('tab-addresses', this)">
-                <span class="nav-icon">🏠</span> Адреса
-            </div>
-            <div class="nav-item" onclick="openTab('tab-docs', this)">
-                <span class="nav-icon">📄</span> Документы
-            </div>
+            <div class="brand"><span class="brand-icon">O</span> Oasis Report</div>
+            <div class="nav-item" onclick="openTab('tab-summary', this)"><span class="nav-icon">📋</span> Сводка</div>
+            <div class="nav-item active" onclick="openTab('tab-graph', this)"><span class="nav-icon">🕸️</span> Граф связей</div>
+            <div class="nav-item" onclick="openTab('tab-tg', this)"><span class="nav-icon">✈️</span> Telegram</div>
         </div>
-
         <div class="main-content">
             <div id="tab-summary" class="tab-content">
-                <div class="header-text">Быстрый обзор найденных данных по запросу <b>{query}</b>.</div>
+                <div class="header-text">Обзор по запросу <b>{query}</b></div>
                 <div class="data-card" style="max-width: 600px;">
-                    <div class="data-row"><div class="data-label">Цель запроса</div><div class="data-value">{query}</div></div>
-                    <div class="data-row"><div class="data-label">ФИО</div><div class="data-value">{fio_display}</div></div>
-                    <div class="data-row"><div class="data-label">Дата рождения</div><div class="data-value">{dob}</div></div>
-                    <div class="data-row"><div class="data-label">Найдено записей</div><div class="data-value">{records_count}</div></div>
+                    <div class="data-row"><div class="data-label">Цель</div><div class="data-value">{query}</div></div>
+                    <div class="data-row"><div class="data-label">Записей</div><div class="data-value">{records_count}</div></div>
                 </div>
             </div>
-
             <div id="tab-graph" class="tab-content active">
-                <div class="header-text">Интерактивный граф. Узлы можно свободно перетаскивать по горизонтали и вертикали. Масштабирование — колесиком мыши.</div>
-                <div class="graph-container">
-                    <div id="mynetwork"></div>
-                </div>
+                <div class="header-text">Граф связей</div>
+                <div class="graph-container"><div id="mynetwork"></div></div>
             </div>
-
             <div id="tab-tg" class="tab-content">
-                <div class="header-text">Данные профиля Telegram и активность.</div>
-                <div style="max-width: 800px;">
-                    {tg_html}
-                </div>
-            </div>
-
-            <div id="tab-contacts" class="tab-content">
-                <div class="header-text">Телефоны, соцсети и электронные адреса.</div>
-                <div class="data-card" style="max-width: 800px;">
-                    <div class="data-row"><div class="data-label">Телефон</div><div class="data-value">{phone_display}</div></div>
-                    <div class="data-row"><div class="data-label">Оператор / Регион</div><div class="data-value">{operator} / {region} ({country})</div></div>
-                    <div class="data-row"><div class="data-label">E-mail</div><div class="data-value">{email_display}</div></div>
-                </div>
-            </div>
-
-            <div id="tab-addresses" class="tab-content">
-                <div class="header-text">Найденные адреса регистрации и проживания.</div>
-                <div class="data-card" style="max-width: 800px;">
-                    <div class="data-row"><div class="data-label">Адреса</div><div class="data-value">{addr_display}</div></div>
-                </div>
-            </div>
-
-            <div id="tab-docs" class="tab-content">
-                <div class="header-text">Паспортные данные, ИНН, СНИЛС и финансовая информация.</div>
-                <div class="data-card" style="max-width: 800px;">
-                    <div class="data-row"><div class="data-label">Паспорт</div><div class="data-value">{passport_display}</div></div>
-                    <div class="data-row"><div class="data-label">ИНН</div><div class="data-value">{data.get('inn', '-')}</div></div>
-                    <div class="data-row"><div class="data-label">СНИЛС</div><div class="data-value">{data.get('snils', '-')}</div></div>
-                    <div class="data-row"><div class="data-label">Банковские карты</div><div class="data-value">{cards}</div></div>
-                    <div class="data-row"><div class="data-label">Банки</div><div class="data-value">{banks}</div></div>
-                </div>
+                <div class="header-text">Telegram данные</div>
+                <div style="max-width: 800px;">{tg_html}</div>
             </div>
         </div>
-
         <script type="text/javascript">
             function openTab(tabId, el) {{
                 document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
@@ -917,25 +560,11 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 document.getElementById(tabId).classList.add('active');
                 el.classList.add('active');
             }}
-
             var graphData = {graph_json};
-            var nodes = new vis.DataSet(graphData.nodes);
-            var edges = new vis.DataSet(graphData.edges);
-            var container = document.getElementById('mynetwork');
-            var data = {{ nodes: nodes, edges: edges }};
-            
-            var options = {{
-                nodes: {{ 
-                    shape: 'box', margin: 10, widthConstraint: {{ maximum: 150 }},
-                    font: {{ size: 12, face: 'Inter', color: '#fff' }}, borderWidth: 0,
-                    shadow: {{ enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 }}
-                }},
-                edges: {{ color: {{ color: '#334155', highlight: '#8b5cf6' }}, width: 1, smooth: {{ type: 'continuous' }} }},
-                physics: {{ barnesHut: {{ gravitationalConstant: -4000, centralGravity: 0.3, springLength: 150, springConstant: 0.04 }}, stabilization: {{ iterations: 150 }} }},
-                interaction: {{ hover: true, dragNodes: true, zoomView: true, dragView: true }}
-            }};
-            
-            var network = new vis.Network(container, data, options);
+            var network = new vis.Network(document.getElementById('mynetwork'), {{ nodes: new vis.DataSet(graphData.nodes), edges: new vis.DataSet(graphData.edges) }}, {{
+                nodes: {{ shape: 'box', font: {{ color: '#fff' }}, borderWidth: 0 }},
+                edges: {{ color: '#334155' }}
+            }});
         </script>
     </body>
     </html>
@@ -944,22 +573,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
 
 # --- FASTAPI ---
 web_app = FastAPI()
-
-web_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@web_app.get("/api/mirrors")
-async def get_mirrors():
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT bot_username FROM mirrors WHERE is_active = 1 ORDER BY added_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return {"mirrors": [row[0] for row in rows]}
+web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
@@ -971,687 +585,55 @@ async def web_report(report_id: str):
 
 async def run_web():
     config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+    await uvicorn.Server(config).serve()
 
 
-# --- ЗЕРКАЛА ---
+# --- ЗЕРКАЛА И БОТ ---
 async def run_mirror_bot(token: str, bot_username: str):
-    log.info(f"Запуск зеркала @{bot_username}...")
     mirror_bot = Bot(token=token)
     mirror_dp = Dispatcher(storage=MemoryStorage())
-    
     @mirror_dp.message(CommandStart())
     async def mirror_start(message: Message):
-        main_username = (await bot.get_me()).username
-        await message.answer(
-            f"🕵‍♂ <b>Добро пожаловать в зеркало Oasis Digital!</b>\n\n"
-            f"Главный бот: @{main_username}\n"
-            f"Сайт: https://oasissearchcom.localhost.cc",
-            parse_mode="HTML"
-        )
-
-    @mirror_dp.message(F.text)
-    async def mirror_echo(message: Message):
-        main_username = (await bot.get_me()).username
-        await message.answer(
-            f"🕵‍♂ <b>Это зеркало Oasis Digital.</b>\n\n"
-            f"Для полноценного поиска перейдите в главный бот: @{main_username}",
-            parse_mode="HTML"
-        )
-
+        await message.answer(f"Зеркало Oasis Digital. Главный бот: @{(await bot.get_me()).username}")
     try:
         await mirror_bot.delete_webhook(drop_pending_updates=True)
         await mirror_dp.start_polling(mirror_bot)
-    except Exception as e:
-        log.exception(f"Зеркало @{bot_username} упало: {e}")
     finally:
         await mirror_bot.session.close()
 
 
-# --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-
     if is_banned(message.from_user.id):
-        return await message.answer("🚫 Вы заблокированы.")
-
-    user = get_user(message.from_user.id)
-    referrer_id = None
-    if not user:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) == 2 and parts[1].isdigit():
-            referrer_id = int(parts[1])
-        add_user(message.from_user.id, message.from_user.username, referrer_id)
-
-    try:
-        await message.answer_sticker(STICKER_ID)
-    except Exception:
-        pass
-
-    await asyncio.sleep(1)
-
-    intro_msg = await message.answer(INTRO_TEXT, parse_mode="HTML", disable_web_page_preview=True)
-    try:
-        await bot.pin_chat_message(chat_id=message.chat.id, message_id=intro_msg.message_id)
-    except Exception:
-        log.exception("Не удалось закрепить сообщение")
-
-    await asyncio.sleep(1)
-
+        return await message.answer("🚫 Заблокирован.")
+    add_user(message.from_user.id, message.from_user.username)
     await message.answer(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
 
 
-@dp.callback_query(F.data == "back_to_start")
-async def cb_back(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=main_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "search_info")
-async def cb_search_info(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=back_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "profile")
-async def cb_profile(cb: CallbackQuery):
-    user = get_user(cb.from_user.id)
-    days_str = calculate_days(user[4]) if user else "0 дн."
-
-    text = (
-        f"👤 <b>Мой профиль</b>\n\n"
-        f"ID: <code>{cb.from_user.id}</code>\n"
-        f"Доступно запросов: <b>{user[2] if user else 0}</b>\n"
-        f"Баланс: $0.00\n"
-        f"Реферальный баланс: $0.00\n"
-        f"Дата регистрации: {user[4] if user else '-'}\n"
-        f"<i>(Вы агент уже: {days_str})</i>"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡️ Скрытие данных (5$)", callback_data="hide_data_menu")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
-
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "hide_data_menu")
-async def cb_hide_data_menu(cb: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper", style="primary")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
-    ])
-    await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "pay_tonkeeper")
-async def cb_pay_tonkeeper(cb: CallbackQuery):
-    memo = f"Oasis_Digital_{cb.from_user.id}"
-    text = (
-        f"💎 <b>Счёт на оплату через USDT (TON) / TON</b>\n\n"
-        f"📦 <b>Тариф:</b> Скрытие личных данных из поиска\n"
-        f"📝 <b>Описание:</b> Скрытие личных данных из поиска за $14.0 (скидка 0%)\n"
-        f"💵 <b>Сумма к отправке:</b> 14.0$ USDT (или ~13.04 TON)\n\n"
-        f"📍 <b>Куда отправлять (кошелёк TON):</b>\n<code>{TON_WALLET}</code>\n\n"
-        f"⚠️ <b>ОБЯЗАТЕЛЬНО укажите подпись (комментарий / memo) к переводу:</b>\n"
-        f"<code>{memo}</code> (или число {cb.from_user.id})\n\n"
-        f"📲 Самый удобный способ: нажмите кнопку «📲 Оплатить в 1 клик» ниже — кошелёк Tonkeeper / Telegram Wallet откроется с уже введённой суммой и memo!\n\n"
-        f"⚡️ После отправки бот автоматически обнаружит платёж за 10–30 секунд и начислит покупки."
-    )
-
-    tonkeeper_link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=tonkeeper_link, style="primary")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
-    ])
-
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "buy_requests")
-async def cb_buy_requests(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "💎 <b>Покупка запросов</b>\n\nДля покупки запросов напишите в поддержку или оплатите через профиль (функция в разработке).",
-        parse_mode="HTML",
-        reply_markup=back_kb()
-    )
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "support")
-async def cb_support(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(SearchStates.wait_support_msg)
-    await cb.message.edit_text(
-        SUPPORT_TEXT, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_support_msg)
-async def process_support_msg(msg: Message, state: FSMContext):
-    await state.clear()
-    admin_text = f"📩 <b>Новое сообщение в поддержку</b>\n\nОт: {msg.from_user.full_name} (@{msg.from_user.username})\nID: <code>{msg.from_user.id}</code>\n\nТекст: {msg.text}"
-    try:
-        await bot.send_message(MAIN_ADMIN_ID, admin_text, parse_mode="HTML")
-        await msg.answer("✅ Ваше сообщение отправлено администрации.", reply_markup=main_kb())
-    except Exception:
-        log.exception("Support forward failed")
-        await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
-
-
-# --- НЕПОЛНЫЙ ПОИСК ---
-@dp.callback_query(F.data == "search_partial")
-async def cb_search_partial(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("field_"))
-async def cb_select_field(cb: CallbackQuery, state: FSMContext):
-    field = cb.data.replace("field_", "")
-    await state.update_data(editing_field=field)
-    field_names = {"surname": "Фамилию", "name": "Имя", "patronymic": "Отчество", "birth_date": "Дату рождения"}
-    await cb.message.edit_text(
-        f"Введите {field_names.get(field, 'значение')}:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_partial")]])
-    )
-    await state.set_state(SearchStates.wait_partial_field)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_partial_field)
-async def process_field_input(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    field = data.get("editing_field")
-    if field and msg.text:
-        await state.update_data({field: msg.text.strip()})
-    await state.set_state(None)
-    await msg.answer(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-
-
-@dp.callback_query(F.data == "clear_fields")
-async def cb_clear(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(surname=None, name=None, patronymic=None, birth_date=None, country=None)
-    await cb.answer("Поля очищены")
-    await cb.message.edit_reply_markup(reply_markup=partial_search_kb(await state.get_data()))
-
-
-@dp.callback_query(F.data == "select_country")
-async def cb_select_country(cb: CallbackQuery):
-    await cb.message.edit_text("🌍 Выберите страну поиска:", reply_markup=country_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("set_country_"))
-async def cb_set_country(cb: CallbackQuery, state: FSMContext):
-    country = cb.data.replace("set_country_", "")
-    await state.update_data(country=country)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "back_to_partial")
-async def cb_back_to_partial(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(None)
-    await cb.message.edit_text(PARTIAL_TEXT, parse_mode="HTML", reply_markup=partial_search_kb(await state.get_data()))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "do_partial_search")
-async def cb_do_partial(cb: CallbackQuery, state: FSMContext):
-    if is_banned(cb.from_user.id):
-        return await cb.answer("🚫 Вы заблокированы.", show_alert=True)
-
-    data = await state.get_data()
-    query_parts = []
-    if data.get('surname'):
-        query_parts.append(f"Фамилия: {data['surname']}")
-    if data.get('name'):
-        query_parts.append(f"Имя: {data['name']}")
-    if data.get('patronymic'):
-        query_parts.append(f"Отчество: {data['patronymic']}")
-    if data.get('birth_date'):
-        query_parts.append(f"Дата: {data['birth_date']}")
-    if data.get('country'):
-        query_parts.append(f"Страна: {data['country']}")
-
-    if not query_parts:
-        return await cb.answer("Заполните хотя бы одно поле.", show_alert=True)
-
-    if not deduct_request(cb.from_user.id):
-        return await cb.answer("❌ У вас закончились запросы. Пригласите друга или купите в профиле.", show_alert=True)
-
-    query_str = ", ".join(query_parts)
-    note = await cb.message.edit_text(
-        f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {query_str}\n<b>Тип:</b> partial",
-        parse_mode="HTML"
-    )
-
-    data_result = await search_everywhere(query_str)
-    report_id = str(uuid.uuid4())[:8]
-    REPORTS_CACHE[report_id] = data_result
-
-    if data_result.get("fio") == "НЕ НАЙДЕНО":
-        await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
-    else:
-        body = format_report_text(data_result)
-        chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
-        await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
-        for extra in chunks[1:-1]:
-            await cb.message.answer(extra, parse_mode="HTML")
-        if len(chunks) > 1:
-            await cb.message.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "ref_link")
-async def cb_ref_link(cb: CallbackQuery):
-    ref_link = f"https://t.me/{(await bot.get_me()).username}?start={cb.from_user.id}"
-    text = f"🔗 <b>Ваша реферальная ссылка:</b>\n\n<code>{ref_link}</code>\n\n<i>За каждого приглашенного вы получаете +1 запрос!</i>"
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "create_mirror")
-async def cb_create_mirror(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(MIRROR_TEXT, parse_mode="HTML", reply_markup=back_kb())
-    await state.set_state(SearchStates.wait_mirror_token)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_mirror_token)
-async def process_mirror_token(msg: Message, state: FSMContext):
-    await state.clear()
-    token = msg.text.strip() if msg.text else ""
-
-    if ":" not in token:
-        return await msg.answer("❌ Это не похоже на токен.", reply_markup=main_kb())
-
-    test_bot = Bot(token=token)
-    try:
-        bot_info = await test_bot.get_me()
-        
-        conn = sqlite3.connect(USERS_DB)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO mirrors (bot_username, bot_token, added_by, added_at) VALUES (?, ?, ?, ?)",
-            (bot_info.username, token, msg.from_user.id, datetime.now().strftime("%d.%m.%Y %H:%M"))
-        )
-        cursor.execute(
-            "UPDATE mirrors SET bot_token = ? WHERE bot_username = ?",
-            (token, bot_info.username)
-        )
-        conn.commit()
-        conn.close()
-        
-        asyncio.create_task(run_mirror_bot(token, bot_info.username))
-        
-    except Exception as e:
-        log.exception("Mirror token validation failed")
-        return await msg.answer("❌ Неверный токен или бот заблокирован.", reply_markup=main_kb())
-    finally:
-        await test_bot.session.close()
-
-    await msg.answer(
-        f"🕵‍♂ <b>Зеркало @{bot_info.username} успешно запущено!</b>\n\n"
-        f"Оно добавлено на сайт и готово к работе.",
-        parse_mode="HTML", reply_markup=main_kb()
-    )
-
-
-# --- ОБЫЧНЫЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None:
+    if await state.get_state() is not None or is_banned(msg.from_user.id):
         return
-    if msg.from_user.is_bot:
-        return
-
-    if is_banned(msg.from_user.id):
-        return await msg.answer("🚫 Вы заблокированы.")
-
     if not deduct_request(msg.from_user.id):
-        return await msg.answer("❌ У вас закончились запросы.")
+        return await msg.answer("❌ Запросы закончились.")
 
     q = msg.text.strip()
-
-    note = await msg.answer(
-        f"🔍 <b>[OASIS DIGITAL]</b> Идет поиск по базам данных...\n\n<b>Цель:</b> {q}\n<b>Тип:</b> auto",
-        parse_mode="HTML"
-    )
+    note = await msg.answer(f"🔍 Поиск: <b>{q}</b>", parse_mode="HTML")
+    
     data = await search_everywhere(q)
-
-    if not data or data.get("fio") == "НЕ НАЙДЕНО":
-        return await note.edit_text("❌ <b>Данные не найдены.</b>", parse_mode="HTML", reply_markup=main_kb())
-
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
 
     body = format_report_text(data)
-    chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
-    await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
-    for extra in chunks[1:-1]:
-        await msg.answer(extra, parse_mode="HTML")
-    if len(chunks) > 1:
-        await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
-
-
-# --- СКАЧИВАНИЕ ---
-@dp.callback_query(F.data.startswith("get_txt_"))
-async def cb_send_txt(cb: CallbackQuery):
-    report_id = cb.data.replace("get_txt_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nТел: {data['phone_main']}\nОператор: {data['operator']}\nРегион: {data['region']}\nEmail: {', '.join(data.get('emails', [])) or '-'}\nАдрес: {'; '.join(data.get('addresses', [])) or '-'}\nПаспорт: {data['passport']}\nИНН: {data['inn']}\nСНИЛС: {data['snils']}"
-    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
-    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
-    await cb.answer()
-
-
-@dp.callback_query(F.data.startswith("get_json_"))
-async def cb_send_json(cb: CallbackQuery):
-    report_id = cb.data.replace("get_json_", "")
-    data = REPORTS_CACHE.get(report_id)
-    if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
-
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
-    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
-    await cb.answer()
-
-
-# --- АДМИНКА ---
-@dp.message(Command("admin"))
-async def admin_panel(msg: Message):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
-
-
-@dp.callback_query(F.data == "adm_check_apis")
-async def cb_adm_check_apis(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-
-    note = await cb.message.edit_text("🔌 <b>Проверяю API...</b>\n\nЭто может занять до 90 секунд.", parse_mode="HTML")
-    await cb.answer()
-
-    results = await run_all_api_checks()
-
-    lines = ["🔌 <b>Статус API</b>\n"]
-    for r in results:
-        icon = "🟢" if r["healthy"] else "🔴"
-        lines.append(f"{icon} <b>{r['name']}</b>")
-        lines.append(f"├ Код: <code>{r['status']}</code>")
-        lines.append(f"├ Задержка: <code>{r['latency_ms']} ms</code>")
-        lines.append(f"└ Ответ: <code>{r['preview']}</code>\n")
-
-    healthy_count = sum(1 for r in results if r["healthy"])
-    lines.append(f"\n📊 <b>Итого:</b> {healthy_count}/{len(results)} работают")
-
-    text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:3990] + "..."
-
-    await note.edit_text(
-        text, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Проверить ещё раз", callback_data="adm_check_apis", style="primary")],
-            [InlineKeyboardButton(text="⬅️ В админку", callback_data="adm_back")]
-        ])
-    )
-
-
-@dp.callback_query(F.data == "adm_back")
-async def cb_adm_back(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "adm_give")
-async def cb_adm_give(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text(
-        "Введите <code>ID количество</code>:", parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await state.set_state(SearchStates.wait_admin_give)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_admin_give)
-async def process_admin_give(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return
-    try:
-        parts = msg.text.strip().split()
-        uid, amount = int(parts[0]), int(parts[1])
-        add_requests(uid, amount)
-        await msg.answer(f"✅ Выдано {amount} для {uid}.", reply_markup=admin_menu_kb())
-    except Exception:
-        await msg.answer("❌ Ошибка формата.")
-    await state.clear()
-
-
-@dp.callback_query(F.data == "adm_take")
-async def cb_adm_take(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text(
-        "Введите <code>ID количество</code> для списания:", parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await state.set_state(SearchStates.wait_admin_take)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_admin_take)
-async def process_admin_take(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return
-    try:
-        parts = msg.text.strip().split()
-        uid, amount = int(parts[0]), int(parts[1])
-        add_requests(uid, -amount)
-        await msg.answer(f"✅ Забрано {amount} у {uid}.", reply_markup=admin_menu_kb())
-    except Exception:
-        await msg.answer("❌ Ошибка формата.")
-    await state.clear()
-
-
-@dp.callback_query(F.data == "adm_ban")
-async def cb_adm_ban(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text(
-        "Введите <code>ID</code> для бана/разбана:", parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await state.set_state(SearchStates.wait_admin_ban)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_admin_ban)
-async def process_admin_ban(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return
-    try:
-        uid = int(msg.text.strip())
-        conn = sqlite3.connect(USERS_DB)
-        cursor = conn.cursor()
-        cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (uid,))
-        row = cursor.fetchone()
-        if row:
-            new_status = 0 if row[0] == 1 else 1
-            cursor.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (new_status, uid))
-            conn.commit()
-            status_text = "ЗАБАНЕН 🚫" if new_status == 1 else "РАЗБАНЕН ✅"
-            await msg.answer(f"Пользователь <code>{uid}</code>: {status_text}", parse_mode="HTML", reply_markup=admin_menu_kb())
-        else:
-            await msg.answer("❌ Пользователь не найден.", reply_markup=admin_menu_kb())
-        conn.close()
-    except Exception:
-        await msg.answer("❌ Ошибка формата.")
-    await state.clear()
-
-
-@dp.callback_query(F.data == "adm_broadcast")
-async def cb_adm_broadcast(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text(
-        "📢 <b>Рассылка</b>\n\nОтправьте текст сообщения:", parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await state.set_state(SearchStates.wait_admin_broadcast)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_admin_broadcast)
-async def process_admin_broadcast(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return
-    await state.clear()
-
-    if not msg.text:
-        return await msg.answer("❌ Текст пустой.")
-
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
-    users = cursor.fetchall()
-    conn.close()
-
-    sent = 0
-    failed = 0
-    status_msg = await msg.answer(f"📢 Рассылка на {len(users)} юзеров...")
-
-    for user in users:
-        try:
-            await bot.send_message(user[0], msg.text, parse_mode="HTML")
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
-
-    await status_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n\n📬 Доставлено: {sent}\n❌ Ошибок: {failed}",
-        reply_markup=admin_menu_kb()
-    )
-
-
-@dp.callback_query(F.data == "adm_test_api")
-async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text(
-        "📡 <b>Тест API</b>\n\nВведите запрос (например, номер телефона, ФИО или ник):", parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_start")]])
-    )
-    await state.set_state(SearchStates.wait_admin_raw)
-    await cb.answer()
-
-
-@dp.message(SearchStates.wait_admin_raw)
-async def process_admin_raw(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
-        return
-    await state.clear()
-
-    q = msg.text.strip()
-    note = await msg.answer(f"📡 <b>Отправляю запросы к API:</b> {q}...", parse_mode="HTML")
-
-    res_mb, res_bb = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
-    mb_str = json.dumps(res_mb, ensure_ascii=False)[:1500] if res_mb else "None/Ошибка (см. логи)"
-    bb_str = json.dumps(res_bb, ensure_ascii=False)[:1500] if res_bb else "None/Ошибка (см. логи)"
-
-    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
-    if len(text) > 4000:
-        text = text[:3990] + "..."
-
-    await note.edit_text(text, parse_mode="HTML")
-    await msg.answer("Возврат в админку", reply_markup=admin_menu_kb())
-
-
-@dp.callback_query(F.data == "adm_stats")
-async def cb_adm_stats(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*), SUM(requests_left) FROM users")
-    total, remaining = cursor.fetchone()
-    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
-    banned = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM users WHERE joined_at = ?", (datetime.now().strftime("%d.%m.%Y"),))
-    today = cursor.fetchone()[0]
-    conn.close()
-
-    text = (
-        f"📊 <b>Аналитика</b>\n\n"
-        f"👥 Всего юзеров: <b>{total or 0}</b>\n"
-        f"🚫 Забанено: <b>{banned or 0}</b>\n"
-        f"🆕 Сегодня: <b>{today or 0}</b>\n"
-        f"🎟 Остаток запросов: <b>{remaining or 0}</b>\n"
-        f"📁 Отчетов в кэше: <b>{len(REPORTS_CACHE)}</b>"
-    )
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=admin_menu_kb())
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "adm_promo")
-async def cb_adm_promo(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.answer("В разработке", show_alert=True)
-
-
-@dp.callback_query(F.data == "adm_maintenance")
-async def cb_adm_maintenance(cb: CallbackQuery):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await cb.answer("В разработке", show_alert=True)
+    await note.edit_text(body, parse_mode="HTML", reply_markup=result_kb(report_id))
 
 
 async def main():
-    log.info("Бот запускается на Polling...")
     await bot.delete_webhook(drop_pending_updates=True)
-
-    # Восстанавливаем зеркала при старте
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT bot_username, bot_token FROM mirrors WHERE is_active = 1 AND bot_token IS NOT NULL")
-    mirrors = cursor.fetchall()
-    conn.close()
-
-    for username, token in mirrors:
-        if token:
-            asyncio.create_task(run_mirror_bot(token, username))
-
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен.")
+    asyncio.run(main())
