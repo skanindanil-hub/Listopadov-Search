@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # ====================== НАСТРОЙКИ OASIS DIGITAL ======================
-BOT_TOKEN = "9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY"
+BOT_TOKEN = "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms"
 BOT_USERNAME = "@MobiusSearchBot"
 
 MAIN_ADMIN_ID = 8394631079
@@ -51,7 +51,7 @@ API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
 API_URL_LEAKOSINT = "https://leakosintapi.com/"
 
-API_TIMEOUT = 90  # 90 секунд на ожидание ответа от каждого API
+API_TIMEOUT = 90  # 90 секунд таймаут
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("oasis")
@@ -75,15 +75,9 @@ REPORTS_CACHE = BoundedCache(maxlen=1000)
 
 
 class SearchStates(StatesGroup):
-    wait_partial_field = State()
     wait_support_msg = State()
-    wait_mirror_token = State()
-    wait_admin_give = State()
-    wait_admin_take = State()
-    wait_admin_ban = State()
-    wait_admin_broadcast = State()
-    wait_admin_raw = State()
     wait_promo_input = State()
+    wait_admin_raw = State()
     wait_admin_create_promo = State()
     wait_admin_create_check = State()
 
@@ -343,9 +337,8 @@ async def run_all_api_checks():
     )
 
 
-# --- АГРЕГАТОР ПО ВСЕМ API ---
+# --- ПАРСЕР И АГРЕГАТОР ---
 async def search_everywhere(q: str):
-    # Запускаем все доступные API одновременно с ожиданием до 90 секунд
     results = await asyncio.gather(
         fetch_blackbox(q, BLACKBOX_KEY),
         fetch_blackbox(q, BLACKBOX_KEY_2),
@@ -371,13 +364,12 @@ async def search_everywhere(q: str):
         "raw_responses": []
     }
 
-    for idx, resp in enumerate(results):
+    for resp in results:
         if not isinstance(resp, dict):
             continue
 
         final_data["raw_responses"].append(resp)
 
-        # 1. Разбор формата Black-Box / Mobius
         profile = resp.get("profile") or {}
         telecom = resp.get("telecom") or {}
         tg = resp.get("telegram") or {}
@@ -413,7 +405,6 @@ async def search_everywhere(q: str):
                 if isinstance(records, list):
                     final_data["databases"][db_name].extend(records)
 
-        # 2. Разбор формата LeakOsint
         leak_list = resp.get("List")
         if isinstance(leak_list, dict):
             for db_name, db_content in leak_list.items():
@@ -425,7 +416,6 @@ async def search_everywhere(q: str):
                         final_data["databases"][db_name] = []
                     final_data["databases"][db_name].extend(data_items)
 
-    # Приводим множества к строкам/спискам для JSON и вывода
     final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "НЕ НАЙДЕНО"
     final_data["dob"] = ", ".join(final_data["dob"]) if final_data["dob"] else "Нет"
     final_data["snils"] = ", ".join(final_data["snils"]) if final_data["snils"] else "Нет"
@@ -742,7 +732,7 @@ async def process_admin_create_check(msg: Message, state: FSMContext):
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (ожидание до 90 сек):", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):", parse_mode="HTML", reply_markup=back_kb())
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
@@ -753,7 +743,7 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return
     await state.clear()
     q = msg.text.strip()
-    note = await msg.answer(f"📡 Опрашиваю все API (таймаут 90с): <b>{q}</b>...", parse_mode="HTML")
+    note = await msg.answer(f"📡 Опрашиваем все API (до 90с): <b>{q}</b>...", parse_mode="HTML")
     
     res_mb, res_bb1, res_bb2, res_lo = await asyncio.gather(
         fetch_mobius(q),
@@ -763,9 +753,9 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return_exceptions=True
     )
 
-    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:900] if isinstance(res_mb, dict) else "None"
-    bb_str = json.dumps(res_bb1 or res_bb2, ensure_ascii=False, indent=2)[:900] if isinstance(res_bb1 or res_bb2, dict) else "None"
-    lo_str = json.dumps(res_lo, ensure_ascii=False, indent=2)[:900] if isinstance(res_lo, dict) else "None"
+    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:800] if isinstance(res_mb, dict) else "None/Error"
+    bb_str = json.dumps(res_bb1 or res_bb2, ensure_ascii=False, indent=2)[:800] if isinstance(res_bb1 or res_bb2, dict) else "None/Error"
+    lo_str = json.dumps(res_lo, ensure_ascii=False, indent=2)[:800] if isinstance(res_lo, dict) else "None/Error"
 
     text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>\n\n<b>LEAKOSINT:</b>\n<pre>{lo_str}</pre>"
     await note.edit_text(text[:4000], parse_mode="HTML", reply_markup=admin_menu_kb())
@@ -775,7 +765,7 @@ async def process_admin_raw(msg: Message, state: FSMContext):
 async def cb_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    note = await cb.message.edit_text("🔌 Проверяю все API (ожидание до 90с)...", parse_mode="HTML")
+    note = await cb.message.edit_text("🔌 Проверяем все API (до 90с)...", parse_mode="HTML")
     results = await run_all_api_checks()
     lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
     await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
@@ -816,7 +806,7 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет глубокий поиск по всем базам (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет глубокий мульти-поиск по всем базам (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
     
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
