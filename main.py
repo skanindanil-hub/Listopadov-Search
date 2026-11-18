@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # ====================== НАСТРОЙКИ OASIS DIGITAL ======================
-BOT_TOKEN = "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms"
+BOT_TOKEN = "9244232488:AAFJAQ4TpJvZm3uhE1cgXsbwChSzOj2DTXY"
 BOT_USERNAME = "@MobiusSearchBot"
 
 MAIN_ADMIN_ID = 8394631079
@@ -35,19 +35,23 @@ PAYMENTS_CHANNEL_ID = -1004308412586
 # API КЛЮЧИ
 KRATOS_KEY = "lBGtnFGdTabFrRiFdFzZiEjUrTlqArcU"
 BLACKBOX_KEY = "Y1nqXZ4tOVh4PBsUZyB2CQW6TGtn"
+BLACKBOX_KEY_2 = "gcGGgocfzgrHqyDPLfQpvMvrQgQ3Dnqi"
 HYDRA_KEY = "HYDRA-LordKEY-m7N9iq8wl7JzAnjToNXCA"
 ONUX_KEY = "sk-qU6CYudhVnxATab3cSJVdZSP35okBEB4"
 NEBULA_KEY = "NEBULA-A0C2BC2A724EA3B5E8431B2B8C83EC9C"
+LEAKOSINT_KEY = "0f1a043ec680d41415c6b4437f631d47aa0cd484427d7e65"
 
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 DB_FILE = "oasis.db"
 USERS_DB = "users.db"
-STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
 # API Endpoints
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
-API_URL_BLACKBOX = "https://api.black-box.cc"
+API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
+API_URL_LEAKOSINT = "https://leakosintapi.com/"
+
+API_TIMEOUT = 90  # 90 секунд на ожидание ответа от каждого API
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("oasis")
@@ -68,9 +72,6 @@ class BoundedCache(OrderedDict):
             del self[oldest]
 
 REPORTS_CACHE = BoundedCache(maxlen=1000)
-
-TG_USERNAME_RE = re.compile(r"[a-zA-Z0-9_]{5,32}")
-TG_ID_RE = re.compile(r"\d{5,12}")
 
 
 class SearchStates(StatesGroup):
@@ -127,14 +128,6 @@ def init_users_db():
             PRIMARY KEY (user_id, code)
         )
     ''')
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE mirrors ADD COLUMN bot_token TEXT")
-    except sqlite3.OperationalError:
-        pass
     conn.commit()
     conn.close()
 
@@ -238,22 +231,17 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 
 <i>Отправьте запрос сообщением.</i>"""
 
-INTRO_TEXT = f'<a href="{WEBHOOK_HOST}">Oasis Digital</a> - это отличный инструмент для поиска информации по открытым источникам.'
-PARTIAL_TEXT = "📄 <b>Поиск по неполным данным</b>\nЗаполните необходимые поля и нажмите поиск."
 SUPPORT_TEXT = "🆘 <b>Связь с нами</b>\nНапишите ваше сообщение в чат."
-MIRROR_TEXT = "🔧 <b>Инструкция по созданию зеркала:</b>\nОтправьте API Token бота от @BotFather."
 HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость скрытия данных: $7 (навсегда)"
 
 
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info")],
-        [InlineKeyboardButton(text="📄 Поиск по неполным данным", callback_data="search_partial")],
         [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🎟 Активировать промокод", callback_data="use_promo")],
-        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🤖 Зеркало", callback_data="create_mirror")],
-        [InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
+        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
     ])
 
 
@@ -276,27 +264,17 @@ def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
         [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis")],
-        [InlineKeyboardButton(text="➕ Выдать", callback_data="adm_give"), InlineKeyboardButton(text="➖ Забрать", callback_data="adm_take")],
         [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="adm_promo"), InlineKeyboardButton(text="💳 Создать чек", callback_data="adm_check")],
-        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm_stats"), InlineKeyboardButton(text="🚫 Бан", callback_data="adm_ban")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
     ])
 
 
-def partial_search_kb(data: dict):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Очистить", callback_data="clear_fields"), InlineKeyboardButton(text="Поиск", callback_data="do_partial_search")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
-
-
-# --- API ЗАПРОСЫ С ЛОГИРОВАНИЕМ В КОНСОЛЬ ---
+# --- API ЗАПРОСЫ (ТАЙМАУТ 90 СЕКУНД) ---
 async def fetch_mobius(q: str):
     clean_q = q.strip().replace("@", "")
     headers = {"X-API-Key": KRATOS_KEY, "Content-Type": "application/json"}
     payload = {"query": clean_q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
@@ -305,28 +283,43 @@ async def fetch_mobius(q: str):
                 if resp.status == 200:
                     return await resp.json()
     except Exception as e:
-        log.exception(f"[MOBIUS ERROR] {e}")
+        log.error(f"[MOBIUS ERROR] {e}")
     return None
 
 
-async def fetch_blackbox(q: str):
-    headers = {"X-API-Key": BLACKBOX_KEY, "Accept": "application/json"}
-    params = {"q": q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=30)
+async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY):
+    headers = {"X-API-Key": api_key, "Accept": "application/json"}
+    params = {"q": q.strip(), "type": "auto"}
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{API_URL_BLACKBOX}/v1.1/search", headers=headers, params=params) as resp:
+            async with session.get(API_URL_BLACKBOX, headers=headers, params=params) as resp:
                 text = await resp.text()
                 log.info(f"[BLACKBOX] Status: {resp.status} | Response: {text[:200]}")
                 if resp.status == 200:
                     return await resp.json()
     except Exception as e:
-        log.exception(f"[BLACKBOX ERROR] {e}")
+        log.error(f"[BLACKBOX ERROR] {e}")
+    return None
+
+
+async def fetch_leakosint(q: str):
+    payload = {"token": LEAKOSINT_KEY, "request": q.strip(), "limit": 100, "lang": "ru"}
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(API_URL_LEAKOSINT, json=payload) as resp:
+                text = await resp.text()
+                log.info(f"[LEAKOSINT] Status: {resp.status} | Response: {text[:200]}")
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        log.error(f"[LEAKOSINT ERROR] {e}")
     return None
 
 
 async def check_api_health(name, url, method="GET", headers=None, payload=None):
-    timeout = aiohttp.ClientTimeout(total=20)
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     start = asyncio.get_event_loop().time()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -336,58 +329,112 @@ async def check_api_health(name, url, method="GET", headers=None, payload=None):
                 req = session.post(url, headers=headers, json=payload)
             async with req as resp:
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
-                return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed, "preview": (await resp.text())[:200]}
+                return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}
     except Exception as e:
-        return {"name": name, "healthy": False, "status": "ERROR", "latency_ms": 0, "preview": str(e)[:200]}
+        return {"name": name, "healthy": False, "status": "ERROR", "latency_ms": 0}
 
 
 async def run_all_api_checks():
     return await asyncio.gather(
         check_api_health("Mobius (Kratos)", API_URL_MOBIUS, method="POST", headers={"X-API-Key": KRATOS_KEY, "Content-Type": "application/json"}, payload={"query": "79825207224", "type": "auto"}),
-        check_api_health("Black-Box", f"{API_URL_BLACKBOX}/v1.1/search", method="GET", headers={"X-API-Key": BLACKBOX_KEY}, payload={"q": "79825207224", "type": "phone"})
+        check_api_health("Black-Box 1", API_URL_BLACKBOX, method="GET", headers={"X-API-Key": BLACKBOX_KEY}, payload={"q": "79825207224", "type": "phone"}),
+        check_api_health("Black-Box 2", API_URL_BLACKBOX, method="GET", headers={"X-API-Key": BLACKBOX_KEY_2}, payload={"q": "79825207224", "type": "phone"}),
+        check_api_health("LeakOsint", API_URL_LEAKOSINT, method="POST", payload={"token": LEAKOSINT_KEY, "request": "79825207224", "limit": 10})
     )
 
 
-# --- УНИВЕРСАЛЬНЫЙ ПАРСЕР ПОД ФОРМАТ JSON ---
+# --- АГРЕГАТОР ПО ВСЕМ API ---
 async def search_everywhere(q: str):
-    clean_q = q.strip().replace("@", "")
-    res_mobius, res_blackbox = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
+    # Запускаем все доступные API одновременно с ожиданием до 90 секунд
+    results = await asyncio.gather(
+        fetch_blackbox(q, BLACKBOX_KEY),
+        fetch_blackbox(q, BLACKBOX_KEY_2),
+        fetch_mobius(q),
+        fetch_leakosint(q),
+        return_exceptions=True
+    )
 
     final_data = {
-        "query": q, "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "fio": "Нет", "phone_main": q, "username": "Нет",
-        "operator": "Нет", "region": "Нет", "country": "Нет",
-        "emails": [], "addresses": [], "phones": [],
-        "dob": "Нет", "passport": "Нет", "inn": "Нет", "snils": "Нет",
-        "activity": {}, "tg_info": {},
-        "sources_list": [], "stats": {"sources": 0, "phones": 0, "records": 0}
+        "query": q,
+        "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "fio": set(),
+        "dob": set(),
+        "snils": set(),
+        "phones": set(),
+        "emails": set(),
+        "operator": "Нет",
+        "region": "Нет",
+        "country": "Россия",
+        "databases": {},
+        "tg_info": {},
+        "sources_list": [],
+        "raw_responses": []
     }
 
-    found = False
-    for resp in [res_blackbox, res_mobius]:
+    for idx, resp in enumerate(results):
         if not isinstance(resp, dict):
             continue
+
+        final_data["raw_responses"].append(resp)
+
+        # 1. Разбор формата Black-Box / Mobius
         profile = resp.get("profile") or {}
         telecom = resp.get("telecom") or {}
-        
-        fio = profile.get("primary_fio") or resp.get("fio") or ""
-        if fio:
-            found = True
-            final_data["fio"] = fio
-            final_data["dob"] = profile.get("birth_date", "Нет")
-            final_data["snils"] = profile.get("snils", "Нет")
-            final_data["operator"] = telecom.get("operator", "Нет")
-            final_data["region"] = telecom.get("region", "Нет")
-            final_data["country"] = telecom.get("country", "Россия")
-            break
+        tg = resp.get("telegram") or {}
+        dbs = resp.get("databases") or resp.get("results") or {}
 
-    if found:
-        final_data["stats"]["records"] = 1
-        final_data["sources_list"].append({"name": "Oasis Deep Engine", "count": 1})
-    else:
-        final_data["fio"] = "НЕ НАЙДЕНО"
+        if profile.get("primary_fio"):
+            final_data["fio"].add(profile["primary_fio"])
+        if resp.get("fio"):
+            final_data["fio"].add(resp["fio"])
+        if profile.get("birth_date"):
+            final_data["dob"].add(profile["birth_date"])
+        if profile.get("snils"):
+            final_data["snils"].add(profile["snils"])
+        if isinstance(profile.get("phones"), list):
+            final_data["phones"].update(profile["phones"])
 
-    final_data["stats"]["sources"] = len(final_data["sources_list"])
+        if telecom.get("operator"):
+            final_data["operator"] = telecom["operator"]
+        if telecom.get("region"):
+            final_data["region"] = telecom["region"]
+        if telecom.get("country"):
+            final_data["country"] = telecom["country"]
+
+        if tg and isinstance(tg, dict):
+            final_data["tg_info"] = tg
+            if tg.get("full_name"):
+                final_data["fio"].add(tg["full_name"])
+
+        if isinstance(dbs, dict):
+            for db_name, records in dbs.items():
+                if db_name not in final_data["databases"]:
+                    final_data["databases"][db_name] = []
+                if isinstance(records, list):
+                    final_data["databases"][db_name].extend(records)
+
+        # 2. Разбор формата LeakOsint
+        leak_list = resp.get("List")
+        if isinstance(leak_list, dict):
+            for db_name, db_content in leak_list.items():
+                if db_name == "No results found":
+                    continue
+                data_items = db_content.get("Data", [])
+                if data_items:
+                    if db_name not in final_data["databases"]:
+                        final_data["databases"][db_name] = []
+                    final_data["databases"][db_name].extend(data_items)
+
+    # Приводим множества к строкам/спискам для JSON и вывода
+    final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "НЕ НАЙДЕНО"
+    final_data["dob"] = ", ".join(final_data["dob"]) if final_data["dob"] else "Нет"
+    final_data["snils"] = ", ".join(final_data["snils"]) if final_data["snils"] else "Нет"
+    final_data["phones"] = list(final_data["phones"])
+    final_data["emails"] = list(final_data["emails"])
+
+    if final_data["fio"] != "НЕ НАЙДЕНО" or final_data["databases"] or final_data["tg_info"]:
+        final_data["sources_list"].append({"name": "Oasis Multi-API Engine", "count": len(final_data["databases"]) or 1})
+
     return final_data
 
 
@@ -395,24 +442,65 @@ def format_report_text(data: dict) -> str:
     def tree(label, val, last=False):
         return f"{'└' if last else '├'} {label}: {val}\n"
 
-    parts = [f"🔍 <b>[Oasis Digital] Результат поиска по:</b> {data.get('query')}\n\n"]
-    if data.get("fio") != "НЕ НАЙДЕНО":
+    parts = [f"🔍 <b>[Oasis Digital] Результат поиска по:</b> <code>{data.get('query')}</code>\n\n"]
+    has_data = False
+
+    if data.get("fio") and data.get("fio") != "НЕ НАЙДЕНО":
+        has_data = True
         parts.append(tree("ФИО", data.get("fio")))
-        parts.append(tree("Дата рождения", data.get("dob")))
-        parts.append(tree("СНИЛС", data.get("snils")))
-        parts.append(tree("Оператор", data.get("operator")))
-        parts.append(tree("Регион", data.get("region"), last=True))
-    else:
-        parts.append("❌ Данные не найдены в базах.")
+        if data.get("dob") != "Нет":
+            parts.append(tree("Дата рождения", data.get("dob")))
+        if data.get("snils") != "Нет":
+            parts.append(tree("СНИЛС", data.get("snils")))
+        if data.get("operator") != "Нет":
+            parts.append(tree("Оператор", data.get("operator")))
+        if data.get("region") != "Нет":
+            parts.append(tree("Регион", data.get("region"), last=True))
+        parts.append("\n")
+
+    tg = data.get("tg_info")
+    if tg:
+        has_data = True
+        parts.append(f"✈️ <b>Telegram:</b>\n")
+        if tg.get("id"):
+            parts.append(tree("ID", tg.get("id")))
+        if tg.get("username"):
+            parts.append(tree("Username", f"@{tg.get('username')}"))
+        if tg.get("reg_date"):
+            parts.append(tree("Регистрация", tg.get("reg_date"), last=True))
+        parts.append("\n")
+
+    dbs = data.get("databases")
+    if dbs:
+        has_data = True
+        parts.append(f"🗄 <b>Найдено в базах ({len(dbs)}):</b>\n")
+        for db_name, records in list(dbs.items())[:5]:
+            parts.append(f"• <b>{db_name}</b> ({len(records)} зап.)\n")
+            if records and isinstance(records[0], dict):
+                for k, v in list(records[0].items())[:4]:
+                    parts.append(f"  ├ {k}: <code>{v}</code>\n")
+
+    if not has_data:
+        parts.append("❌ Данные не найдены ни в одном из подключенных API.")
+
     return "".join(parts)
 
 
 def generate_html_report(data: dict, report_id: str) -> str:
+    dbs_html = ""
+    for db_name, records in data.get("databases", {}).items():
+        rows = ""
+        for rec in records:
+            if isinstance(rec, dict):
+                items = "<br>".join(f"<b>{k}:</b> {v}" for k, v in rec.items())
+                rows += f"<div style='border-bottom:1px solid #334155;padding:8px 0;'>{items}</div>"
+        dbs_html += f"<div class='card'><h3>📁 {db_name}</h3>{rows}</div>"
+
     return f"""
     <!DOCTYPE html>
     <html lang="ru">
     <head><meta charset="UTF-8"><title>Oasis Digital Report</title>
-    <style>body{{font-family:sans-serif;background:#0f1015;color:#fff;padding:20px;}} .card{{background:#1e293b;padding:20px;border-radius:10px;}}</style>
+    <style>body{{font-family:sans-serif;background:#0f1015;color:#fff;padding:20px;}} .card{{background:#1e293b;padding:20px;border-radius:10px;margin-bottom:15px;}}</style>
     </head>
     <body>
         <div class="card">
@@ -422,6 +510,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             <p><b>СНИЛС:</b> {data.get('snils')}</p>
             <p><b>Оператор / Регион:</b> {data.get('operator')} / {data.get('region')}</p>
         </div>
+        {dbs_html}
     </body>
     </html>
     """
@@ -444,20 +533,7 @@ async def run_web():
     await uvicorn.Server(config).serve()
 
 
-# --- ЗЕРКАЛА И БОТ ---
-async def run_mirror_bot(token: str, bot_username: str):
-    mirror_bot = Bot(token=token)
-    mirror_dp = Dispatcher(storage=MemoryStorage())
-    @mirror_dp.message(CommandStart())
-    async def mirror_start(message: Message):
-        await message.answer(f"Зеркало Oasis Digital. Главный бот: {BOT_USERNAME}")
-    try:
-        await mirror_bot.delete_webhook(drop_pending_updates=True)
-        await mirror_dp.start_polling(mirror_bot)
-    finally:
-        await mirror_bot.session.close()
-
-
+# --- БОТ ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -523,6 +599,14 @@ async def cb_pay_tonkeeper(cb: CallbackQuery):
 @dp.callback_query(F.data == "buy_requests")
 async def cb_buy_requests(cb: CallbackQuery):
     await cb.message.edit_text("💎 <b>Покупка запросов</b>\nОбратитесь к администратору: " + ADMIN_USERNAME, parse_mode="HTML", reply_markup=back_kb())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "ref_link")
+async def cb_ref_link(cb: CallbackQuery):
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={cb.from_user.id}"
+    await cb.message.edit_text(f"🔗 <b>Реферальная ссылка:</b>\n\n<code>{ref_link}</code>", parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
 
@@ -658,7 +742,7 @@ async def process_admin_create_check(msg: Message, state: FSMContext):
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос:", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (ожидание до 90 сек):", parse_mode="HTML", reply_markup=back_kb())
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
@@ -669,31 +753,55 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return
     await state.clear()
     q = msg.text.strip()
-    note = await msg.answer(f"📡 Запрос: <b>{q}</b>...", parse_mode="HTML")
+    note = await msg.answer(f"📡 Опрашиваю все API (таймаут 90с): <b>{q}</b>...", parse_mode="HTML")
     
-    res_mb, res_bb = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
-    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:1500] if res_mb else "None"
-    bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1500] if res_bb else "None"
+    res_mb, res_bb1, res_bb2, res_lo = await asyncio.gather(
+        fetch_mobius(q),
+        fetch_blackbox(q, BLACKBOX_KEY),
+        fetch_blackbox(q, BLACKBOX_KEY_2),
+        fetch_leakosint(q),
+        return_exceptions=True
+    )
 
-    await note.edit_text(f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>", parse_mode="HTML", reply_markup=admin_menu_kb())
+    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:900] if isinstance(res_mb, dict) else "None"
+    bb_str = json.dumps(res_bb1 or res_bb2, ensure_ascii=False, indent=2)[:900] if isinstance(res_bb1 or res_bb2, dict) else "None"
+    lo_str = json.dumps(res_lo, ensure_ascii=False, indent=2)[:900] if isinstance(res_lo, dict) else "None"
+
+    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>\n\n<b>LEAKOSINT:</b>\n<pre>{lo_str}</pre>"
+    await note.edit_text(text[:4000], parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 @dp.callback_query(F.data == "adm_check_apis")
 async def cb_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    note = await cb.message.edit_text("🔌 Проверяю API...", parse_mode="HTML")
+    note = await cb.message.edit_text("🔌 Проверяю все API (ожидание до 90с)...", parse_mode="HTML")
     results = await run_all_api_checks()
-    healthy = sum(1 for r in results if r["healthy"])
-    await note.edit_text(f"🔌 <b>Статус API:</b> {healthy}/{len(results)} активны", parse_mode="HTML", reply_markup=admin_menu_kb())
+    lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
+    await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
-@dp.callback_query(F.data == "adm_back")
-async def cb_adm_back(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
-        return await cb.answer("Нет доступа", show_alert=True)
-    await state.clear()
-    await cb.message.edit_text("👑 <b>Админ-панель</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+@dp.callback_query(F.data.startswith("get_txt_"))
+async def cb_send_txt(cb: CallbackQuery):
+    report_id = cb.data.replace("get_txt_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nДата рождения: {data['dob']}\nСНИЛС: {data['snils']}"
+    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
+    await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("get_json_"))
+async def cb_send_json(cb: CallbackQuery):
+    report_id = cb.data.replace("get_json_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
+    await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
     await cb.answer()
 
 
@@ -708,14 +816,19 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск...\n\n<b>Цель:</b> {q}", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет глубокий поиск по всем базам (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
     
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
     REPORTS_CACHE[report_id] = data
 
     body = format_report_text(data)
-    await note.edit_text(body, parse_mode="HTML", reply_markup=result_kb(report_id))
+    chunks = [body[i:i+3900] for i in range(0, len(body), 3900)]
+    await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
+    for extra in chunks[1:-1]:
+        await msg.answer(extra, parse_mode="HTML")
+    if len(chunks) > 1:
+        await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
 
 
 async def main():
