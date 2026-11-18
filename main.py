@@ -21,11 +21,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-# ====================== НАСТРОЙКИ ИЗ ТВОЕГО КОНФИГА ======================
+# ====================== НАСТРОЙКИ OASIS DIGITAL ======================
 BOT_TOKEN = "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms"
 BOT_USERNAME = "@MobiusSearchBot"
 
-MAIN_ADMIN_ID = 8394631079 p
+MAIN_ADMIN_ID = 8394631079
 ADMIN_USERNAME = "@youranonglobal"
 
 CHANNEL_ID = -1004330390390
@@ -45,7 +45,7 @@ DB_FILE = "oasis.db"
 USERS_DB = "users.db"
 STICKER_ID = "CAACAgIAAxkBAAFXzjhq-itNMdvQX03_x8hhB9NUezaSiAACFyUAAtkoAAFL79-L7Fw-Jlc9BA"
 
-# Mobius / BlackBox Endpoints
+# API Endpoints
 API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
 API_URL_BLACKBOX = "https://api.black-box.cc"
 
@@ -238,7 +238,7 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 
 <i>Отправьте запрос сообщением.</i>"""
 
-INTRO_TEXT = f'<a href="{WEBHOOK_HOST}">Mobius Search</a> - это отличный инструмент для поиска информации по открытым источникам.'
+INTRO_TEXT = f'<a href="{WEBHOOK_HOST}">Oasis Digital</a> - это отличный инструмент для поиска информации по открытым источникам.'
 PARTIAL_TEXT = "📄 <b>Поиск по неполным данным</b>\nЗаполните необходимые поля и нажмите поиск."
 SUPPORT_TEXT = "🆘 <b>Связь с нами</b>\nНапишите ваше сообщение в чат."
 MIRROR_TEXT = "🔧 <b>Инструкция по созданию зеркала:</b>\nОтправьте API Token бота от @BotFather."
@@ -291,7 +291,7 @@ def partial_search_kb(data: dict):
     ])
 
 
-# --- API ЗАПРОСЫ С ТВОИМИ КЛЮЧАМИ ---
+# --- API ЗАПРОСЫ С ЛОГИРОВАНИЕМ В КОНСОЛЬ ---
 async def fetch_mobius(q: str):
     clean_q = q.strip().replace("@", "")
     headers = {"X-API-Key": KRATOS_KEY, "Content-Type": "application/json"}
@@ -300,10 +300,12 @@ async def fetch_mobius(q: str):
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(API_URL_MOBIUS, json=payload, headers=headers) as resp:
+                text = await resp.text()
+                log.info(f"[MOBIUS] Status: {resp.status} | Response: {text[:200]}")
                 if resp.status == 200:
                     return await resp.json()
-    except Exception:
-        log.exception("Mobius request failed")
+    except Exception as e:
+        log.exception(f"[MOBIUS ERROR] {e}")
     return None
 
 
@@ -314,10 +316,12 @@ async def fetch_blackbox(q: str):
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f"{API_URL_BLACKBOX}/v1.1/search", headers=headers, params=params) as resp:
+                text = await resp.text()
+                log.info(f"[BLACKBOX] Status: {resp.status} | Response: {text[:200]}")
                 if resp.status == 200:
                     return await resp.json()
-    except Exception:
-        log.exception("BlackBox request failed")
+    except Exception as e:
+        log.exception(f"[BLACKBOX ERROR] {e}")
     return None
 
 
@@ -344,7 +348,7 @@ async def run_all_api_checks():
     )
 
 
-# --- ПАРСЕР ---
+# --- УНИВЕРСАЛЬНЫЙ ПАРСЕР ПОД ФОРМАТ JSON ---
 async def search_everywhere(q: str):
     clean_q = q.strip().replace("@", "")
     res_mobius, res_blackbox = await asyncio.gather(fetch_mobius(q), fetch_blackbox(q))
@@ -379,7 +383,7 @@ async def search_everywhere(q: str):
 
     if found:
         final_data["stats"]["records"] = 1
-        final_data["sources_list"].append({"name": "Mobius / Black-Box Engine", "count": 1})
+        final_data["sources_list"].append({"name": "Oasis Deep Engine", "count": 1})
     else:
         final_data["fio"] = "НЕ НАЙДЕНО"
 
@@ -391,7 +395,7 @@ def format_report_text(data: dict) -> str:
     def tree(label, val, last=False):
         return f"{'└' if last else '├'} {label}: {val}\n"
 
-    parts = [f"🔍 <b>Результат поиска по:</b> {data.get('query')}\n\n"]
+    parts = [f"🔍 <b>[Oasis Digital] Результат поиска по:</b> {data.get('query')}\n\n"]
     if data.get("fio") != "НЕ НАЙДЕНО":
         parts.append(tree("ФИО", data.get("fio")))
         parts.append(tree("Дата рождения", data.get("dob")))
@@ -407,12 +411,12 @@ def generate_html_report(data: dict, report_id: str) -> str:
     return f"""
     <!DOCTYPE html>
     <html lang="ru">
-    <head><meta charset="UTF-8"><title>Mobius Report</title>
+    <head><meta charset="UTF-8"><title>Oasis Digital Report</title>
     <style>body{{font-family:sans-serif;background:#0f1015;color:#fff;padding:20px;}} .card{{background:#1e293b;padding:20px;border-radius:10px;}}</style>
     </head>
     <body>
         <div class="card">
-            <h2>Отчет по запросу: {data.get('query')}</h2>
+            <h2>Oasis Digital — Отчет по запросу: {data.get('query')}</h2>
             <p><b>ФИО:</b> {data.get('fio')}</p>
             <p><b>Дата рождения:</b> {data.get('dob')}</p>
             <p><b>СНИЛС:</b> {data.get('snils')}</p>
@@ -446,7 +450,7 @@ async def run_mirror_bot(token: str, bot_username: str):
     mirror_dp = Dispatcher(storage=MemoryStorage())
     @mirror_dp.message(CommandStart())
     async def mirror_start(message: Message):
-        await message.answer(f"Зеркало Mobius Search. Главный бот: {BOT_USERNAME}")
+        await message.answer(f"Зеркало Oasis Digital. Главный бот: {BOT_USERNAME}")
     try:
         await mirror_bot.delete_webhook(drop_pending_updates=True)
         await mirror_dp.start_polling(mirror_bot)
@@ -506,7 +510,7 @@ async def cb_hide_data_menu(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "pay_tonkeeper")
 async def cb_pay_tonkeeper(cb: CallbackQuery):
-    memo = f"Mobius_{cb.from_user.id}"
+    memo = f"Oasis_{cb.from_user.id}"
     link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=link)],
@@ -586,7 +590,7 @@ async def process_promo_input(msg: Message, state: FSMContext):
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
         return await msg.answer("⛔ Нет доступа.")
-    await msg.answer("👑 <b>Админ-панель Mobius</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
+    await msg.answer("👑 <b>Админ-панель Oasis Digital</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 @dp.callback_query(F.data == "adm_promo")
@@ -661,7 +665,7 @@ async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(SearchStates.wait_admin_raw)
 async def process_admin_raw(msg: Message, state: FSMContext):
-    if cb.from_user.id != MAIN_ADMIN_ID:
+    if msg.from_user.id != MAIN_ADMIN_ID:
         return
     await state.clear()
     q = msg.text.strip()
@@ -704,7 +708,7 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Mobius Search]</b> Идет поиск...\n\n<b>Цель:</b> {q}", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск...\n\n<b>Цель:</b> {q}", parse_mode="HTML")
     
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
@@ -715,8 +719,7 @@ async def process_search(msg: Message, state: FSMContext):
 
 
 async def main():
-    log.info("Бот Mobius запускается на Polling...")
-    await bot.exit_handlers if hasattr(bot, 'exit_handlers') else None
+    log.info("Бот Oasis Digital запускается на Polling...")
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
