@@ -219,14 +219,22 @@ def calculate_days(joined_str):
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
 
 🕵️ <b>Личность</b>
-<blockquote>Будашевская Елена Анатольевна</blockquote>
+<blockquote>Навальный Алексей Анатольевич</blockquote>
 
 📲 <b>Контакты</b>
-<blockquote>79825207224 — номер телефона
-example@gmail.com — email</blockquote>
+<blockquote>79104813955 — номер телефона
+vania120df@gmail.com — email</blockquote>
+
+🚘 <b>Транспорт</b>
+<blockquote>РЕНО19 — госномер автомобиля
+XTA210930Y2696785 — VIN автомобиля</blockquote>
 
 💬 <b>Соцсети</b>
-<blockquote>@durov — Telegram</blockquote>
+<blockquote>@durov 1090472807 — Telegram
+vk.com/id1, 2737383 - ВКонтакте</blockquote>
+
+🌐 <b>Онлайн-следы</b>
+<blockquote>78.26.242.244, google.com</blockquote>
 
 <i>Отправьте запрос сообщением.</i>"""
 
@@ -653,7 +661,7 @@ async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(SearchStates.wait_admin_raw)
 async def process_admin_raw(msg: Message, state: FSMContext):
-    if msg.from_user.id != MAIN_ADMIN_ID:
+    if cb.from_user.id != MAIN_ADMIN_ID:
         return
     await state.clear()
     q = msg.text.strip()
@@ -688,4 +696,34 @@ async def cb_adm_back(cb: CallbackQuery, state: FSMContext):
 # --- ОСНОВНОЙ ПОИСК ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
-    if await state.get_state() is not None or msg.from_user.is
+    if await state.get_state() is not None or msg.from_user.is_bot:
+        return
+    if is_banned(msg.from_user.id):
+        return await msg.answer("🚫 Вы заблокированы.")
+    if not deduct_request(msg.from_user.id):
+        return await msg.answer("❌ У вас закончились запросы.")
+
+    q = msg.text.strip()
+    note = await msg.answer(f"🔍 <b>[Mobius Search]</b> Идет поиск...\n\n<b>Цель:</b> {q}", parse_mode="HTML")
+    
+    data = await search_everywhere(q)
+    report_id = str(uuid.uuid4())[:8]
+    REPORTS_CACHE[report_id] = data
+
+    body = format_report_text(data)
+    await note.edit_text(body, parse_mode="HTML", reply_markup=result_kb(report_id))
+
+
+async def main():
+    log.info("Бот Mobius запускается на Polling...")
+    await bot.exit_handlers if hasattr(bot, 'exit_handlers') else None
+    await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(run_web())
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
