@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import json
+import ssl
 import uuid
 import sqlite3
 import aiohttp
@@ -44,7 +45,7 @@ USERS_DB = "users.db"
 API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
 API_URL_ARGUS = "https://argus.cc.cd/api/v1/search"
 
-# Прокси для обхода 403 по IP дата-центра (если понадобится, укажи "http://user:pass@ip:port")
+# Прокси (если понадобится, укажи "http://user:pass@ip:port")
 PROXY_URL = os.getenv("PROXY_URL", None)
 
 API_TIMEOUT = 90  # Таймаут 90 секунд
@@ -268,11 +269,13 @@ async def _get_with_retry(url: str, api_key: str, tag: str, params: dict, return
         "X-API-Key": api_key
     }
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
+    ssl_ctx = ssl.create_default_context()
 
     last_error = "No response"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.get(url, headers=headers, params=params, proxy=PROXY_URL) as resp:
                     text = await resp.text()
                     if resp.status == 200:
@@ -310,7 +313,7 @@ async def fetch_argus(q: str, api_key: str = ARGUS_KEY, return_debug: bool = Fal
         API_URL_ARGUS,
         api_key=api_key,
         tag="ARGUS",
-        params={"q": q.strip()},
+        params={"q": q.strip(), "key": api_key},
         return_debug=return_debug
     )
 
@@ -323,7 +326,8 @@ async def _single_health_check(name: str, url: str, api_key: str, params: dict):
     }
     start = asyncio.get_event_loop().time()
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        connector = aiohttp.TCPConnector(ssl=ssl.create_default_context())
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async with session.get(url, headers=headers, params=params, proxy=PROXY_URL) as resp:
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
                 return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}
@@ -334,7 +338,7 @@ async def _single_health_check(name: str, url: str, api_key: str, params: dict):
 async def check_all_apis_health():
     return await asyncio.gather(
         _single_health_check("Black-Box", API_URL_BLACKBOX, BLACKBOX_KEY, {"q": "79825207224", "type": "phone"}),
-        _single_health_check("Argus", API_URL_ARGUS, ARGUS_KEY, {"q": "79991234567"})
+        _single_health_check("Argus", API_URL_ARGUS, ARGUS_KEY, {"q": "79991234567", "key": ARGUS_KEY})
     )
 
 
