@@ -24,8 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # ====================== НАСТРОЙКИ OASIS DIGITAL ======================
-BOT_TOKEN = "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms"
-BOT_USERNAME = "@MobiusSearchBot"
+BOT_TOKEN = "9024954594:AAEmimdFH2HJw5DgWBlYDtJ2QBOTtwmIbPM"
+BOT_USERNAME = "@OasisDigitalro_bot"
 
 MAIN_ADMIN_ID = 8394631079
 ADMIN_USERNAME = "@anodoxx"
@@ -38,7 +38,7 @@ BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
 ARGUS_KEY = "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE"
 
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
-WEBHOOK_HOST = "https://listopadov-search.onrender.com"
+WEBHOOK_HOST = "https://listopadov-search-1.onrender.com"
 USERS_DB = "users.db"
 
 # API Endpoints
