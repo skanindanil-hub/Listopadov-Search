@@ -35,7 +35,7 @@ CHANNEL_URL = "https://t.me/+pzsfx9fWdXdkYmFl"
 
 # API-ключи
 BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
-ARGUS_KEY = "ARGUS-IO-K_JKRX"
+ARGUS_KEY = "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE"
 
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
