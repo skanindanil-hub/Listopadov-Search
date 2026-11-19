@@ -28,7 +28,7 @@ BOT_TOKEN = "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms"
 BOT_USERNAME = "@MobiusSearchBot"
 
 MAIN_ADMIN_ID = 8394631079
-ADMIN_USERNAME = "@youranonglobal"
+ADMIN_USERNAME = "@anodoxx"
 
 CHANNEL_ID = -1004330390390
 CHANNEL_URL = "https://t.me/+pzsfx9fWdXdkYmFl"
