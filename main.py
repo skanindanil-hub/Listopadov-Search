@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import re
 import json
 import uuid
 import sqlite3
@@ -31,20 +30,14 @@ ADMIN_USERNAME = "@youranonglobal"
 CHANNEL_ID = -1004330390390
 CHANNEL_URL = "https://t.me/+pzsfx9fWdXdkYmFl"
 
-# API ключи
-KRATOS_KEY = "lBGtnFGdTabFrRiFdFzZiEjUrTlqArcU"
-BLACKBOX_KEY = "Y1nqXZ4tOVh4PBsUZyB2CQW6TGtn"
-BLACKBOX_KEY_2 = "gcGGgocfzgrHqyDPLfQpvMvrQgQ3Dnqi"
-HYDRA_KEY = "HYDRA-LordKEY-m7N9iq8wl7JzAnjToNXCA"
-ONUX_KEY = "sk-qU6CYudhVnxATab3cSJVdZSP35okBEB4"
-NEBULA_KEY = "NEBULA-A0C2BC2A724EA3B5E8431B2B8C83EC9C"
+# Единственный API-ключ Black-Box
+BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
 
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 USERS_DB = "users.db"
 
-# API Endpoints
-API_URL_MOBIUS = "https://mobiusnet.cc.cd/api/v1/search"
+# API Endpoint (только Black-Box)
 API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
 
 # Прокси для обхода 403 по IP дата-центра (если понадобится, укажи "http://user:pass@ip:port")
@@ -263,41 +256,7 @@ def admin_menu_kb():
     ])
 
 
-# --- API ЗАПРОСЫ С USER-AGENT, RETRY (502) И PROXY (403) ---
-async def fetch_mobius(q: str, return_debug: bool = False):
-    clean_q = q.strip().replace("@", "")
-    headers = {
-        **DEFAULT_HEADERS,
-        "X-API-Key": KRATOS_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {"query": clean_q, "type": "auto"}
-    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-
-    last_error = "No response"
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(API_URL_MOBIUS, json=payload, headers=headers, proxy=PROXY_URL) as resp:
-                    text = await resp.text()
-                    if resp.status == 200:
-                        data = json.loads(text)
-                        return data
-                    last_error = f"HTTP {resp.status}: {text[:300]}"
-                    log.warning(f"[MOBIUS] Попытка {attempt}/{MAX_RETRIES} -> {last_error}")
-                    if resp.status in (502, 503, 504) and attempt < MAX_RETRIES:
-                        await asyncio.sleep(3)
-                        continue
-                    break
-        except Exception as e:
-            last_error = f"Exception: {e}"
-            log.error(f"[MOBIUS ERROR] Попытка {attempt}/{MAX_RETRIES}: {e}")
-            if attempt < MAX_RETRIES:
-                await asyncio.sleep(3)
-
-    return {"_error": last_error} if return_debug else None
-
-
+# --- ЗАПРОСЫ К BLACK-BOX API ---
 async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool = False):
     headers = {
         **DEFAULT_HEADERS,
@@ -313,8 +272,7 @@ async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool
                 async with session.get(API_URL_BLACKBOX, headers=headers, params=params, proxy=PROXY_URL) as resp:
                     text = await resp.text()
                     if resp.status == 200:
-                        data = json.loads(text)
-                        return data
+                        return json.loads(text)
                     last_error = f"HTTP {resp.status}: {text[:300]}"
                     log.warning(f"[BLACKBOX] Попытка {attempt}/{MAX_RETRIES} -> {last_error}")
                     if resp.status in (502, 503, 504) and attempt < MAX_RETRIES:
@@ -330,39 +288,26 @@ async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool
     return {"_error": last_error} if return_debug else None
 
 
-async def check_api_health(name, url, method="GET", headers=None, payload=None):
+async def check_blackbox_health():
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-    req_headers = {**DEFAULT_HEADERS, **(headers or {})}
+    headers = {
+        **DEFAULT_HEADERS,
+        "X-API-Key": BLACKBOX_KEY
+    }
+    params = {"q": "79825207224", "type": "phone"}
     start = asyncio.get_event_loop().time()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            if method == "GET":
-                req = session.get(url, headers=req_headers, params=payload, proxy=PROXY_URL)
-            else:
-                req = session.post(url, headers=req_headers, json=payload, proxy=PROXY_URL)
-            async with req as resp:
+            async with session.get(API_URL_BLACKBOX, headers=headers, params=params, proxy=PROXY_URL) as resp:
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
-                return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}
+                return [{"name": "Black-Box", "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}]
     except Exception as e:
-        return {"name": name, "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}
+        return [{"name": "Black-Box", "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}]
 
 
-async def run_all_api_checks():
-    return await asyncio.gather(
-        check_api_health("Mobius (Kratos)", API_URL_MOBIUS, method="POST", headers={"X-API-Key": KRATOS_KEY, "Content-Type": "application/json"}, payload={"query": "79825207224", "type": "auto"}),
-        check_api_health("Black-Box 1", API_URL_BLACKBOX, method="GET", headers={"X-API-Key": BLACKBOX_KEY}, payload={"q": "79825207224", "type": "phone"}),
-        check_api_health("Black-Box 2", API_URL_BLACKBOX, method="GET", headers={"X-API-Key": BLACKBOX_KEY_2}, payload={"q": "79825207224", "type": "phone"})
-    )
-
-
-# --- УНИВЕРСАЛЬНЫЙ ПАРСЕР И АГРЕГАТОР ---
+# --- ПАРСЕР И АГРЕГАТОР ---
 async def search_everywhere(q: str):
-    results = await asyncio.gather(
-        fetch_blackbox(q, BLACKBOX_KEY),
-        fetch_blackbox(q, BLACKBOX_KEY_2),
-        fetch_mobius(q),
-        return_exceptions=True
-    )
+    resp = await fetch_blackbox(q, BLACKBOX_KEY)
 
     final_data = {
         "query": q,
@@ -379,10 +324,7 @@ async def search_everywhere(q: str):
         "sources_count": 0
     }
 
-    for resp in results:
-        if not isinstance(resp, dict) or "_error" in resp:
-            continue
-
+    if isinstance(resp, dict) and "_error" not in resp:
         profile = resp.get("profile") or {}
         telecom = resp.get("telecom") or {}
         tg = resp.get("telegram") or {}
@@ -447,7 +389,7 @@ def format_report_text(data: dict) -> str:
     tg = data.get("tg_info")
     if tg and isinstance(tg, dict) and tg.get("id"):
         has_data = True
-        parts.append(f"✈️ <b>Telegram:</b>\n")
+        parts.append("✈️ <b>Telegram:</b>\n")
         parts.append(tree("ID", tg.get("id")))
         if tg.get("username"):
             parts.append(tree("Username", f"@{tg.get('username')}"))
@@ -464,7 +406,7 @@ def format_report_text(data: dict) -> str:
                     parts.append(f"  ├ {k}: <code>{v}</code>\n")
 
     if not has_data:
-        parts.append("❌ Данные не найдены ни в одном из подключенных API.")
+        parts.append("❌ Данные не найдены в Black-Box API.")
 
     return "".join(parts)
 
@@ -794,7 +736,7 @@ async def process_admin_create_check(msg: Message, state: FSMContext):
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (с автоповторами при 502 и User-Agent):", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text("📡 <b>Тест Black-Box API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):", parse_mode="HTML", reply_markup=back_kb())
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
@@ -805,20 +747,12 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return
     await state.clear()
     q = msg.text.strip()
-    note = await msg.answer(f"📡 Опрашиваем API (с retry при 502): <b>{q}</b>...", parse_mode="HTML")
+    note = await msg.answer(f"📡 Опрашиваем Black-Box API (до 90с): <b>{q}</b>...", parse_mode="HTML")
 
-    res_mb, res_bb1, res_bb2 = await asyncio.gather(
-        fetch_mobius(q, return_debug=True),
-        fetch_blackbox(q, BLACKBOX_KEY, return_debug=True),
-        fetch_blackbox(q, BLACKBOX_KEY_2, return_debug=True),
-        return_exceptions=True
-    )
+    res_bb = await fetch_blackbox(q, BLACKBOX_KEY, return_debug=True)
+    bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:2500] if isinstance(res_bb, dict) else str(res_bb)
 
-    mb_str = json.dumps(res_mb, ensure_ascii=False, indent=2)[:1100] if isinstance(res_mb, dict) else str(res_mb)
-    bb_target = res_bb1 if (isinstance(res_bb1, dict) and "_error" not in res_bb1) else (res_bb2 if isinstance(res_bb2, dict) else res_bb1)
-    bb_str = json.dumps(bb_target, ensure_ascii=False, indent=2)[:1100] if isinstance(bb_target, dict) else str(bb_target)
-
-    text = f"<b>MOBIUS:</b>\n<pre>{mb_str}</pre>\n\n<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
+    text = f"<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
     await note.edit_text(text[:4000], parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
@@ -826,8 +760,8 @@ async def process_admin_raw(msg: Message, state: FSMContext):
 async def cb_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    note = await cb.message.edit_text("🔌 Проверяем API...", parse_mode="HTML")
-    results = await run_all_api_checks()
+    note = await cb.message.edit_text("🔌 Проверяем Black-Box API...", parse_mode="HTML")
+    results = await check_blackbox_health()
     lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
     await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
 
@@ -867,7 +801,7 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по базам (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
 
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
