@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import json
 import uuid
 import sqlite3
@@ -31,20 +32,17 @@ ADMIN_USERNAME = "@youranonglobal"
 CHANNEL_ID = -1004330390390
 CHANNEL_URL = "https://t.me/+pzsfx9fWdXdkYmFl"
 
-# Единственный API-ключ Black-Box
+# API-ключи
 BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
-
-# Настройки AI-анализатора (OpenAI-совместимый API)
-AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_API_URL = os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions")
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+ARGUS_KEY = "ARGUS-IO-K_JKRX"
 
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 USERS_DB = "users.db"
 
-# API Endpoint (только Black-Box)
+# API Endpoints
 API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
+API_URL_ARGUS = "https://argus.cc.cd/api/v1/search"
 
 # Прокси для обхода 403 по IP дата-центра (если понадобится, укажи "http://user:pass@ip:port")
 PROXY_URL = os.getenv("PROXY_URL", None)
@@ -263,56 +261,84 @@ def admin_menu_kb():
     ])
 
 
-# --- ЗАПРОСЫ К BLACK-BOX API ---
-async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool = False):
+# --- ЗАПРОСЫ К ВНЕШНИМ API ---
+async def _get_with_retry(url: str, api_key: str, tag: str, params: dict, return_debug: bool = False):
     headers = {
         **DEFAULT_HEADERS,
         "X-API-Key": api_key
     }
-    params = {"q": q.strip(), "type": "auto"}
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
 
     last_error = "No response"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(API_URL_BLACKBOX, headers=headers, params=params, proxy=PROXY_URL) as resp:
+                async with session.get(url, headers=headers, params=params, proxy=PROXY_URL) as resp:
                     text = await resp.text()
                     if resp.status == 200:
-                        return json.loads(text)
+                        try:
+                            return json.loads(text)
+                        except Exception:
+                            return {"raw_text": text}
                     last_error = f"HTTP {resp.status}: {text[:300]}"
-                    log.warning(f"[BLACKBOX] Попытка {attempt}/{MAX_RETRIES} -> {last_error}")
+                    log.warning(f"[{tag}] Попытка {attempt}/{MAX_RETRIES} -> {last_error}")
                     if resp.status in (502, 503, 504) and attempt < MAX_RETRIES:
                         await asyncio.sleep(3)
                         continue
                     break
         except Exception as e:
             last_error = f"Exception: {e}"
-            log.error(f"[BLACKBOX ERROR] Попытка {attempt}/{MAX_RETRIES}: {e}")
+            log.error(f"[{tag} ERROR] Попытка {attempt}/{MAX_RETRIES}: {e}")
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(3)
 
     return {"_error": last_error} if return_debug else None
 
 
-async def check_blackbox_health():
+async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool = False):
+    return await _get_with_retry(
+        API_URL_BLACKBOX,
+        api_key=api_key,
+        tag="BLACKBOX",
+        params={"q": q.strip(), "type": "auto"},
+        return_debug=return_debug
+    )
+
+
+async def fetch_argus(q: str, api_key: str = ARGUS_KEY, return_debug: bool = False):
+    return await _get_with_retry(
+        API_URL_ARGUS,
+        api_key=api_key,
+        tag="ARGUS",
+        params={"q": q.strip()},
+        return_debug=return_debug
+    )
+
+
+async def _single_health_check(name: str, url: str, api_key: str, params: dict):
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     headers = {
         **DEFAULT_HEADERS,
-        "X-API-Key": BLACKBOX_KEY
+        "X-API-Key": api_key
     }
-    params = {"q": "79825207224", "type": "phone"}
     start = asyncio.get_event_loop().time()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(API_URL_BLACKBOX, headers=headers, params=params, proxy=PROXY_URL) as resp:
+            async with session.get(url, headers=headers, params=params, proxy=PROXY_URL) as resp:
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
-                return [{"name": "Black-Box", "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}]
+                return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}
     except Exception as e:
-        return [{"name": "Black-Box", "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}]
+        return {"name": name, "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}
 
 
-# --- AI АНАЛИЗАТОР ---
+async def check_all_apis_health():
+    return await asyncio.gather(
+        _single_health_check("Black-Box", API_URL_BLACKBOX, BLACKBOX_KEY, {"q": "79825207224", "type": "phone"}),
+        _single_health_check("Argus", API_URL_ARGUS, ARGUS_KEY, {"q": "79991234567"})
+    )
+
+
+# --- ЛОКАЛЬНЫЙ АНАЛИЗАТОР БЕЗ ВНЕШНЕГО AI API ---
 def _has_report_findings(data: dict) -> bool:
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     return bool(
@@ -325,74 +351,98 @@ def _has_report_findings(data: dict) -> bool:
     )
 
 
-async def analyze_with_ai(data: dict) -> str:
-    if data.get("ai_summary"):
-        return data["ai_summary"]
-
-    if not AI_API_KEY:
-        return "⚠️ AI-анализатор не настроен: укажите переменную окружения <code>AI_API_KEY</code>."
+def analyze_locally(data: dict) -> str:
+    if data.get("local_analysis"):
+        return data["local_analysis"]
 
     if not _has_report_findings(data):
-        return "❌ Недостаточно данных для анализа — по этому запросу ничего не найдено."
+        return "❌ Недостаточно данных для анализа — по запросу ничего не найдено."
 
-    compact_payload = {
-        "query": data.get("query"),
-        "telegram": data.get("tg_info"),
-        "phone": data.get("phone_number"),
-        "reg_date": data.get("reg_date"),
-        "fio": data.get("fio"),
-        "operator": data.get("operator"),
-        "region": data.get("region"),
-        "phonebooks": data.get("phonebooks"),
-        "name_history": (data.get("name_history") or [])[:25],
-        "databases": {
-            k: v[:5] if isinstance(v, list) else v
-            for k, v in list((data.get("databases") or {}).items())[:8]
-        },
-    }
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    tg_id = tg.get("id") or tg.get("user_id")
+    raw_uname = tg.get("username") or ""
+    tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
 
-    prompt = (
-        "Ты аналитик данных. Проанализируй JSON-отчет ниже и выдай краткую структурированную выжимку на русском языке:\n"
-        "1. Ключевые факты и связки (ники, имена, телефон, регион, дата регистрации).\n"
-        "2. Закономерности и детали (смена никнеймов/имен, записи в телефонных книгах, совпадения).\n"
-        "3. Что можно проверить дополнительно по имеющимся зацепкам.\n"
-        "Опирайся строго на переданные данные, ничего не выдумывай. Пиши кратко, без воды (до 8-10 строк).\n\n"
-        f"{json.dumps(compact_payload, ensure_ascii=False)}"
-    )
+    phone = str(data.get("phone_number") or "").strip()
+    fio = str(data.get("fio") or "").strip()
+    reg_date = str(data.get("reg_date") or "").strip()
+    region = str(data.get("region") or "").strip()
+    operator = str(data.get("operator") or "").strip()
+    phonebooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip()]
+    history = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip()]
+    dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
 
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": AI_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
+    usernames_seen = []
+    seen_set = set()
+    if tg_uname and tg_uname.lower() not in seen_set:
+        seen_set.add(tg_uname.lower())
+        usernames_seen.append(tg_uname)
 
-    timeout = aiohttp.ClientTimeout(total=30)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(AI_API_URL, headers=headers, json=body) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    log.warning(f"[AI ANALYZER] HTTP {resp.status}: {err_text[:200]}")
-                    return f"❌ Ошибка AI-сервиса (HTTP {resp.status})."
-                res = await resp.json()
-                content = (
-                    res.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                )
-                if not content:
-                    return "❌ AI вернул пустой ответ."
-                safe_result = html.escape(content)
-                data["ai_summary"] = safe_result
-                return safe_result
-    except Exception as e:
-        log.error(f"[AI ANALYZER ERROR] {e}")
-        return f"❌ Сбой при обращении к AI: {html.escape(type(e).__name__)}"
+    for h in history:
+        for match in re.findall(r"@[A-Za-z0-9_]{3,}", h):
+            low = match.lower()
+            if low not in seen_set:
+                seen_set.add(low)
+                usernames_seen.append(match)
+
+    tags_found = []
+    for h in history:
+        for tag in re.findall(r"#[^\s,;]+", h):
+            if tag not in tags_found:
+                tags_found.append(tag)
+
+    facts = []
+    if tg_uname or tg_id:
+        facts.append(f"Профиль TG: {tg_uname or '—'} (ID: {tg_id or '—'})")
+    if phone and phone != "Не найдено":
+        loc_part = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x)
+        facts.append(f"Телефон: {phone}" + (f" ({loc_part})" if loc_part else ""))
+    if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
+        facts.append(f"ФИО/Имя: {fio}")
+    if reg_date and reg_date != "Не найдено":
+        facts.append(f"Регистрация: {reg_date}")
+    if phonebooks:
+        facts.append(f"В записных книгах встречается как: {', '.join(phonebooks[:6])}")
+
+    patterns = []
+    if history:
+        patterns.append(f"Зафиксировано изменений имени/ника: {len(history)}")
+        if len(history) >= 2:
+            patterns.append(f"Свежая запись: {history[0]}")
+            patterns.append(f"Ранняя запись: {history[-1]}")
+    if usernames_seen:
+        patterns.append(f"Связанные никнеймы ({len(usernames_seen)}): {', '.join(usernames_seen[:8])}")
+    if tags_found:
+        patterns.append(f"Метки в истории: {', '.join(tags_found[:6])}")
+    if dbs:
+        total_recs = sum(len(v) for v in dbs.values() if isinstance(v, list))
+        patterns.append(f"Совпадений в базах: {len(dbs)} источн. ({total_recs} записей)")
+
+    next_steps = []
+    for u in usernames_seen[:3]:
+        if u.lower() != tg_uname.lower():
+            next_steps.append(f"Проверить старый ник {u} отдельно")
+    if phone and phone != "Не найдено":
+        next_steps.append(f"Пробить номер {phone} по утечкам и мессенджерам")
+    if not next_steps:
+        next_steps.append("Сверить найденные имена и контакты по веб-отчету и JSON")
+
+    lines = ["📊 <b>Анализ связей и фактов</b>\n"]
+    if facts:
+        lines.append("<b>Факты:</b>")
+        for f_item in facts:
+            lines.append(f"• {html.escape(f_item)}")
+    if patterns:
+        lines.append("\n<b>Активность и связи:</b>")
+        for p_item in patterns:
+            lines.append(f"• {html.escape(p_item)}")
+    lines.append("\n<b>Что дальше:</b>")
+    for s_item in next_steps:
+        lines.append(f"• {html.escape(s_item)}")
+
+    result = "\n".join(lines)
+    data["local_analysis"] = result
+    return result
 
 
 # --- ПАРСЕР И АГРЕГАТОР ---
@@ -463,8 +513,96 @@ def _extract_name_history(resp: dict, tg: dict, dbs: dict) -> list[str]:
     return history
 
 
+def _merge_single_response(resp: dict, final_data: dict, source_prefix: str = ""):
+    if not isinstance(resp, dict) or "_error" in resp:
+        return
+
+    payload = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+    profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+    telecom = payload.get("telecom") if isinstance(payload.get("telecom"), dict) else {}
+    tg = payload.get("telegram") if isinstance(payload.get("telegram"), dict) else {}
+    dbs = payload.get("databases") or payload.get("results") or {}
+
+    if isinstance(dbs, list):
+        dbs = {f"{source_prefix}results" if source_prefix else "results": dbs}
+
+    for fio_val in (profile.get("primary_fio"), payload.get("fio"), payload.get("full_name")):
+        if fio_val:
+            final_data["fio"].add(str(fio_val).strip())
+    if profile.get("birth_date"):
+        final_data["dob"].add(str(profile["birth_date"]).strip())
+    if profile.get("snils"):
+        final_data["snils"].add(str(profile["snils"]).strip())
+
+    if telecom.get("operator") and final_data["operator"] == "Нет":
+        final_data["operator"] = str(telecom["operator"])
+    if telecom.get("region") and final_data["region"] == "Нет":
+        final_data["region"] = str(telecom["region"])
+    if telecom.get("country"):
+        final_data["country"] = str(telecom["country"])
+
+    if isinstance(tg, dict) and tg:
+        merged_tg = dict(final_data["tg_info"])
+        for k, v in tg.items():
+            if v is not None and (k not in merged_tg or not merged_tg[k]):
+                merged_tg[k] = v
+        final_data["tg_info"] = merged_tg
+        if tg.get("full_name"):
+            final_data["fio"].add(str(tg["full_name"]).strip())
+        reg_tg = tg.get("reg_date") or tg.get("registration") or tg.get("created_at")
+        if reg_tg and final_data["reg_date"] == "Не найдено":
+            final_data["reg_date"] = str(reg_tg)
+
+    reg_val = payload.get("reg_date") or payload.get("registration") or profile.get("reg_date")
+    if reg_val and final_data["reg_date"] == "Не найдено":
+        final_data["reg_date"] = str(reg_val)
+
+    pb_raw = payload.get("phonebooks") or (tg.get("phonebooks") if isinstance(tg, dict) else None) or []
+    if isinstance(pb_raw, list):
+        for x in pb_raw:
+            s = str(x).strip()
+            if s and s not in final_data["phonebooks"]:
+                final_data["phonebooks"].append(s)
+    elif isinstance(pb_raw, str) and pb_raw.strip():
+        for x in pb_raw.split(","):
+            s = x.strip()
+            if s and s not in final_data["phonebooks"]:
+                final_data["phonebooks"].append(s)
+
+    for h_item in _extract_name_history(payload, tg, dbs):
+        if h_item not in final_data["name_history"]:
+            final_data["name_history"].append(h_item)
+
+    extracted_phone = _extract_phone(payload, telecom, tg, dbs)
+    if extracted_phone != "Не найдено":
+        final_data["phones"].add(extracted_phone)
+        if final_data["phone_number"] == "Не найдено":
+            final_data["phone_number"] = extracted_phone
+
+    views_val = (
+        payload.get("views")
+        or payload.get("interested")
+        or (tg.get("views") if isinstance(tg, dict) else None)
+        or (tg.get("interested") if isinstance(tg, dict) else None)
+    )
+    if views_val is not None:
+        final_data["views_count"] = views_val
+
+    if isinstance(dbs, dict):
+        for db_name, records in dbs.items():
+            key_name = f"{source_prefix}{db_name}" if source_prefix and db_name in final_data["databases"] else db_name
+            if key_name not in final_data["databases"]:
+                final_data["databases"][key_name] = []
+            if isinstance(records, list):
+                final_data["databases"][key_name].extend(records)
+
+
 async def search_everywhere(q: str):
-    resp = await fetch_blackbox(q, BLACKBOX_KEY)
+    res_bb, res_argus = await asyncio.gather(
+        fetch_blackbox(q, BLACKBOX_KEY),
+        fetch_argus(q, ARGUS_KEY),
+        return_exceptions=True
+    )
 
     final_data = {
         "query": q,
@@ -484,64 +622,17 @@ async def search_everywhere(q: str):
         "name_history": [],
         "views_count": None,
         "sources_count": 0,
-        "ai_summary": "",
-        "raw_response": resp if isinstance(resp, dict) else {}
+        "local_analysis": "",
+        "raw_response": {
+            "blackbox": res_bb if isinstance(res_bb, dict) else {},
+            "argus": res_argus if isinstance(res_argus, dict) else {},
+        }
     }
 
-    if isinstance(resp, dict) and "_error" not in resp:
-        profile = resp.get("profile") or {}
-        telecom = resp.get("telecom") or {}
-        tg = resp.get("telegram") or {}
-        dbs = resp.get("databases") or resp.get("results") or {}
-
-        if profile.get("primary_fio"):
-            final_data["fio"].add(str(profile["primary_fio"]))
-        if resp.get("fio"):
-            final_data["fio"].add(str(resp["fio"]))
-        if profile.get("birth_date"):
-            final_data["dob"].add(str(profile["birth_date"]))
-        if profile.get("snils"):
-            final_data["snils"].add(str(profile["snils"]))
-
-        if telecom.get("operator"):
-            final_data["operator"] = str(telecom["operator"])
-        if telecom.get("region"):
-            final_data["region"] = str(telecom["region"])
-        if telecom.get("country"):
-            final_data["country"] = str(telecom["country"])
-
-        if isinstance(tg, dict) and tg:
-            final_data["tg_info"] = tg
-            if tg.get("full_name"):
-                final_data["fio"].add(str(tg["full_name"]))
-            if tg.get("reg_date") or tg.get("registration") or tg.get("created_at"):
-                final_data["reg_date"] = str(tg.get("reg_date") or tg.get("registration") or tg.get("created_at"))
-
-        reg_val = resp.get("reg_date") or resp.get("registration") or profile.get("reg_date")
-        if reg_val:
-            final_data["reg_date"] = str(reg_val)
-
-        pb_raw = resp.get("phonebooks") or (tg.get("phonebooks") if isinstance(tg, dict) else None) or []
-        if isinstance(pb_raw, list):
-            final_data["phonebooks"] = [str(x).strip() for x in pb_raw if x]
-        elif isinstance(pb_raw, str) and pb_raw.strip():
-            final_data["phonebooks"] = [x.strip() for x in pb_raw.split(",") if x.strip()]
-
-        final_data["name_history"] = _extract_name_history(resp, tg if isinstance(tg, dict) else {}, dbs)
-        final_data["phone_number"] = _extract_phone(resp, telecom, tg if isinstance(tg, dict) else {}, dbs)
-        if final_data["phone_number"] != "Не найдено":
-            final_data["phones"].add(final_data["phone_number"])
-
-        views_val = resp.get("views") or resp.get("interested") or (tg.get("views") if isinstance(tg, dict) else None) or (tg.get("interested") if isinstance(tg, dict) else None)
-        if views_val is not None:
-            final_data["views_count"] = views_val
-
-        if isinstance(dbs, dict):
-            for db_name, records in dbs.items():
-                if db_name not in final_data["databases"]:
-                    final_data["databases"][db_name] = []
-                if isinstance(records, list):
-                    final_data["databases"][db_name].extend(records)
+    if isinstance(res_bb, dict):
+        _merge_single_response(res_bb, final_data, source_prefix="bb_")
+    if isinstance(res_argus, dict):
+        _merge_single_response(res_argus, final_data, source_prefix="argus_")
 
     final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "Не найдено"
     final_data["dob"] = ", ".join(final_data["dob"]) if final_data["dob"] else "Нет"
@@ -704,15 +795,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
         history_html = "<br>".join(html.escape(str(item)) for item in history_list)
     else:
         history_html = "Не найдено"
-
-    ai_block = ""
-    if data.get("ai_summary"):
-        ai_block = f"""
-        <div class="card">
-            <h3>🤖 AI-анализ</h3>
-            <div class="rec-row" style="white-space: pre-line;">{data['ai_summary']}</div>
-        </div>
-        """
 
     graph_payload = _build_graph_payload(data)
     graph_json = json.dumps(graph_payload, ensure_ascii=False).replace("</", "<\\/")
@@ -947,7 +1029,6 @@ def generate_html_report(data: dict, report_id: str) -> str:
             </div>
 
             <div id="tab-summary" class="tab-content">
-                {ai_block}
                 <div class="card">
                     <h3>Основная информация</h3>
                     <div class="data-row"><div class="data-label">Запрос</div><div class="data-value">{query}</div></div>
@@ -1315,7 +1396,7 @@ async def process_admin_create_check(msg: Message, state: FSMContext):
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест Black-Box API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):", parse_mode="HTML", reply_markup=back_kb())
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
@@ -1326,12 +1407,18 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return
     await state.clear()
     q = msg.text.strip()
-    note = await msg.answer(f"📡 Опрашиваем Black-Box API (до 90с): <b>{html.escape(q)}</b>...", parse_mode="HTML")
+    note = await msg.answer(f"📡 Опрашиваем Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...", parse_mode="HTML")
 
-    res_bb = await fetch_blackbox(q, BLACKBOX_KEY, return_debug=True)
-    bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:2500] if isinstance(res_bb, dict) else str(res_bb)
+    res_bb, res_argus = await asyncio.gather(
+        fetch_blackbox(q, BLACKBOX_KEY, return_debug=True),
+        fetch_argus(q, ARGUS_KEY, return_debug=True),
+        return_exceptions=True
+    )
 
-    text = f"<b>BLACK-BOX:</b>\n<pre>{html.escape(bb_str)}</pre>"
+    bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1400] if isinstance(res_bb, dict) else str(res_bb)
+    argus_str = json.dumps(res_argus, ensure_ascii=False, indent=2)[:1400] if isinstance(res_argus, dict) else str(res_argus)
+
+    text = f"<b>BLACK-BOX:</b>\n<pre>{html.escape(bb_str)}</pre>\n\n<b>ARGUS:</b>\n<pre>{html.escape(argus_str)}</pre>"
     await note.edit_text(text[:4000], parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
@@ -1339,13 +1426,13 @@ async def process_admin_raw(msg: Message, state: FSMContext):
 async def cb_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    note = await cb.message.edit_text("🔌 Проверяем Black-Box API...", parse_mode="HTML")
-    results = await check_blackbox_health()
+    note = await cb.message.edit_text("🔌 Проверяем Black-Box и Argus...", parse_mode="HTML")
+    results = await check_all_apis_health()
     lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
     await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
-# --- AI АНАЛИЗАТОР ПО КНОПКЕ ---
+# --- ЛОКАЛЬНЫЙ АНАЛИЗАТОР ПО КНОПКЕ ---
 @dp.callback_query(F.data.startswith("ai_analyze_"))
 async def cb_ai_analyze(cb: CallbackQuery):
     report_id = cb.data.replace("ai_analyze_", "")
@@ -1353,14 +1440,10 @@ async def cb_ai_analyze(cb: CallbackQuery):
     if not data:
         return await cb.answer("Отчет устарел", show_alert=True)
 
-    await cb.answer("🤖 Запускаю AI-анализ...")
-    wait_msg = await cb.message.answer(
-        f"🤖 <b>[AI-анализатор]</b> Разбираю данные по <code>{html.escape(str(data.get('query') or ''))}</code>...",
-        parse_mode="HTML"
-    )
-    summary = await analyze_with_ai(data)
-    text = f"🤖 <b>AI-анализ по запросу</b> <code>{html.escape(str(data.get('query') or ''))}</code>:\n\n{summary}"
-    await wait_msg.edit_text(text[:4000], parse_mode="HTML")
+    await cb.answer("⚡ Анализирую...")
+    summary = analyze_locally(data)
+    text = f"🔍 <b>Цель:</b> <code>{html.escape(str(data.get('query') or ''))}</code>\n\n{summary}"
+    await cb.message.answer(text[:4000], parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("get_txt_"))
@@ -1416,7 +1499,7 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box и Argus (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>", parse_mode="HTML")
 
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
