@@ -34,6 +34,11 @@ CHANNEL_URL = "https://t.me/+pzsfx9fWdXdkYmFl"
 # Единственный API-ключ Black-Box
 BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
 
+# Настройки AI-анализатора (OpenAI-совместимый API)
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_API_URL = os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions")
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
+
 TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
 WEBHOOK_HOST = "https://listopadov-search.onrender.com"
 USERS_DB = "users.db"
@@ -239,6 +244,7 @@ def back_kb():
 
 def result_kb(report_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 AI-анализатор", callback_data=f"ai_analyze_{report_id}")],
         [InlineKeyboardButton(text="🌐 Веб-отчет (Граф)", url=f"{WEBHOOK_HOST}/report/{report_id}")],
         [
             InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
@@ -304,6 +310,89 @@ async def check_blackbox_health():
                 return [{"name": "Black-Box", "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}]
     except Exception as e:
         return [{"name": "Black-Box", "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}]
+
+
+# --- AI АНАЛИЗАТОР ---
+def _has_report_findings(data: dict) -> bool:
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    return bool(
+        (tg.get("id") or tg.get("user_id"))
+        or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
+        or (data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО"))
+        or bool(data.get("phonebooks"))
+        or bool(data.get("name_history"))
+        or bool(data.get("databases"))
+    )
+
+
+async def analyze_with_ai(data: dict) -> str:
+    if data.get("ai_summary"):
+        return data["ai_summary"]
+
+    if not AI_API_KEY:
+        return "⚠️ AI-анализатор не настроен: укажите переменную окружения <code>AI_API_KEY</code>."
+
+    if not _has_report_findings(data):
+        return "❌ Недостаточно данных для анализа — по этому запросу ничего не найдено."
+
+    compact_payload = {
+        "query": data.get("query"),
+        "telegram": data.get("tg_info"),
+        "phone": data.get("phone_number"),
+        "reg_date": data.get("reg_date"),
+        "fio": data.get("fio"),
+        "operator": data.get("operator"),
+        "region": data.get("region"),
+        "phonebooks": data.get("phonebooks"),
+        "name_history": (data.get("name_history") or [])[:25],
+        "databases": {
+            k: v[:5] if isinstance(v, list) else v
+            for k, v in list((data.get("databases") or {}).items())[:8]
+        },
+    }
+
+    prompt = (
+        "Ты аналитик данных. Проанализируй JSON-отчет ниже и выдай краткую структурированную выжимку на русском языке:\n"
+        "1. Ключевые факты и связки (ники, имена, телефон, регион, дата регистрации).\n"
+        "2. Закономерности и детали (смена никнеймов/имен, записи в телефонных книгах, совпадения).\n"
+        "3. Что можно проверить дополнительно по имеющимся зацепкам.\n"
+        "Опирайся строго на переданные данные, ничего не выдумывай. Пиши кратко, без воды (до 8-10 строк).\n\n"
+        f"{json.dumps(compact_payload, ensure_ascii=False)}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": AI_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=30)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(AI_API_URL, headers=headers, json=body) as resp:
+                if resp.status != 200:
+                    err_text = await resp.text()
+                    log.warning(f"[AI ANALYZER] HTTP {resp.status}: {err_text[:200]}")
+                    return f"❌ Ошибка AI-сервиса (HTTP {resp.status})."
+                res = await resp.json()
+                content = (
+                    res.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
+                )
+                if not content:
+                    return "❌ AI вернул пустой ответ."
+                safe_result = html.escape(content)
+                data["ai_summary"] = safe_result
+                return safe_result
+    except Exception as e:
+        log.error(f"[AI ANALYZER ERROR] {e}")
+        return f"❌ Сбой при обращении к AI: {html.escape(type(e).__name__)}"
 
 
 # --- ПАРСЕР И АГРЕГАТОР ---
@@ -395,6 +484,7 @@ async def search_everywhere(q: str):
         "name_history": [],
         "views_count": None,
         "sources_count": 0,
+        "ai_summary": "",
         "raw_response": resp if isinstance(resp, dict) else {}
     }
 
@@ -480,32 +570,23 @@ def format_report_text(data: dict) -> str:
     history_lines = [history_header]
     if history:
         for item in history[:12]:
-            history_lines.append(str(item))
+            history_lines.append(html.escape(str(item)))
         if len(history) > 12:
             history_lines.append(f"… еще {len(history) - 12}")
     else:
         history_lines.append("Не найдено")
 
-    has_any_data = (
-        tg_id != "Не найдено"
-        or tg_username != "Не найдено"
-        or phone_val != "Не найдено"
-        or phonebooks_str != "Не найдено"
-        or bool(history)
-        or (data.get("fio") and data.get("fio") != "Не найдено")
-        or bool(data.get("databases"))
-    )
-
-    if not has_any_data:
+    if not _has_report_findings(data):
+        safe_q = html.escape(query) if query else "Не найдено"
         return (
-            f"✈️ Telegram · {query or 'Не найдено'}\n"
+            f"✈️ Telegram · {safe_q}\n"
             f"▸ ID: Не найдено\n"
             f"▸ Номер: Не найдено\n"
             f"📅 Регистрация: Не найдено\n\n"
             f"🔎 Телефонные книги: Не найдено\n\n"
             f"🌀 История изменения имени (0):\n"
             f"Не найдено\n\n"
-            f"💬 Telegram: {query or 'Не найдено'} (ID: Не найдено)\n\n"
+            f"💬 Telegram: {safe_q} (ID: Не найдено)\n\n"
             f"👁 Интересовались этим: 0\n\n\n"
             f"Полная информация доступна в файле ниже ⬇️"
         )
@@ -515,14 +596,14 @@ def format_report_text(data: dict) -> str:
         views_val = len(data.get("databases") or {})
 
     blocks = [
-        f"✈️ Telegram · {tg_username}\n"
-        f"▸ ID: {tg_id}\n"
-        f"▸ Номер: {phone_val}\n"
-        f"📅 Регистрация: {reg_date}",
-        f"🔎 Телефонные книги: {phonebooks_str}",
+        f"✈️ Telegram · {html.escape(str(tg_username))}\n"
+        f"▸ ID: {html.escape(str(tg_id))}\n"
+        f"▸ Номер: {html.escape(str(phone_val))}\n"
+        f"📅 Регистрация: {html.escape(str(reg_date))}",
+        f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
         "\n".join(history_lines),
-        f"💬 Telegram: {tg_username} (ID: {tg_id})",
-        f"👁 Интересовались этим: {views_val}",
+        f"💬 Telegram: {html.escape(str(tg_username))} (ID: {html.escape(str(tg_id))})",
+        f"👁 Интересовались этим: {html.escape(str(views_val))}",
         "Полная информация доступна в файле ниже ⬇️"
     ]
     return "\n\n".join(blocks)
@@ -623,6 +704,15 @@ def generate_html_report(data: dict, report_id: str) -> str:
         history_html = "<br>".join(html.escape(str(item)) for item in history_list)
     else:
         history_html = "Не найдено"
+
+    ai_block = ""
+    if data.get("ai_summary"):
+        ai_block = f"""
+        <div class="card">
+            <h3>🤖 AI-анализ</h3>
+            <div class="rec-row" style="white-space: pre-line;">{data['ai_summary']}</div>
+        </div>
+        """
 
     graph_payload = _build_graph_payload(data)
     graph_json = json.dumps(graph_payload, ensure_ascii=False).replace("</", "<\\/")
@@ -857,6 +947,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             </div>
 
             <div id="tab-summary" class="tab-content">
+                {ai_block}
                 <div class="card">
                     <h3>Основная информация</h3>
                     <div class="data-row"><div class="data-label">Запрос</div><div class="data-value">{query}</div></div>
@@ -1235,7 +1326,7 @@ async def process_admin_raw(msg: Message, state: FSMContext):
         return
     await state.clear()
     q = msg.text.strip()
-    note = await msg.answer(f"📡 Опрашиваем Black-Box API (до 90с): <b>{q}</b>...", parse_mode="HTML")
+    note = await msg.answer(f"📡 Опрашиваем Black-Box API (до 90с): <b>{html.escape(q)}</b>...", parse_mode="HTML")
 
     res_bb = await fetch_blackbox(q, BLACKBOX_KEY, return_debug=True)
     bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:2500] if isinstance(res_bb, dict) else str(res_bb)
@@ -1252,6 +1343,24 @@ async def cb_adm_check_apis(cb: CallbackQuery):
     results = await check_blackbox_health()
     lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
     await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
+
+
+# --- AI АНАЛИЗАТОР ПО КНОПКЕ ---
+@dp.callback_query(F.data.startswith("ai_analyze_"))
+async def cb_ai_analyze(cb: CallbackQuery):
+    report_id = cb.data.replace("ai_analyze_", "")
+    data = REPORTS_CACHE.get(report_id)
+    if not data:
+        return await cb.answer("Отчет устарел", show_alert=True)
+
+    await cb.answer("🤖 Запускаю AI-анализ...")
+    wait_msg = await cb.message.answer(
+        f"🤖 <b>[AI-анализатор]</b> Разбираю данные по <code>{html.escape(str(data.get('query') or ''))}</code>...",
+        parse_mode="HTML"
+    )
+    summary = await analyze_with_ai(data)
+    text = f"🤖 <b>AI-анализ по запросу</b> <code>{html.escape(str(data.get('query') or ''))}</code>:\n\n{summary}"
+    await wait_msg.edit_text(text[:4000], parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("get_txt_"))
