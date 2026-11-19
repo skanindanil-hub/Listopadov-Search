@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import json
@@ -306,6 +307,73 @@ async def check_blackbox_health():
 
 
 # --- ПАРСЕР И АГРЕГАТОР ---
+def _extract_phone(resp: dict, telecom: dict, tg: dict, dbs: dict) -> str:
+    candidates = []
+    for src in (resp, telecom, tg):
+        if isinstance(src, dict):
+            for key in ("phone", "phone_number", "mobile", "msisdn", "number", "tel"):
+                val = src.get(key)
+                if val:
+                    candidates.append(str(val))
+            for key in ("phones", "phone_numbers"):
+                vals = src.get(key)
+                if isinstance(vals, list):
+                    candidates.extend(str(v) for v in vals if v)
+
+    if isinstance(dbs, dict):
+        for records in dbs.values():
+            if isinstance(records, list):
+                for rec in records[:15]:
+                    if isinstance(rec, dict):
+                        for key in ("phone", "phone_number", "mobile", "msisdn", "number", "tel"):
+                            val = rec.get(key)
+                            if val:
+                                candidates.append(str(val))
+
+    for item in candidates:
+        cleaned = item.strip()
+        if cleaned:
+            return cleaned
+    return "Не найдено"
+
+
+def _extract_name_history(resp: dict, tg: dict, dbs: dict) -> list[str]:
+    history = []
+    raw_sources = []
+    for src in (resp, tg):
+        if isinstance(src, dict):
+            for key in ("name_history", "history", "names_history", "username_history", "changes"):
+                val = src.get(key)
+                if isinstance(val, list):
+                    raw_sources.extend(val)
+
+    if isinstance(dbs, dict):
+        for records in dbs.values():
+            if isinstance(records, list):
+                for rec in records:
+                    if isinstance(rec, dict):
+                        for key in ("name_history", "history", "names", "usernames"):
+                            val = rec.get(key)
+                            if isinstance(val, list):
+                                raw_sources.extend(val)
+
+    for entry in raw_sources:
+        if isinstance(entry, str) and entry.strip():
+            history.append(entry.strip())
+        elif isinstance(entry, dict):
+            dt = entry.get("date") or entry.get("time") or entry.get("updated_at") or ""
+            uname = entry.get("username") or ""
+            fname = entry.get("full_name") or entry.get("first_name") or entry.get("name") or ""
+            if uname and not str(uname).startswith("@"):
+                uname = f"@{uname}"
+            target = ", ".join(x for x in (str(uname).strip(), str(fname).strip()) if x)
+            line = f"{str(dt).strip()} → {target}".strip(" →")
+            if line:
+                history.append(line)
+
+    return history
+
+
 async def search_everywhere(q: str):
     resp = await fetch_blackbox(q, BLACKBOX_KEY)
 
@@ -316,12 +384,18 @@ async def search_everywhere(q: str):
         "dob": set(),
         "snils": set(),
         "phones": set(),
+        "phone_number": "Не найдено",
         "operator": "Нет",
         "region": "Нет",
         "country": "Россия",
         "databases": {},
         "tg_info": {},
-        "sources_count": 0
+        "reg_date": "Не найдено",
+        "phonebooks": [],
+        "name_history": [],
+        "views_count": None,
+        "sources_count": 0,
+        "raw_response": resp if isinstance(resp, dict) else {}
     }
 
     if isinstance(resp, dict) and "_error" not in resp:
@@ -331,25 +405,46 @@ async def search_everywhere(q: str):
         dbs = resp.get("databases") or resp.get("results") or {}
 
         if profile.get("primary_fio"):
-            final_data["fio"].add(profile["primary_fio"])
+            final_data["fio"].add(str(profile["primary_fio"]))
         if resp.get("fio"):
-            final_data["fio"].add(resp["fio"])
+            final_data["fio"].add(str(resp["fio"]))
         if profile.get("birth_date"):
-            final_data["dob"].add(profile["birth_date"])
+            final_data["dob"].add(str(profile["birth_date"]))
         if profile.get("snils"):
-            final_data["snils"].add(profile["snils"])
+            final_data["snils"].add(str(profile["snils"]))
 
         if telecom.get("operator"):
-            final_data["operator"] = telecom["operator"]
+            final_data["operator"] = str(telecom["operator"])
         if telecom.get("region"):
-            final_data["region"] = telecom["region"]
+            final_data["region"] = str(telecom["region"])
         if telecom.get("country"):
-            final_data["country"] = telecom["country"]
+            final_data["country"] = str(telecom["country"])
 
-        if tg and isinstance(tg, dict):
+        if isinstance(tg, dict) and tg:
             final_data["tg_info"] = tg
             if tg.get("full_name"):
-                final_data["fio"].add(tg["full_name"])
+                final_data["fio"].add(str(tg["full_name"]))
+            if tg.get("reg_date") or tg.get("registration") or tg.get("created_at"):
+                final_data["reg_date"] = str(tg.get("reg_date") or tg.get("registration") or tg.get("created_at"))
+
+        reg_val = resp.get("reg_date") or resp.get("registration") or profile.get("reg_date")
+        if reg_val:
+            final_data["reg_date"] = str(reg_val)
+
+        pb_raw = resp.get("phonebooks") or (tg.get("phonebooks") if isinstance(tg, dict) else None) or []
+        if isinstance(pb_raw, list):
+            final_data["phonebooks"] = [str(x).strip() for x in pb_raw if x]
+        elif isinstance(pb_raw, str) and pb_raw.strip():
+            final_data["phonebooks"] = [x.strip() for x in pb_raw.split(",") if x.strip()]
+
+        final_data["name_history"] = _extract_name_history(resp, tg if isinstance(tg, dict) else {}, dbs)
+        final_data["phone_number"] = _extract_phone(resp, telecom, tg if isinstance(tg, dict) else {}, dbs)
+        if final_data["phone_number"] != "Не найдено":
+            final_data["phones"].add(final_data["phone_number"])
+
+        views_val = resp.get("views") or resp.get("interested") or (tg.get("views") if isinstance(tg, dict) else None) or (tg.get("interested") if isinstance(tg, dict) else None)
+        if views_val is not None:
+            final_data["views_count"] = views_val
 
         if isinstance(dbs, dict):
             for db_name, records in dbs.items():
@@ -358,155 +453,548 @@ async def search_everywhere(q: str):
                 if isinstance(records, list):
                     final_data["databases"][db_name].extend(records)
 
-    final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "НЕ НАЙДЕНО"
+    final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "Не найдено"
     final_data["dob"] = ", ".join(final_data["dob"]) if final_data["dob"] else "Нет"
     final_data["snils"] = ", ".join(final_data["snils"]) if final_data["snils"] else "Нет"
-    final_data["sources_count"] = len(final_data["databases"]) or (1 if final_data["fio"] != "НЕ НАЙДЕНО" else 0)
+    final_data["sources_count"] = len(final_data["databases"]) or (1 if final_data["fio"] != "Не найдено" else 0)
 
     return final_data
 
 
 def format_report_text(data: dict) -> str:
-    def tree(label, val, last=False):
-        return f"{'└' if last else '├'} {label}: {val}\n"
+    query = str(data.get("query") or "").strip()
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
 
-    parts = [f"🔍 <b>[Oasis Digital] Результат поиска по:</b> <code>{data.get('query')}</code>\n\n"]
-    has_data = False
+    tg_id = tg.get("id") or tg.get("user_id") or "Не найдено"
+    raw_username = tg.get("username") or (query if query.startswith("@") else "")
+    tg_username = f"@{str(raw_username).lstrip('@')}" if raw_username else "Не найдено"
 
-    if data.get("fio") and data.get("fio") != "НЕ НАЙДЕНО":
-        has_data = True
-        parts.append(tree("ФИО", data.get("fio")))
-        if data.get("dob") != "Нет":
-            parts.append(tree("Дата рождения", data.get("dob")))
-        if data.get("snils") != "Нет":
-            parts.append(tree("СНИЛС", data.get("snils")))
-        if data.get("operator") != "Нет":
-            parts.append(tree("Оператор", data.get("operator")))
-        if data.get("region") != "Нет":
-            parts.append(tree("Регион", data.get("region"), last=True))
-        parts.append("\n")
+    reg_date = data.get("reg_date") or "Не найдено"
+    phone_val = data.get("phone_number") or "Не найдено"
 
-    tg = data.get("tg_info")
-    if tg and isinstance(tg, dict) and tg.get("id"):
-        has_data = True
-        parts.append("✈️ <b>Telegram:</b>\n")
-        parts.append(tree("ID", tg.get("id")))
-        if tg.get("username"):
-            parts.append(tree("Username", f"@{tg.get('username')}"))
-        parts.append("\n")
+    phonebooks = data.get("phonebooks") or []
+    phonebooks_str = ", ".join(phonebooks) if phonebooks else "Не найдено"
 
-    dbs = data.get("databases")
-    if dbs:
-        has_data = True
-        parts.append(f"🗄 <b>Найдено в базах ({len(dbs)}):</b>\n")
-        for db_name, records in list(dbs.items())[:5]:
-            parts.append(f"• <b>{db_name}</b> ({len(records)} зап.)\n")
-            if records and isinstance(records[0], dict):
-                for k, v in list(records[0].items())[:3]:
-                    parts.append(f"  ├ {k}: <code>{v}</code>\n")
+    history = data.get("name_history") or []
+    history_header = f"🌀 История изменения имени ({len(history)}):" if history else "🌀 История изменения имени (0):"
+    history_lines = [history_header]
+    if history:
+        for item in history[:12]:
+            history_lines.append(str(item))
+        if len(history) > 12:
+            history_lines.append(f"… еще {len(history) - 12}")
+    else:
+        history_lines.append("Не найдено")
 
-    if not has_data:
-        parts.append("❌ Данные не найдены в Black-Box API.")
+    has_any_data = (
+        tg_id != "Не найдено"
+        or tg_username != "Не найдено"
+        or phone_val != "Не найдено"
+        or phonebooks_str != "Не найдено"
+        or bool(history)
+        or (data.get("fio") and data.get("fio") != "Не найдено")
+        or bool(data.get("databases"))
+    )
 
-    return "".join(parts)
+    if not has_any_data:
+        return (
+            f"✈️ Telegram · {query or 'Не найдено'}\n"
+            f"▸ ID: Не найдено\n"
+            f"▸ Номер: Не найдено\n"
+            f"📅 Регистрация: Не найдено\n\n"
+            f"🔎 Телефонные книги: Не найдено\n\n"
+            f"🌀 История изменения имени (0):\n"
+            f"Не найдено\n\n"
+            f"💬 Telegram: {query or 'Не найдено'} (ID: Не найдено)\n\n"
+            f"👁 Интересовались этим: 0\n\n\n"
+            f"Полная информация доступна в файле ниже ⬇️"
+        )
+
+    views_val = data.get("views_count")
+    if views_val is None:
+        views_val = len(data.get("databases") or {})
+
+    blocks = [
+        f"✈️ Telegram · {tg_username}\n"
+        f"▸ ID: {tg_id}\n"
+        f"▸ Номер: {phone_val}\n"
+        f"📅 Регистрация: {reg_date}",
+        f"🔎 Телефонные книги: {phonebooks_str}",
+        "\n".join(history_lines),
+        f"💬 Telegram: {tg_username} (ID: {tg_id})",
+        f"👁 Интересовались этим: {views_val}",
+        "Полная информация доступна в файле ниже ⬇️"
+    ]
+    return "\n\n".join(blocks)
 
 
-# --- ГЕНЕРАЦИЯ HTML ОТЧЕТА С VIS.JS ГРАФОМ ---
+# --- ГЕНЕРАЦИЯ HTML ОТЧЕТА С КОРРЕКТНЫМ VIS.JS ГРАФОМ ---
+def _build_graph_payload(data: dict) -> dict:
+    nodes = []
+    edges = []
+    seen_labels = set()
+    next_id = 1
+
+    def add_node(label: str, group: str, parent_id: int | None = None, edge_label: str = ""):
+        nonlocal next_id
+        clean = label.strip()
+        if not clean:
+            return None
+        dedup_key = f"{group}:{clean}"
+        if dedup_key in seen_labels:
+            return None
+        seen_labels.add(dedup_key)
+
+        node_id = next_id
+        next_id += 1
+        nodes.append({
+            "id": node_id,
+            "label": clean,
+            "group": group
+        })
+        if parent_id is not None:
+            edge = {"from": parent_id, "to": node_id}
+            if edge_label:
+                edge["label"] = edge_label
+            edges.append(edge)
+        return node_id
+
+    query = str(data.get("query") or "").strip() or "Запрос"
+    root_id = add_node(f"🔍 Запрос\n{query}", "query")
+
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    tg_id = tg.get("id") or tg.get("user_id")
+    raw_username = tg.get("username") or (query if query.startswith("@") else "")
+    tg_username = f"@{str(raw_username).lstrip('@')}" if raw_username else ""
+
+    tg_parts = []
+    if tg_username:
+        tg_parts.append(tg_username)
+    if tg_id:
+        tg_parts.append(f"ID: {tg_id}")
+    if tg_parts:
+        add_node("✈️ Telegram\n" + " · ".join(tg_parts), "telegram", root_id, "Telegram")
+
+    phone = str(data.get("phone_number") or "").strip()
+    if phone and phone != "Не найдено":
+        add_node(f"📞 Телефон\n{phone}", "phone", root_id, "Номер")
+
+    fio = str(data.get("fio") or "").strip()
+    if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
+        add_node(f"👤 ФИО\n{fio}", "person", root_id, "Личность")
+
+    region = str(data.get("region") or "").strip()
+    if region and region not in ("Нет", "Не найдено"):
+        add_node(f"📍 Регион\n{region}", "region", root_id, "Локация")
+
+    for pb in (data.get("phonebooks") or [])[:8]:
+        pb_str = str(pb).strip()
+        if pb_str:
+            add_node(f"📒 Контакт\n{pb_str}", "contact", root_id, "Книга")
+
+    dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
+    for db_name, records in list(dbs.items())[:12]:
+        rec_count = len(records) if isinstance(records, list) else 0
+        add_node(f"🗄 {db_name}\n({rec_count} зап.)", "db", root_id, "База")
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def generate_html_report(data: dict, report_id: str) -> str:
-    query = data.get('query', '—')
-    fio = data.get('fio', '—')
-    dob = data.get('dob', '—')
-    snils = data.get('snils', '—')
-    operator = data.get('operator', '—')
-    region = data.get('region', '—')
+    query = html.escape(str(data.get("query") or "—"))
+    fio = html.escape(str(data.get("fio") or "Не найдено"))
+    phone = html.escape(str(data.get("phone_number") or "Не найдено"))
+    reg_date = html.escape(str(data.get("reg_date") or "Не найдено"))
+    dob = html.escape(str(data.get("dob") or "Нет"))
+    snils = html.escape(str(data.get("snils") or "Нет"))
+    operator = html.escape(str(data.get("operator") or "Нет"))
+    region = html.escape(str(data.get("region") or "Нет"))
 
-    nodes = [
-        {"id": 1, "label": f"Запрос\n{query}", "color": "#c084fc", "shape": "box"},
-        {"id": 2, "label": f"ФИО\n{fio}", "color": "#4ade80", "shape": "box"},
-        {"id": 3, "label": f"Регион\n{region}", "color": "#38bdf8", "shape": "box"}
-    ]
-    edges = [
-        {"from": 1, "to": 2, "color": "#334155"},
-        {"from": 1, "to": 3, "color": "#334155"}
-    ]
-    graph_json = json.dumps({"nodes": nodes, "edges": edges})
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    tg_id = html.escape(str(tg.get("id") or tg.get("user_id") or "Не найдено"))
+    raw_username = tg.get("username") or (str(data.get("query") or "") if str(data.get("query") or "").startswith("@") else "")
+    tg_username = html.escape(f"@{str(raw_username).lstrip('@')}" if raw_username else "Не найдено")
+
+    phonebooks_list = data.get("phonebooks") or []
+    phonebooks_html = html.escape(", ".join(phonebooks_list)) if phonebooks_list else "Не найдено"
+
+    history_list = data.get("name_history") or []
+    if history_list:
+        history_html = "<br>".join(html.escape(str(item)) for item in history_list)
+    else:
+        history_html = "Не найдено"
+
+    graph_payload = _build_graph_payload(data)
+    graph_json = json.dumps(graph_payload, ensure_ascii=False).replace("</", "<\\/")
+
+    export_dict = {
+        "report_id": report_id,
+        "query": data.get("query"),
+        "date": data.get("date"),
+        "telegram": {"username": tg_username, "id": tg_id, "reg_date": data.get("reg_date")},
+        "phone_number": data.get("phone_number"),
+        "fio": data.get("fio"),
+        "phonebooks": data.get("phonebooks"),
+        "name_history": data.get("name_history"),
+        "databases": data.get("databases"),
+    }
+    raw_json_str = html.escape(json.dumps(export_dict, ensure_ascii=False, indent=2))
 
     dbs_html = ""
-    for db_name, records in data.get("databases", {}).items():
-        rows = ""
-        for rec in records:
-            if isinstance(rec, dict):
-                items = "<br>".join(f"<b>{k}:</b> {v}" for k, v in rec.items())
-                rows += f"<div style='border-bottom:1px solid #334155;padding:8px 0;'>{items}</div>"
-        dbs_html += f"<div class='card'><h3>📁 {db_name}</h3>{rows}</div>"
+    for db_name, records in (data.get("databases") or {}).items():
+        safe_db = html.escape(str(db_name))
+        rows_html = ""
+        if isinstance(records, list) and records:
+            for rec in records[:30]:
+                if isinstance(rec, dict):
+                    items = "<br>".join(
+                        f"<b>{html.escape(str(k))}:</b> {html.escape(str(v))}"
+                        for k, v in rec.items()
+                    )
+                    rows_html += f"<div class='rec-row'>{items}</div>"
+                else:
+                    rows_html += f"<div class='rec-row'>{html.escape(str(rec))}</div>"
+        else:
+            rows_html = "<div class='rec-row'>Нет записей</div>"
+        dbs_html += f"<div class='card'><h3>📁 {safe_db}</h3>{rows_html}</div>"
 
-    return f"""
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <title>Oasis Digital — Отчет по {query}</title>
-        <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-            body {{ font-family: 'Inter', sans-serif; background-color: #0f1015; color: #e2e8f0; height: 100vh; display: flex; overflow: hidden; }}
-            .sidebar {{ width: 260px; background-color: #0b0c10; border-right: 1px solid #1f2232; display: flex; flex-direction: column; padding: 20px 10px; }}
-            .brand {{ padding: 0 10px 20px 10px; font-size: 18px; font-weight: 700; color: #fff; border-bottom: 1px solid #1f2232; margin-bottom: 15px; }}
-            .nav-item {{ padding: 12px 15px; border-radius: 8px; cursor: pointer; color: #94a3b8; font-size: 14px; margin-bottom: 4px; }}
-            .nav-item.active {{ background-color: #8b5cf6; color: #fff; }}
-            .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow-y: auto; background-color: #0f1015; }}
-            .tab-content {{ display: none; flex-direction: column; height: 100%; }}
-            .tab-content.active {{ display: flex; }}
-            .graph-container {{ flex: 1; background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; position: relative; min-height: 500px; }}
-            #mynetwork {{ width: 100%; height: 100%; position: absolute; }}
-            .card {{ background-color: #0b0c10; border: 1px solid #1f2232; border-radius: 12px; padding: 20px; margin-bottom: 20px; }}
-            .data-row {{ display: flex; padding: 10px 0; border-bottom: 1px solid #1f2232; }}
-            .data-label {{ width: 160px; color: #94a3b8; }}
-            .data-value {{ color: #fff; }}
-        </style>
-    </head>
-    <body>
-        <div class="sidebar">
-            <div class="brand">Oasis Digital</div>
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oasis Digital — Отчет по {query}</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        html, body {{
+            font-family: 'Inter', sans-serif;
+            background-color: #0f1015;
+            color: #e2e8f0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }}
+        .app-shell {{
+            display: flex;
+            width: 100vw;
+            height: 100vh;
+        }}
+        .sidebar {{
+            width: 260px;
+            min-width: 240px;
+            background-color: #0b0c10;
+            border-right: 1px solid #1f2232;
+            display: flex;
+            flex-direction: column;
+            padding: 20px 12px;
+            gap: 6px;
+        }}
+        .brand {{
+            padding: 4px 12px 18px 12px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #fff;
+            border-bottom: 1px solid #1f2232;
+            margin-bottom: 10px;
+        }}
+        .brand span {{
+            display: block;
+            font-size: 12px;
+            font-weight: 400;
+            color: #94a3b8;
+            margin-top: 4px;
+        }}
+        .nav-item {{
+            padding: 11px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            color: #94a3b8;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.15s, color 0.15s;
+        }}
+        .nav-item:hover {{
+            background-color: #171926;
+            color: #f8fafc;
+        }}
+        .nav-item.active {{
+            background-color: #8b5cf6;
+            color: #fff;
+        }}
+        .btn-fit {{
+            margin-top: auto;
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: 1px solid #2a2f45;
+            background: #141722;
+            color: #e2e8f0;
+            font-size: 13px;
+            cursor: pointer;
+        }}
+        .btn-fit:hover {{
+            background: #1e2334;
+        }}
+        .main-content {{
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            position: relative;
+            overflow-y: auto;
+            padding: 18px;
+        }}
+        .tab-content {{
+            display: none;
+            width: 100%;
+            height: 100%;
+        }}
+        .tab-content.active {{
+            display: block;
+        }}
+        .graph-wrap {{
+            width: 100%;
+            height: 100%;
+            min-height: 520px;
+            background-color: #0b0c10;
+            border: 1px solid #1f2232;
+            border-radius: 12px;
+            position: relative;
+        }}
+        #mynetwork {{
+            width: 100%;
+            height: 100%;
+        }}
+        .legend {{
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            z-index: 10;
+            background: rgba(15, 16, 21, 0.9);
+            border: 1px solid #24283b;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #cbd5e1;
+            line-height: 1.7;
+        }}
+        .card {{
+            background-color: #0b0c10;
+            border: 1px solid #1f2232;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+        }}
+        .card h3 {{
+            font-size: 15px;
+            margin-bottom: 12px;
+            color: #f8fafc;
+        }}
+        .data-row {{
+            display: flex;
+            gap: 16px;
+            padding: 10px 0;
+            border-bottom: 1px solid #1a1d2b;
+            font-size: 14px;
+        }}
+        .data-row:last-child {{
+            border-bottom: none;
+        }}
+        .data-label {{
+            width: 190px;
+            min-width: 150px;
+            color: #94a3b8;
+        }}
+        .data-value {{
+            color: #f8fafc;
+            word-break: break-word;
+        }}
+        .rec-row {{
+            border-bottom: 1px solid #1a1d2b;
+            padding: 8px 0;
+            font-size: 13px;
+            line-height: 1.5;
+        }}
+        .rec-row:last-child {{
+            border-bottom: none;
+        }}
+        pre.json-box {{
+            background: #0b0c10;
+            border: 1px solid #1f2232;
+            border-radius: 12px;
+            padding: 18px;
+            font-size: 12px;
+            line-height: 1.5;
+            overflow-x: auto;
+            color: #cbd5e1;
+        }}
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand">
+                Oasis Digital
+                <span>Отчет #{html.escape(report_id)}</span>
+            </div>
             <div class="nav-item active" onclick="openTab('tab-graph', this)">🕸️ Граф связей</div>
             <div class="nav-item" onclick="openTab('tab-summary', this)">📋 Сводка данных</div>
-        </div>
-        <div class="main-content">
+            <div class="nav-item" onclick="openTab('tab-json', this)">📦 JSON</div>
+            <button class="btn-fit" onclick="fitGraph()">🎯 Центрировать граф</button>
+        </aside>
+
+        <main class="main-content">
             <div id="tab-graph" class="tab-content active">
-                <div class="graph-container"><div id="mynetwork"></div></div>
+                <div class="graph-wrap">
+                    <div class="legend">
+                        <div>🟣 Запрос</div>
+                        <div>🔵 Telegram / Контакты</div>
+                        <div>🟢 Личность / Телефон</div>
+                        <div>🟠 Базы данных</div>
+                    </div>
+                    <div id="mynetwork"></div>
+                </div>
             </div>
+
             <div id="tab-summary" class="tab-content">
                 <div class="card">
-                    <div class="data-row"><div class="data-label">Цель</div><div class="data-value">{query}</div></div>
+                    <h3>Основная информация</h3>
+                    <div class="data-row"><div class="data-label">Запрос</div><div class="data-value">{query}</div></div>
+                    <div class="data-row"><div class="data-label">Telegram</div><div class="data-value">{tg_username} (ID: {tg_id})</div></div>
+                    <div class="data-row"><div class="data-label">Номер телефона</div><div class="data-value">{phone}</div></div>
+                    <div class="data-row"><div class="data-label">Регистрация</div><div class="data-value">{reg_date}</div></div>
+                    <div class="data-row"><div class="data-label">Телефонные книги</div><div class="data-value">{phonebooks_html}</div></div>
                     <div class="data-row"><div class="data-label">ФИО</div><div class="data-value">{fio}</div></div>
-                    <div class="data-row"><div class="data-label">Дата рожд.</div><div class="data-value">{dob}</div></div>
+                    <div class="data-row"><div class="data-label">Дата рождения</div><div class="data-value">{dob}</div></div>
                     <div class="data-row"><div class="data-label">СНИЛС</div><div class="data-value">{snils}</div></div>
-                    <div class="data-row"><div class="data-label">Оператор</div><div class="data-value">{operator}</div></div>
-                    <div class="data-row"><div class="data-label">Регион</div><div class="data-value">{region}</div></div>
+                    <div class="data-row"><div class="data-label">Оператор / Регион</div><div class="data-value">{operator} / {region}</div></div>
                 </div>
+
+                <div class="card">
+                    <h3>История изменения имени</h3>
+                    <div class="rec-row">{history_html}</div>
+                </div>
+
                 {dbs_html}
             </div>
-        </div>
-        <script>
-            function openTab(tabId, el) {{
-                document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-                document.getElementById(tabId).classList.add('active');
-                el.classList.add('active');
-            }}
+
+            <div id="tab-json" class="tab-content">
+                <pre class="json-box">{raw_json_str}</pre>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        var network = null;
+
+        function initGraph() {{
+            var container = document.getElementById('mynetwork');
             var graphData = {graph_json};
-            var network = new vis.Network(document.getElementById('mynetwork'), {{
+            var data = {{
                 nodes: new vis.DataSet(graphData.nodes),
                 edges: new vis.DataSet(graphData.edges)
-            }}, {{
-                nodes: {{ font: {{ color: '#fff' }}, borderWidth: 0 }},
-                edges: {{ color: '#334155' }}
+            }};
+            var options = {{
+                autoResize: true,
+                nodes: {{
+                    shape: 'box',
+                    margin: {{ top: 12, right: 16, bottom: 12, left: 16 }},
+                    widthConstraint: {{ minimum: 140, maximum: 280 }},
+                    font: {{
+                        color: '#ffffff',
+                        size: 14,
+                        face: 'Inter, sans-serif'
+                    }},
+                    borderWidth: 1.5,
+                    shadow: {{
+                        enabled: true,
+                        color: 'rgba(0,0,0,0.45)',
+                        size: 10,
+                        x: 0,
+                        y: 4
+                    }}
+                }},
+                edges: {{
+                    arrows: {{ to: {{ enabled: true, scaleFactor: 0.7 }} }},
+                    color: {{ color: '#475569', highlight: '#a855f7' }},
+                    width: 1.8,
+                    smooth: {{ type: 'dynamic' }},
+                    font: {{
+                        color: '#94a3b8',
+                        size: 11,
+                        strokeWidth: 0
+                    }}
+                }},
+                groups: {{
+                    query: {{ color: {{ background: '#6d28d9', border: '#a78bfa' }} }},
+                    telegram: {{ color: {{ background: '#0369a1', border: '#38bdf8' }} }},
+                    phone: {{ color: {{ background: '#15803d', border: '#4ade80' }} }},
+                    person: {{ color: {{ background: '#047857', border: '#34d399' }} }},
+                    region: {{ color: {{ background: '#1d4ed8', border: '#60a5fa' }} }},
+                    contact: {{ color: {{ background: '#0e7490', border: '#22d3ee' }} }},
+                    db: {{ color: {{ background: '#b45309', border: '#fbbf24' }} }}
+                }},
+                physics: {{
+                    enabled: true,
+                    solver: 'forceAtlas2Based',
+                    forceAtlas2Based: {{
+                        gravitationalConstant: -90,
+                        centralGravity: 0.015,
+                        springLength: 190,
+                        springConstant: 0.06,
+                        avoidOverlap: 1
+                    }},
+                    stabilization: {{
+                        enabled: true,
+                        iterations: 150
+                    }}
+                }},
+                interaction: {{
+                    hover: true,
+                    navigationButtons: true,
+                    keyboard: true
+                }}
+            }};
+
+            network = new vis.Network(container, data, options);
+            network.once('stabilized', function () {{
+                network.fit({{ animation: {{ duration: 400, easingFunction: 'easeInOutQuad' }} }});
             }});
-        </script>
-    </body>
-    </html>
-    """
+        }}
+
+        function fitGraph() {{
+            if (network) {{
+                network.fit({{ animation: {{ duration: 350, easingFunction: 'easeInOutQuad' }} }});
+            }}
+        }}
+
+        function openTab(tabId, el) {{
+            document.querySelectorAll('.tab-content').forEach(function (t) {{
+                t.classList.remove('active');
+            }});
+            document.querySelectorAll('.nav-item').forEach(function (n) {{
+                n.classList.remove('active');
+            }});
+            document.getElementById(tabId).classList.add('active');
+            el.classList.add('active');
+
+            if (tabId === 'tab-graph' && network) {{
+                setTimeout(function () {{
+                    network.redraw();
+                    network.fit({{ animation: false }});
+                }}, 50);
+            }}
+        }}
+
+        window.addEventListener('load', initGraph);
+        window.addEventListener('resize', function () {{
+            if (network) {{
+                network.redraw();
+            }}
+        }});
+    </script>
+</body>
+</html>"""
 
 
 # --- FASTAPI ---
@@ -752,7 +1240,7 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     res_bb = await fetch_blackbox(q, BLACKBOX_KEY, return_debug=True)
     bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:2500] if isinstance(res_bb, dict) else str(res_bb)
 
-    text = f"<b>BLACK-BOX:</b>\n<pre>{bb_str}</pre>"
+    text = f"<b>BLACK-BOX:</b>\n<pre>{html.escape(bb_str)}</pre>"
     await note.edit_text(text[:4000], parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
@@ -772,8 +1260,15 @@ async def cb_send_txt(cb: CallbackQuery):
     data = REPORTS_CACHE.get(report_id)
     if not data:
         return await cb.answer("Отчет устарел", show_alert=True)
-    text = f"OASIS DIGITAL\nЗапрос: {data['query']}\nФИО: {data['fio']}\nДата рождения: {data['dob']}\nСНИЛС: {data['snils']}"
-    file = BufferedInputFile(text.encode('utf-8'), filename=f"oasis_{report_id}.txt")
+    text = (
+        f"OASIS DIGITAL\n"
+        f"Запрос: {data.get('query')}\n"
+        f"Номер: {data.get('phone_number', 'Не найдено')}\n"
+        f"ФИО: {data.get('fio', 'Не найдено')}\n"
+        f"Дата рождения: {data.get('dob', 'Нет')}\n"
+        f"СНИЛС: {data.get('snils', 'Нет')}"
+    )
+    file = BufferedInputFile(text.encode("utf-8"), filename=f"oasis_{report_id}.txt")
     await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await cb.answer()
 
@@ -784,8 +1279,19 @@ async def cb_send_json(cb: CallbackQuery):
     data = REPORTS_CACHE.get(report_id)
     if not data:
         return await cb.answer("Отчет устарел", show_alert=True)
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    file = BufferedInputFile(json_str.encode('utf-8'), filename=f"oasis_{report_id}.json")
+    export_obj = {
+        "query": data.get("query"),
+        "date": data.get("date"),
+        "phone_number": data.get("phone_number"),
+        "fio": data.get("fio"),
+        "reg_date": data.get("reg_date"),
+        "phonebooks": data.get("phonebooks"),
+        "name_history": data.get("name_history"),
+        "tg_info": data.get("tg_info"),
+        "databases": data.get("databases"),
+    }
+    json_str = json.dumps(export_obj, ensure_ascii=False, indent=2)
+    file = BufferedInputFile(json_str.encode("utf-8"), filename=f"oasis_{report_id}.json")
     await cb.message.answer_document(document=file, caption="📦 <b>JSON Отчет</b>", parse_mode="HTML")
     await cb.answer()
 
@@ -801,7 +1307,7 @@ async def process_search(msg: Message, state: FSMContext):
         return await msg.answer("❌ У вас закончились запросы.")
 
     q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box (до 90 сек)...\n\n<b>Цель:</b> <code>{q}</code>", parse_mode="HTML")
+    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>", parse_mode="HTML")
 
     data = await search_everywhere(q)
     report_id = str(uuid.uuid4())[:8]
