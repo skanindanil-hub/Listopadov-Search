@@ -342,6 +342,19 @@ async def check_all_apis_health():
     )
 
 
+# --- ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ---
+def _detect_query_type(query: str) -> str:
+    q = (query or "").strip()
+    digits = re.sub(r"\D", "", q)
+    if q.startswith("@") or "t.me/" in q.lower() or "telegram" in q.lower():
+        return "telegram"
+    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 15:
+        return "phone"
+    if "@" in q and "." in q.split("@")[-1]:
+        return "email"
+    return "general"
+
+
 # --- ЛОКАЛЬНЫЙ АНАЛИЗАТОР БЕЗ ВНЕШНЕГО AI API ---
 def _has_report_findings(data: dict) -> bool:
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
@@ -648,21 +661,25 @@ async def search_everywhere(q: str):
 
 def format_report_text(data: dict) -> str:
     query = str(data.get("query") or "").strip()
+    q_type = _detect_query_type(query)
+
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-
-    tg_id = tg.get("id") or tg.get("user_id") or "Не найдено"
+    tg_id = tg.get("id") or tg.get("user_id")
     raw_username = tg.get("username") or (query if query.startswith("@") else "")
-    tg_username = f"@{str(raw_username).lstrip('@')}" if raw_username else "Не найдено"
+    tg_username = f"@{str(raw_username).lstrip('@')}" if raw_username else ""
 
-    reg_date = data.get("reg_date") or "Не найдено"
-    phone_val = data.get("phone_number") or "Не найдено"
+    fio = str(data.get("fio") or "Не найдено").strip()
+    dob = str(data.get("dob") or "Нет").strip()
+    phone_val = str(data.get("phone_number") or "Не найдено").strip()
+    operator = str(data.get("operator") or "Нет").strip()
+    region = str(data.get("region") or "Нет").strip()
+    reg_date = str(data.get("reg_date") or "Не найдено").strip()
 
     phonebooks = data.get("phonebooks") or []
-    phonebooks_str = ", ".join(phonebooks) if phonebooks else "Не найдено"
+    phonebooks_str = ", ".join(str(x) for x in phonebooks) if phonebooks else "Не найдено"
 
     history = data.get("name_history") or []
-    history_header = f"🌀 История изменения имени ({len(history)}):" if history else "🌀 История изменения имени (0):"
-    history_lines = [history_header]
+    history_lines = [f"🌀 История изменения имени ({len(history)}):"]
     if history:
         for item in history[:12]:
             history_lines.append(html.escape(str(item)))
@@ -671,40 +688,58 @@ def format_report_text(data: dict) -> str:
     else:
         history_lines.append("Не найдено")
 
-    if not _has_report_findings(data):
-        safe_q = html.escape(query) if query else "Не найдено"
-        return (
-            f"✈️ Telegram · {safe_q}\n"
-            f"▸ ID: Не найдено\n"
-            f"▸ Номер: Не найдено\n"
-            f"📅 Регистрация: Не найдено\n\n"
-            f"🔎 Телефонные книги: Не найдено\n\n"
-            f"🌀 История изменения имени (0):\n"
-            f"Не найдено\n\n"
-            f"💬 Telegram: {safe_q} (ID: Не найдено)\n\n"
-            f"👁 Интересовались этим: 0\n\n\n"
-            f"Полная информация доступна в файле ниже ⬇️"
-        )
-
     views_val = data.get("views_count")
     if views_val is None:
-        views_val = len(data.get("databases") or {})
+        views_val = sum(len(v) for v in (data.get("databases") or {}).values() if isinstance(v, list))
 
-    blocks = [
-        f"✈️ Telegram · {html.escape(str(tg_username))}\n"
-        f"▸ ID: {html.escape(str(tg_id))}\n"
-        f"▸ Номер: {html.escape(str(phone_val))}\n"
-        f"📅 Регистрация: {html.escape(str(reg_date))}",
-        f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
-        "\n".join(history_lines),
-        f"💬 Telegram: {html.escape(str(tg_username))} (ID: {html.escape(str(tg_id))})",
-        f"👁 Интересовались этим: {html.escape(str(views_val))}",
-        "Полная информация доступна в файле ниже ⬇️"
-    ]
+    if q_type == "phone":
+        digits = re.sub(r"\D", "", query)
+        shown_phone = phone_val if phone_val != "Не найдено" else (digits or query or "Не найдено")
+        loc_line = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
+
+        blocks = [
+            f"📲 Номер · {html.escape(str(shown_phone))}\n"
+            f"▸ Оператор / Регион: {html.escape(loc_line)}\n"
+            f"▸ ФИО: {html.escape(fio)}\n"
+            f"▸ Дата рождения: {html.escape(dob)}",
+            f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
+            "\n".join(history_lines),
+        ]
+        if tg_id or (tg_username and not re.fullmatch(r"@\+?\d+", tg_username)):
+            blocks.append(f"✈️ Telegram: {html.escape(tg_username or '—')} (ID: {html.escape(str(tg_id or '—'))})")
+        blocks.append(f"👁 Интересовались этим: {html.escape(str(views_val))}")
+        blocks.append("Полная информация доступна в файле ниже ⬇️")
+        return "\n\n".join(blocks)
+
+    if q_type == "telegram":
+        shown_tg = tg_username or query or "Не найдено"
+        shown_id = str(tg_id) if tg_id else "Не найдено"
+        blocks = [
+            f"✈️ Telegram · {html.escape(str(shown_tg))}\n"
+            f"▸ ID: {html.escape(shown_id)}\n"
+            f"▸ Номер: {html.escape(phone_val)}\n"
+            f"📅 Регистрация: {html.escape(reg_date)}",
+            f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
+            "\n".join(history_lines),
+            f"💬 Telegram: {html.escape(str(shown_tg))} (ID: {html.escape(shown_id)})",
+        ]
+    else:
+        icon = "✉️ Email" if q_type == "email" else "🔎 Запрос"
+        blocks = [
+            f"{icon} · {html.escape(query or 'Не найдено')}\n"
+            f"▸ ФИО: {html.escape(fio)}\n"
+            f"▸ Номер: {html.escape(phone_val)}\n"
+            f"▸ Дата рождения: {html.escape(dob)}",
+            f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
+            "\n".join(history_lines),
+        ]
+
+    blocks.append(f"👁 Интересовались этим: {html.escape(str(views_val))}")
+    blocks.append("Полная информация доступна в файле ниже ⬇️")
     return "\n\n".join(blocks)
 
 
-# --- ГЕНЕРАЦИЯ HTML ОТЧЕТА С КОРРЕКТНЫМ VIS.JS ГРАФОМ ---
+# --- ГЕНЕРАЦИЯ АДАПТИВНОГО HTML ОТЧЕТА (ПК + МОБИЛЬНЫЕ) ---
 def _build_graph_payload(data: dict) -> dict:
     nodes = []
     edges = []
@@ -838,7 +873,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
     <title>Oasis Digital — Отчет по {query}</title>
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <style>
@@ -848,14 +883,14 @@ def generate_html_report(data: dict, report_id: str) -> str:
             font-family: 'Inter', sans-serif;
             background-color: #0f1015;
             color: #e2e8f0;
+            min-height: 100vh;
             width: 100%;
-            height: 100%;
-            overflow: hidden;
+            overflow-x: hidden;
         }}
         .app-shell {{
             display: flex;
-            width: 100vw;
-            height: 100vh;
+            min-height: 100vh;
+            width: 100%;
         }}
         .sidebar {{
             width: 260px;
@@ -866,6 +901,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             flex-direction: column;
             padding: 20px 12px;
             gap: 6px;
+            flex-shrink: 0;
         }}
         .brand {{
             padding: 4px 12px 18px 12px;
@@ -882,6 +918,11 @@ def generate_html_report(data: dict, report_id: str) -> str:
             color: #94a3b8;
             margin-top: 4px;
         }}
+        .nav-group {{
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }}
         .nav-item {{
             padding: 11px 14px;
             border-radius: 8px;
@@ -890,6 +931,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             font-size: 14px;
             font-weight: 500;
             transition: background 0.15s, color 0.15s;
+            white-space: nowrap;
         }}
         .nav-item:hover {{
             background-color: #171926;
@@ -908,30 +950,28 @@ def generate_html_report(data: dict, report_id: str) -> str:
             color: #e2e8f0;
             font-size: 13px;
             cursor: pointer;
+            white-space: nowrap;
         }}
         .btn-fit:hover {{
             background: #1e2334;
         }}
         .main-content {{
             flex: 1;
-            width: 100%;
-            height: 100%;
-            position: relative;
-            overflow-y: auto;
+            min-width: 0;
             padding: 18px;
+            overflow-y: auto;
         }}
         .tab-content {{
             display: none;
             width: 100%;
-            height: 100%;
         }}
         .tab-content.active {{
             display: block;
         }}
         .graph-wrap {{
             width: 100%;
-            height: 100%;
-            min-height: 520px;
+            height: calc(100vh - 36px);
+            min-height: 460px;
             background-color: #0b0c10;
             border: 1px solid #1f2232;
             border-radius: 12px;
@@ -943,23 +983,24 @@ def generate_html_report(data: dict, report_id: str) -> str:
         }}
         .legend {{
             position: absolute;
-            top: 14px;
-            right: 14px;
+            top: 12px;
+            right: 12px;
             z-index: 10;
-            background: rgba(15, 16, 21, 0.9);
+            background: rgba(15, 16, 21, 0.92);
             border: 1px solid #24283b;
             border-radius: 10px;
-            padding: 10px 14px;
-            font-size: 12px;
+            padding: 9px 12px;
+            font-size: 11px;
             color: #cbd5e1;
-            line-height: 1.7;
+            line-height: 1.65;
+            pointer-events: none;
         }}
         .card {{
             background-color: #0b0c10;
             border: 1px solid #1f2232;
             border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 16px;
+            padding: 18px;
+            margin-bottom: 14px;
         }}
         .card h3 {{
             font-size: 15px;
@@ -968,7 +1009,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
         }}
         .data-row {{
             display: flex;
-            gap: 16px;
+            gap: 14px;
             padding: 10px 0;
             border-bottom: 1px solid #1a1d2b;
             font-size: 14px;
@@ -977,9 +1018,10 @@ def generate_html_report(data: dict, report_id: str) -> str:
             border-bottom: none;
         }}
         .data-label {{
-            width: 190px;
-            min-width: 150px;
+            width: 185px;
+            min-width: 140px;
             color: #94a3b8;
+            flex-shrink: 0;
         }}
         .data-value {{
             color: #f8fafc;
@@ -990,6 +1032,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
             padding: 8px 0;
             font-size: 13px;
             line-height: 1.5;
+            word-break: break-word;
         }}
         .rec-row:last-child {{
             border-bottom: none;
@@ -998,11 +1041,70 @@ def generate_html_report(data: dict, report_id: str) -> str:
             background: #0b0c10;
             border: 1px solid #1f2232;
             border-radius: 12px;
-            padding: 18px;
+            padding: 16px;
             font-size: 12px;
             line-height: 1.5;
             overflow-x: auto;
             color: #cbd5e1;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }}
+
+        @media (max-width: 820px) {{
+            .app-shell {{
+                flex-direction: column;
+            }}
+            .sidebar {{
+                width: 100%;
+                min-width: 0;
+                border-right: none;
+                border-bottom: 1px solid #1f2232;
+                padding: 12px;
+                gap: 8px;
+            }}
+            .brand {{
+                padding: 0 4px 10px 4px;
+                margin-bottom: 2px;
+                font-size: 16px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }}
+            .brand span {{
+                margin-top: 0;
+            }}
+            .nav-group {{
+                flex-direction: row;
+                overflow-x: auto;
+                gap: 6px;
+                padding-bottom: 2px;
+            }}
+            .nav-item {{
+                padding: 8px 12px;
+                font-size: 13px;
+            }}
+            .btn-fit {{
+                margin-top: 0;
+                padding: 8px 12px;
+                font-size: 12px;
+                align-self: flex-start;
+            }}
+            .main-content {{
+                padding: 12px;
+            }}
+            .graph-wrap {{
+                height: calc(100vh - 150px);
+                min-height: 360px;
+            }}
+            .data-row {{
+                flex-direction: column;
+                gap: 4px;
+            }}
+            .data-label {{
+                width: auto;
+                min-width: 0;
+                font-size: 12px;
+            }}
         }}
     </style>
 </head>
@@ -1013,9 +1115,11 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 Oasis Digital
                 <span>Отчет #{html.escape(report_id)}</span>
             </div>
-            <div class="nav-item active" onclick="openTab('tab-graph', this)">🕸️ Граф связей</div>
-            <div class="nav-item" onclick="openTab('tab-summary', this)">📋 Сводка данных</div>
-            <div class="nav-item" onclick="openTab('tab-json', this)">📦 JSON</div>
+            <div class="nav-group">
+                <div class="nav-item active" onclick="openTab('tab-graph', this)">🕸️ Граф связей</div>
+                <div class="nav-item" onclick="openTab('tab-summary', this)">📋 Сводка данных</div>
+                <div class="nav-item" onclick="openTab('tab-json', this)">📦 JSON</div>
+            </div>
             <button class="btn-fit" onclick="fitGraph()">🎯 Центрировать граф</button>
         </aside>
 
@@ -1074,11 +1178,11 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 autoResize: true,
                 nodes: {{
                     shape: 'box',
-                    margin: {{ top: 12, right: 16, bottom: 12, left: 16 }},
-                    widthConstraint: {{ minimum: 140, maximum: 280 }},
+                    margin: {{ top: 10, right: 14, bottom: 10, left: 14 }},
+                    widthConstraint: {{ minimum: 120, maximum: 260 }},
                     font: {{
                         color: '#ffffff',
-                        size: 14,
+                        size: 13,
                         face: 'Inter, sans-serif'
                     }},
                     borderWidth: 1.5,
@@ -1116,7 +1220,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
                     forceAtlas2Based: {{
                         gravitationalConstant: -90,
                         centralGravity: 0.015,
-                        springLength: 190,
+                        springLength: 180,
                         springConstant: 0.06,
                         avoidOverlap: 1
                     }},
