@@ -1,63 +1,72 @@
 import asyncio
 import html
+import json
 import logging
 import os
 import re
-import json
+import sqlite3
 import ssl
 import uuid
-import sqlite3
-import aiohttp
-from datetime import datetime
 from collections import OrderedDict
+from datetime import datetime
+from typing import Any
 
+import aiohttp
+import uvicorn
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from fastapi.responses import HTMLResponse
 
 # ====================== НАСТРОЙКИ OASIS DIGITAL ======================
-BOT_TOKEN = "9024954594:AAEmimdFH2HJw5DgWBlYDtJ2QBOTtwmIbPM"
-BOT_USERNAME = "@OasisDigitalro_bot"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms")
+BOT_USERNAME = "@MobiusSearchBot"
 
-MAIN_ADMIN_ID = 8394631079
+MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", "8394631079"))
 ADMIN_USERNAME = "@anodoxx"
 
-CHANNEL_ID = -1004311841781
-CHANNEL_URL = "https://t.me/+BqWOF7S3AqQ1YzI6"
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004311841781"))
+CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/+BqWOF7S3AqQ1YzI6")
 
 # API-ключи
-BLACKBOX_KEY = "8jdsYcPZiQMTpYNCluXg9scNhc7y"
-ARGUS_KEY = "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE"
+BLACKBOX_KEY = os.getenv("BLACKBOX_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y")
+ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE")
 
-TON_WALLET = "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx"
-WEBHOOK_HOST = "https://listopadov-search-1.onrender.com"
-USERS_DB = "users.db"
+TON_WALLET = os.getenv("TON_WALLET", "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://listopadov-search-1.onrender.com").rstrip("/")
+USERS_DB = os.getenv("USERS_DB", "users.db")
 
-# API Endpoints
 API_URL_BLACKBOX = "https://api.black-box.cc/v1.1/search"
 API_URL_ARGUS = "https://argus.cc.cd/api/v1/search"
 
-# Прокси (если понадобится, укажи "http://user:pass@ip:port")
 PROXY_URL = os.getenv("PROXY_URL", None)
-
-API_TIMEOUT = 90  # Таймаут 90 секунд
-MAX_RETRIES = 3   # Количество повторных попыток при 502/503/504
+API_TIMEOUT = 90
+MAX_RETRIES = 3
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger("oasis")
 
 bot = Bot(token=BOT_TOKEN)
@@ -65,11 +74,11 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 class BoundedCache(OrderedDict):
-    def __init__(self, maxlen=1000, *args, **kwargs):
+    def __init__(self, maxlen: int = 1000, *args, **kwargs):
         self.maxlen = maxlen
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: str, value: Any):
         if key in self:
             self.move_to_end(key)
         super().__setitem__(key, value)
@@ -89,108 +98,170 @@ class SearchStates(StatesGroup):
     wait_admin_create_check = State()
 
 
-# --- БАЗА ДАННЫХ ---
-def init_users_db():
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            requests_left INTEGER DEFAULT 3,
-            referrer_id INTEGER,
-            joined_at TEXT,
-            is_banned INTEGER DEFAULT 0
+# ====================== БАЗА ДАННЫХ (SQLITE) ======================
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(USERS_DB, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                requests_left INTEGER DEFAULT 3,
+                referrer_id INTEGER,
+                joined_at TEXT,
+                is_banned INTEGER DEFAULT 0
+            )
+            """
         )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS promos (
-            code TEXT PRIMARY KEY,
-            reward INTEGER,
-            max_uses INTEGER DEFAULT 1,
-            uses_count INTEGER DEFAULT 0,
-            created_by INTEGER
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promos (
+                code TEXT PRIMARY KEY,
+                reward INTEGER,
+                max_uses INTEGER DEFAULT 1,
+                uses_count INTEGER DEFAULT 0,
+                created_by INTEGER
+            )
+            """
         )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS promo_activations (
-            user_id INTEGER,
-            code TEXT,
-            PRIMARY KEY (user_id, code)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_activations (
+                user_id INTEGER,
+                code TEXT,
+                PRIMARY KEY (user_id, code)
+            )
+            """
         )
-    ''')
-    conn.commit()
-    conn.close()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                report_id TEXT PRIMARY KEY,
+                query TEXT,
+                payload_json TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.commit()
 
 
-init_users_db()
+init_db()
 
 
-def get_user(user_id):
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row
+def save_report(report_id: str, data: dict):
+    serializable = _make_json_safe(data)
+    REPORTS_CACHE[report_id] = serializable
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO reports (report_id, query, payload_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                report_id,
+                str(serializable.get("query") or ""),
+                json.dumps(serializable, ensure_ascii=False),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
 
 
-def add_user(user_id, username, referrer_id=None):
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cursor.fetchone():
-        conn.close()
-        return False
-    cursor.execute(
-        "INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at) VALUES (?, ?, ?, ?, ?)",
-        (user_id, username, 3, referrer_id, datetime.now().strftime("%d.%m.%Y"))
-    )
-    conn.commit()
-    conn.close()
+def load_report(report_id: str) -> dict | None:
+    if report_id in REPORTS_CACHE:
+        return REPORTS_CACHE[report_id]
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM reports WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        parsed = json.loads(row["payload_json"])
+        REPORTS_CACHE[report_id] = parsed
+        return parsed
+    except Exception:
+        return None
+
+
+def _make_json_safe(obj: Any) -> Any:
+    if isinstance(obj, set):
+        return list(obj)
+    if isinstance(obj, dict):
+        return {str(k): _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_json_safe(x) for x in obj]
+    return obj
+
+
+def get_user(user_id: int):
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return tuple(row) if row else None
+
+
+def add_user(user_id: int, username: str | None, referrer_id: int | None = None) -> bool:
+    with get_db_connection() as conn:
+        exists = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if exists:
+            return False
+        conn.execute(
+            "INSERT INTO users (user_id, username, requests_left, referrer_id, joined_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, 3, referrer_id, datetime.now().strftime("%d.%m.%Y")),
+        )
+        conn.commit()
     if referrer_id and referrer_id != user_id:
         add_requests(referrer_id, 1)
     return True
 
 
-def add_requests(user_id, amount):
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET requests_left = requests_left + ? WHERE user_id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
+def add_requests(user_id: int, amount: int):
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE users SET requests_left = requests_left + ? WHERE user_id = ?",
+            (amount, user_id),
+        )
+        conn.commit()
 
 
-def deduct_request(user_id):
+def deduct_request(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
         return True
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT requests_left, is_banned FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if row and row[0] > 0 and row[1] == 0:
-        cursor.execute("UPDATE users SET requests_left = requests_left - 1 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT requests_left, is_banned FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row and row["requests_left"] > 0 and row["is_banned"] == 0:
+            conn.execute(
+                "UPDATE users SET requests_left = requests_left - 1 WHERE user_id = ?",
+                (user_id,),
+            )
+            conn.commit()
+            return True
     return False
 
 
-def is_banned(user_id):
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return bool(row and row[0] == 1)
+def is_banned(user_id: int) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row and row["is_banned"] == 1)
 
 
-def calculate_days(joined_str):
+def calculate_days(joined_str: str) -> str:
     try:
         joined_date = datetime.strptime(joined_str, "%d.%m.%Y")
         delta = datetime.now() - joined_date
-        days = delta.days
+        days = max(delta.days, 0)
         months = days // 30
         rem_days = days % 30
         if months > 0:
@@ -200,7 +271,7 @@ def calculate_days(joined_str):
         return "0 дн."
 
 
-# --- ТЕКСТЫ И КЛАВИАТУРЫ ---
+# ====================== ТЕКСТЫ И КЛАВИАТУРЫ ======================
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
 
 🕵️ <b>Личность</b>
@@ -228,45 +299,92 @@ HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость
 
 
 def main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info")],
-        [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🎟 Активировать промокод", callback_data="use_promo")],
-        [InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"), InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Поиск", callback_data="search_info")],
+            [InlineKeyboardButton(text="💎 Купить запросы", callback_data="buy_requests")],
+            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="🎟 Активировать промокод", callback_data="use_promo")],
+            [
+                InlineKeyboardButton(text="🔗 Рефералка", callback_data="ref_link"),
+                InlineKeyboardButton(text="🆘 Связь с нами", callback_data="support"),
+            ],
+        ]
+    )
 
 
 def back_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]]
+    )
 
 
 def result_kb(report_id: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 AI-анализатор", callback_data=f"ai_analyze_{report_id}")],
-        [InlineKeyboardButton(text="🌐 Веб-отчет (Граф)", url=f"{WEBHOOK_HOST}/report/{report_id}")],
-        [
-            InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
-            InlineKeyboardButton(text="📦 Скачать JSON", callback_data=f"get_json_{report_id}")
-        ],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🤖 AI-анализатор", callback_data=f"ai_analyze_{report_id}")],
+            [
+                InlineKeyboardButton(
+                    text="🌐 Веб-отчет (Граф)",
+                    url=f"{WEBHOOK_HOST}/report/{report_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="📄 Скачать TXT", callback_data=f"get_txt_{report_id}"),
+                InlineKeyboardButton(text="📦 Скачать JSON", callback_data=f"get_json_{report_id}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")],
+        ]
+    )
 
 
 def admin_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
-        [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis")],
-        [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="adm_promo"), InlineKeyboardButton(text="💳 Создать чек", callback_data="adm_check")],
-        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📡 Тест API (Raw)", callback_data="adm_test_api")],
+            [InlineKeyboardButton(text="🔌 Проверка API", callback_data="adm_check_apis")],
+            [
+                InlineKeyboardButton(text="🎟 Создать промокод", callback_data="adm_promo"),
+                InlineKeyboardButton(text="💳 Создать чек", callback_data="adm_check"),
+            ],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")],
+        ]
+    )
 
 
-# --- ЗАПРОСЫ К ВНЕШНИМ API ---
-async def _get_with_retry(url: str, api_key: str, tag: str, params: dict, return_debug: bool = False):
+# ====================== ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ======================
+def detect_query_type(query: str) -> str:
+    q = (query or "").strip()
+    low = q.lower()
+    digits = re.sub(r"\D", "", q)
+
+    if q.startswith("@") or "t.me/" in low or "telegram" in low or re.fullmatch(r"\d{6,11}", q):
+        return "telegram"
+    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 15:
+        return "phone"
+    if "@" in q and "." in q.split("@")[-1]:
+        return "email"
+    if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", q.upper()):
+        return "vin"
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", q):
+        return "ip"
+    if re.fullmatch(r"[АВЕКМНОРСТУХABEKMHOPCTYX]{1,2}\d{3}[АВЕКМНОРСТУХABEKMHOPCTYX]{2,3}\d{2,3}", re.sub(r"\s+", "", q.upper())):
+        return "vehicle"
+    return "general"
+
+
+# ====================== ЗАПРОСЫ К ВНЕШНИМ API ======================
+async def _get_with_retry(
+    url: str,
+    api_key: str,
+    tag: str,
+    params: dict,
+    return_debug: bool = False,
+):
     headers = {
         **DEFAULT_HEADERS,
-        "X-API-Key": api_key
+        "X-API-Key": api_key,
+        "Authorization": f"Bearer {api_key}",
     }
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
     ssl_ctx = ssl.create_default_context()
@@ -284,14 +402,14 @@ async def _get_with_retry(url: str, api_key: str, tag: str, params: dict, return
                         except Exception:
                             return {"raw_text": text}
                     last_error = f"HTTP {resp.status}: {text[:300]}"
-                    log.warning(f"[{tag}] Попытка {attempt}/{MAX_RETRIES} -> {last_error}")
+                    log.warning("[%s] Попытка %s/%s -> %s", tag, attempt, MAX_RETRIES, last_error)
                     if resp.status in (502, 503, 504) and attempt < MAX_RETRIES:
                         await asyncio.sleep(3)
                         continue
                     break
         except Exception as e:
             last_error = f"Exception: {e}"
-            log.error(f"[{tag} ERROR] Попытка {attempt}/{MAX_RETRIES}: {e}")
+            log.error("[%s ERROR] Попытка %s/%s: %s", tag, attempt, MAX_RETRIES, e)
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(3)
 
@@ -299,12 +417,14 @@ async def _get_with_retry(url: str, api_key: str, tag: str, params: dict, return
 
 
 async def fetch_blackbox(q: str, api_key: str = BLACKBOX_KEY, return_debug: bool = False):
+    q_type = detect_query_type(q)
+    bb_type = "phone" if q_type == "phone" else ("email" if q_type == "email" else "auto")
     return await _get_with_retry(
         API_URL_BLACKBOX,
         api_key=api_key,
         tag="BLACKBOX",
-        params={"q": q.strip(), "type": "auto"},
-        return_debug=return_debug
+        params={"q": q.strip(), "type": bb_type},
+        return_debug=return_debug,
     )
 
 
@@ -314,320 +434,165 @@ async def fetch_argus(q: str, api_key: str = ARGUS_KEY, return_debug: bool = Fal
         api_key=api_key,
         tag="ARGUS",
         params={"q": q.strip(), "key": api_key},
-        return_debug=return_debug
+        return_debug=return_debug,
     )
 
 
 async def _single_health_check(name: str, url: str, api_key: str, params: dict):
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-    headers = {
-        **DEFAULT_HEADERS,
-        "X-API-Key": api_key
-    }
+    headers = {**DEFAULT_HEADERS, "X-API-Key": api_key}
     start = asyncio.get_event_loop().time()
     try:
         connector = aiohttp.TCPConnector(ssl=ssl.create_default_context())
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async with session.get(url, headers=headers, params=params, proxy=PROXY_URL) as resp:
                 elapsed = int((asyncio.get_event_loop().time() - start) * 1000)
-                return {"name": name, "healthy": 200 <= resp.status < 300, "status": resp.status, "latency_ms": elapsed}
+                return {
+                    "name": name,
+                    "healthy": 200 <= resp.status < 300,
+                    "status": resp.status,
+                    "latency_ms": elapsed,
+                }
     except Exception as e:
-        return {"name": name, "healthy": False, "status": f"ERR ({type(e).__name__})", "latency_ms": 0}
+        return {
+            "name": name,
+            "healthy": False,
+            "status": f"ERR ({type(e).__name__})",
+            "latency_ms": 0,
+        }
 
 
 async def check_all_apis_health():
     return await asyncio.gather(
         _single_health_check("Black-Box", API_URL_BLACKBOX, BLACKBOX_KEY, {"q": "79825207224", "type": "phone"}),
-        _single_health_check("Argus", API_URL_ARGUS, ARGUS_KEY, {"q": "79991234567", "key": ARGUS_KEY})
+        _single_health_check("Argus", API_URL_ARGUS, ARGUS_KEY, {"q": "79991234567", "key": ARGUS_KEY}),
     )
 
 
-# --- ОПРЕДЕЛЕНИЕ ТИПА ЗАПРОСА ---
-def _detect_query_type(query: str) -> str:
-    q = (query or "").strip()
-    digits = re.sub(r"\D", "", q)
-    if q.startswith("@") or "t.me/" in q.lower() or "telegram" in q.lower():
-        return "telegram"
-    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 15:
-        return "phone"
-    if "@" in q and "." in q.split("@")[-1]:
-        return "email"
-    return "general"
+# ====================== ПАРСИНГ И АГРЕГАЦИЯ ======================
+FIO_KEYS = {"fio", "full_name", "fullname", "name", "primary_fio", "owner", "holder"}
+DOB_KEYS = {"dob", "birth_date", "birthdate", "birthday", "date_of_birth"}
+SNILS_KEYS = {"snils"}
+PHONE_KEYS = {"phone", "phone_number", "mobile", "msisdn", "number", "tel"}
+OPERATOR_KEYS = {"operator", "carrier", "provider"}
+REGION_KEYS = {"region", "city", "area", "location"}
+REG_DATE_KEYS = {"reg_date", "registration", "registered_at", "created_at", "first_seen"}
+EMAIL_KEYS = {"email", "e_mail", "mail"}
 
 
-# --- ЛОКАЛЬНЫЙ АНАЛИЗАТОР БЕЗ ВНЕШНЕГО AI API ---
-def _has_report_findings(data: dict) -> bool:
-    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-    return bool(
-        (tg.get("id") or tg.get("user_id"))
-        or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
-        or (data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО"))
-        or bool(data.get("phonebooks"))
-        or bool(data.get("name_history"))
-        or bool(data.get("databases"))
-    )
+def _walk_records(node: Any, path: str = ""):
+    if isinstance(node, dict):
+        yield path, node
+        for k, v in node.items():
+            sub = f"{path}.{k}" if path else str(k)
+            yield from _walk_records(v, sub)
+    elif isinstance(node, list):
+        for idx, item in enumerate(node):
+            sub = f"{path}[{idx}]"
+            yield from _walk_records(item, sub)
 
 
-def analyze_locally(data: dict) -> str:
-    if data.get("local_analysis"):
-        return data["local_analysis"]
-
-    if not _has_report_findings(data):
-        return "❌ Недостаточно данных для анализа — по запросу ничего не найдено."
-
-    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-    tg_id = tg.get("id") or tg.get("user_id")
-    raw_uname = tg.get("username") or ""
-    tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
-
-    phone = str(data.get("phone_number") or "").strip()
-    fio = str(data.get("fio") or "").strip()
-    reg_date = str(data.get("reg_date") or "").strip()
-    region = str(data.get("region") or "").strip()
-    operator = str(data.get("operator") or "").strip()
-    phonebooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip()]
-    history = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip()]
-    dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
-
-    usernames_seen = []
-    seen_set = set()
-    if tg_uname and tg_uname.lower() not in seen_set:
-        seen_set.add(tg_uname.lower())
-        usernames_seen.append(tg_uname)
-
-    for h in history:
-        for match in re.findall(r"@[A-Za-z0-9_]{3,}", h):
-            low = match.lower()
-            if low not in seen_set:
-                seen_set.add(low)
-                usernames_seen.append(match)
-
-    tags_found = []
-    for h in history:
-        for tag in re.findall(r"#[^\s,;]+", h):
-            if tag not in tags_found:
-                tags_found.append(tag)
-
-    facts = []
-    if tg_uname or tg_id:
-        facts.append(f"Профиль TG: {tg_uname or '—'} (ID: {tg_id or '—'})")
-    if phone and phone != "Не найдено":
-        loc_part = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x)
-        facts.append(f"Телефон: {phone}" + (f" ({loc_part})" if loc_part else ""))
-    if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
-        facts.append(f"ФИО/Имя: {fio}")
-    if reg_date and reg_date != "Не найдено":
-        facts.append(f"Регистрация: {reg_date}")
-    if phonebooks:
-        facts.append(f"В записных книгах встречается как: {', '.join(phonebooks[:6])}")
-
-    patterns = []
-    if history:
-        patterns.append(f"Зафиксировано изменений имени/ника: {len(history)}")
-        if len(history) >= 2:
-            patterns.append(f"Свежая запись: {history[0]}")
-            patterns.append(f"Ранняя запись: {history[-1]}")
-    if usernames_seen:
-        patterns.append(f"Связанные никнеймы ({len(usernames_seen)}): {', '.join(usernames_seen[:8])}")
-    if tags_found:
-        patterns.append(f"Метки в истории: {', '.join(tags_found[:6])}")
-    if dbs:
-        total_recs = sum(len(v) for v in dbs.values() if isinstance(v, list))
-        patterns.append(f"Совпадений в базах: {len(dbs)} источн. ({total_recs} записей)")
-
-    next_steps = []
-    for u in usernames_seen[:3]:
-        if u.lower() != tg_uname.lower():
-            next_steps.append(f"Проверить старый ник {u} отдельно")
-    if phone and phone != "Не найдено":
-        next_steps.append(f"Пробить номер {phone} по утечкам и мессенджерам")
-    if not next_steps:
-        next_steps.append("Сверить найденные имена и контакты по веб-отчету и JSON")
-
-    lines = ["📊 <b>Анализ связей и фактов</b>\n"]
-    if facts:
-        lines.append("<b>Факты:</b>")
-        for f_item in facts:
-            lines.append(f"• {html.escape(f_item)}")
-    if patterns:
-        lines.append("\n<b>Активность и связи:</b>")
-        for p_item in patterns:
-            lines.append(f"• {html.escape(p_item)}")
-    lines.append("\n<b>Что дальше:</b>")
-    for s_item in next_steps:
-        lines.append(f"• {html.escape(s_item)}")
-
-    result = "\n".join(lines)
-    data["local_analysis"] = result
-    return result
-
-
-# --- ПАРСЕР И АГРЕГАТОР ---
-def _extract_phone(resp: dict, telecom: dict, tg: dict, dbs: dict) -> str:
-    candidates = []
-    for src in (resp, telecom, tg):
-        if isinstance(src, dict):
-            for key in ("phone", "phone_number", "mobile", "msisdn", "number", "tel"):
-                val = src.get(key)
-                if val:
-                    candidates.append(str(val))
-            for key in ("phones", "phone_numbers"):
-                vals = src.get(key)
-                if isinstance(vals, list):
-                    candidates.extend(str(v) for v in vals if v)
-
-    if isinstance(dbs, dict):
-        for records in dbs.values():
-            if isinstance(records, list):
-                for rec in records[:15]:
-                    if isinstance(rec, dict):
-                        for key in ("phone", "phone_number", "mobile", "msisdn", "number", "tel"):
-                            val = rec.get(key)
-                            if val:
-                                candidates.append(str(val))
-
-    for item in candidates:
-        cleaned = item.strip()
-        if cleaned:
-            return cleaned
-    return "Не найдено"
-
-
-def _extract_name_history(resp: dict, tg: dict, dbs: dict) -> list[str]:
-    history = []
-    raw_sources = []
-    for src in (resp, tg):
-        if isinstance(src, dict):
-            for key in ("name_history", "history", "names_history", "username_history", "changes"):
-                val = src.get(key)
-                if isinstance(val, list):
-                    raw_sources.extend(val)
-
-    if isinstance(dbs, dict):
-        for records in dbs.values():
-            if isinstance(records, list):
-                for rec in records:
-                    if isinstance(rec, dict):
-                        for key in ("name_history", "history", "names", "usernames"):
-                            val = rec.get(key)
-                            if isinstance(val, list):
-                                raw_sources.extend(val)
-
-    for entry in raw_sources:
-        if isinstance(entry, str) and entry.strip():
-            history.append(entry.strip())
-        elif isinstance(entry, dict):
-            dt = entry.get("date") or entry.get("time") or entry.get("updated_at") or ""
-            uname = entry.get("username") or ""
-            fname = entry.get("full_name") or entry.get("first_name") or entry.get("name") or ""
-            if uname and not str(uname).startswith("@"):
-                uname = f"@{uname}"
-            target = ", ".join(x for x in (str(uname).strip(), str(fname).strip()) if x)
-            line = f"{str(dt).strip()} → {target}".strip(" →")
-            if line:
-                history.append(line)
-
-    return history
-
-
-def _merge_single_response(resp: dict, final_data: dict, source_prefix: str = ""):
+def _merge_single_response(resp: Any, final_data: dict, source_prefix: str = ""):
     if not isinstance(resp, dict) or "_error" in resp:
         return
 
     payload = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
-    telecom = payload.get("telecom") if isinstance(payload.get("telecom"), dict) else {}
-    tg = payload.get("telegram") if isinstance(payload.get("telegram"), dict) else {}
-    dbs = payload.get("databases") or payload.get("results") or {}
 
-    if isinstance(dbs, list):
-        dbs = {f"{source_prefix}results" if source_prefix else "results": dbs}
+    for sub_path, obj in _walk_records(payload):
+        low_path = sub_path.lower()
+        for k, v in obj.items():
+            if v is None or isinstance(v, (dict, list)):
+                continue
+            lk = str(k).lower().strip()
+            sval = str(v).strip()
+            if not sval or sval.lower() in ("none", "null", "nan", "не найдено", "unknown", "-"):
+                continue
 
-    for fio_val in (profile.get("primary_fio"), payload.get("fio"), payload.get("full_name")):
-        if fio_val:
-            final_data["fio"].add(str(fio_val).strip())
-    if profile.get("birth_date"):
-        final_data["dob"].add(str(profile["birth_date"]).strip())
-    if profile.get("snils"):
-        final_data["snils"].add(str(profile["snils"]).strip())
+            if lk in FIO_KEYS and len(sval) >= 2 and not re.fullmatch(r"\+?[\d\s\-()]+", sval):
+                final_data["fio_set"].add(sval)
+            elif lk in DOB_KEYS:
+                final_data["dob_set"].add(sval)
+            elif lk in SNILS_KEYS:
+                final_data["snils_set"].add(sval)
+            elif lk in PHONE_KEYS:
+                digits = re.sub(r"\D", "", sval)
+                if 7 <= len(digits) <= 15:
+                    final_data["phones_set"].add(sval)
+                    if final_data["phone_number"] == "Не найдено":
+                        final_data["phone_number"] = sval
+            elif lk in OPERATOR_KEYS and final_data["operator"] == "Нет":
+                final_data["operator"] = sval
+            elif lk in REGION_KEYS and final_data["region"] == "Нет":
+                final_data["region"] = sval
+            elif lk in REG_DATE_KEYS and final_data["reg_date"] == "Не найдено":
+                final_data["reg_date"] = sval
+            elif lk in EMAIL_KEYS:
+                final_data["emails_set"].add(sval)
+            elif lk in {"id", "user_id", "tg_id", "telegram_id"} and ("tg" in low_path or "telegram" in low_path or "user" in low_path):
+                if not final_data["tg_info"].get("id"):
+                    final_data["tg_info"]["id"] = sval
+            elif lk in {"username", "tg_username", "login"}:
+                clean_u = f"@{sval.lstrip('@')}"
+                if clean_u not in final_data["usernames_set"]:
+                    final_data["usernames_set"].append(clean_u)
+                if not final_data["tg_info"].get("username"):
+                    final_data["tg_info"]["username"] = clean_u
 
-    if telecom.get("operator") and final_data["operator"] == "Нет":
-        final_data["operator"] = str(telecom["operator"])
-    if telecom.get("region") and final_data["region"] == "Нет":
-        final_data["region"] = str(telecom["region"])
-    if telecom.get("country"):
-        final_data["country"] = str(telecom["country"])
+        if any(tok in lk for tok in ("history", "name_history", "changes", "nicknames")):
+            if isinstance(v, list):
+                for h in v:
+                    hs = str(h).strip()
+                    if hs and hs not in final_data["name_history"]:
+                        final_data["name_history"].append(hs)
 
-    if isinstance(tg, dict) and tg:
-        merged_tg = dict(final_data["tg_info"])
-        for k, v in tg.items():
-            if v is not None and (k not in merged_tg or not merged_tg[k]):
-                merged_tg[k] = v
-        final_data["tg_info"] = merged_tg
-        if tg.get("full_name"):
-            final_data["fio"].add(str(tg["full_name"]).strip())
-        reg_tg = tg.get("reg_date") or tg.get("registration") or tg.get("created_at")
-        if reg_tg and final_data["reg_date"] == "Не найдено":
-            final_data["reg_date"] = str(reg_tg)
+        if any(tok in lk for tok in ("phonebook", "contacts", "tags", "saved_as")):
+            if isinstance(v, list):
+                for pb in v:
+                    pbs = str(pb).strip()
+                    if pbs and pbs not in final_data["phonebooks"]:
+                        final_data["phonebooks"].append(pbs)
+            elif isinstance(v, str) and "," in v:
+                for pb in v.split(","):
+                    pbs = pb.strip()
+                    if pbs and pbs not in final_data["phonebooks"]:
+                        final_data["phonebooks"].append(pbs)
 
-    reg_val = payload.get("reg_date") or payload.get("registration") or profile.get("reg_date")
-    if reg_val and final_data["reg_date"] == "Не найдено":
-        final_data["reg_date"] = str(reg_val)
-
-    pb_raw = payload.get("phonebooks") or (tg.get("phonebooks") if isinstance(tg, dict) else None) or []
-    if isinstance(pb_raw, list):
-        for x in pb_raw:
-            s = str(x).strip()
-            if s and s not in final_data["phonebooks"]:
-                final_data["phonebooks"].append(s)
-    elif isinstance(pb_raw, str) and pb_raw.strip():
-        for x in pb_raw.split(","):
-            s = x.strip()
-            if s and s not in final_data["phonebooks"]:
-                final_data["phonebooks"].append(s)
-
-    for h_item in _extract_name_history(payload, tg, dbs):
-        if h_item not in final_data["name_history"]:
-            final_data["name_history"].append(h_item)
-
-    extracted_phone = _extract_phone(payload, telecom, tg, dbs)
-    if extracted_phone != "Не найдено":
-        final_data["phones"].add(extracted_phone)
-        if final_data["phone_number"] == "Не найдено":
-            final_data["phone_number"] = extracted_phone
-
-    views_val = (
-        payload.get("views")
-        or payload.get("interested")
-        or (tg.get("views") if isinstance(tg, dict) else None)
-        or (tg.get("interested") if isinstance(tg, dict) else None)
-    )
-    if views_val is not None:
-        final_data["views_count"] = views_val
-
-    if isinstance(dbs, dict):
-        for db_name, records in dbs.items():
-            key_name = f"{source_prefix}{db_name}" if source_prefix and db_name in final_data["databases"] else db_name
-            if key_name not in final_data["databases"]:
-                final_data["databases"][key_name] = []
-            if isinstance(records, list):
-                final_data["databases"][key_name].extend(records)
+    for container_key in ("databases", "results", "sources", "leaks"):
+        container = payload.get(container_key)
+        if isinstance(container, dict):
+            for db_name, records in container.items():
+                key = f"{source_prefix}{db_name}" if source_prefix and db_name in final_data["databases"] else str(db_name)
+                if key not in final_data["databases"]:
+                    final_data["databases"][key] = []
+                if isinstance(records, list):
+                    final_data["databases"][key].extend(records)
+                elif isinstance(records, dict):
+                    final_data["databases"][key].append(records)
+        elif isinstance(container, list) and container:
+            key = f"{source_prefix}{container_key}"
+            final_data["databases"].setdefault(key, []).extend(container)
 
 
-async def search_everywhere(q: str):
+async def search_everywhere(q: str) -> dict:
     res_bb, res_argus = await asyncio.gather(
         fetch_blackbox(q, BLACKBOX_KEY),
         fetch_argus(q, ARGUS_KEY),
-        return_exceptions=True
+        return_exceptions=True,
     )
 
-    final_data = {
+    final_data: dict[str, Any] = {
         "query": q,
+        "query_type": detect_query_type(q),
         "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "fio": set(),
-        "dob": set(),
-        "snils": set(),
-        "phones": set(),
+        "fio_set": set(),
+        "dob_set": set(),
+        "snils_set": set(),
+        "phones_set": set(),
+        "emails_set": set(),
+        "usernames_set": [],
+        "fio": "Не найдено",
+        "dob": "Нет",
+        "snils": "Нет",
         "phone_number": "Не найдено",
         "operator": "Нет",
         "region": "Нет",
@@ -641,9 +606,9 @@ async def search_everywhere(q: str):
         "sources_count": 0,
         "local_analysis": "",
         "raw_response": {
-            "blackbox": res_bb if isinstance(res_bb, dict) else {},
-            "argus": res_argus if isinstance(res_argus, dict) else {},
-        }
+            "blackbox": res_bb if isinstance(res_bb, dict) else {"error": str(res_bb)},
+            "argus": res_argus if isinstance(res_argus, dict) else {"error": str(res_argus)},
+        },
     }
 
     if isinstance(res_bb, dict):
@@ -651,17 +616,36 @@ async def search_everywhere(q: str):
     if isinstance(res_argus, dict):
         _merge_single_response(res_argus, final_data, source_prefix="argus_")
 
-    final_data["fio"] = ", ".join(final_data["fio"]) if final_data["fio"] else "Не найдено"
-    final_data["dob"] = ", ".join(final_data["dob"]) if final_data["dob"] else "Нет"
-    final_data["snils"] = ", ".join(final_data["snils"]) if final_data["snils"] else "Нет"
-    final_data["sources_count"] = len(final_data["databases"]) or (1 if final_data["fio"] != "Не найдено" else 0)
+    final_data["fio"] = ", ".join(sorted(final_data["fio_set"])) if final_data["fio_set"] else "Не найдено"
+    final_data["dob"] = ", ".join(sorted(final_data["dob_set"])) if final_data["dob_set"] else "Нет"
+    final_data["snils"] = ", ".join(sorted(final_data["snils_set"])) if final_data["snils_set"] else "Нет"
 
-    return final_data
+    total_records = sum(len(v) for v in final_data["databases"].values() if isinstance(v, list))
+    final_data["sources_count"] = len(final_data["databases"])
+    if final_data["views_count"] is None:
+        final_data["views_count"] = total_records
+
+    return _make_json_safe(final_data)
+
+
+# ====================== ФОРМАТИРОВАНИЕ ОТЧЁТА ПОД ТИП ЗАПРОСА ======================
+def _has_report_findings(data: dict) -> bool:
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    return bool(
+        tg.get("id")
+        or tg.get("username")
+        or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
+        or (data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО"))
+        or bool(data.get("phonebooks"))
+        or bool(data.get("name_history"))
+        or bool(data.get("databases"))
+        or bool(data.get("emails_set"))
+    )
 
 
 def format_report_text(data: dict) -> str:
     query = str(data.get("query") or "").strip()
-    q_type = _detect_query_type(query)
+    q_type = data.get("query_type") or detect_query_type(query)
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     tg_id = tg.get("id") or tg.get("user_id")
@@ -695,10 +679,11 @@ def format_report_text(data: dict) -> str:
     if q_type == "phone":
         digits = re.sub(r"\D", "", query)
         shown_phone = phone_val if phone_val != "Не найдено" else (digits or query or "Не найдено")
-        loc_line = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
+        loc_parts = [x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x]
+        loc_line = " / ".join(loc_parts) if loc_parts else "Не найдено"
 
         blocks = [
-            f"📲 Номер · {html.escape(str(shown_phone))}\n"
+            f"📲 <b>Номер</b> · <code>{html.escape(str(shown_phone))}</code>\n"
             f"▸ Оператор / Регион: {html.escape(loc_line)}\n"
             f"▸ ФИО: {html.escape(fio)}\n"
             f"▸ Дата рождения: {html.escape(dob)}",
@@ -706,27 +691,52 @@ def format_report_text(data: dict) -> str:
             "\n".join(history_lines),
         ]
         if tg_id or (tg_username and not re.fullmatch(r"@\+?\d+", tg_username)):
-            blocks.append(f"✈️ Telegram: {html.escape(tg_username or '—')} (ID: {html.escape(str(tg_id or '—'))})")
-        blocks.append(f"👁 Интересовались этим: {html.escape(str(views_val))}")
-        blocks.append("Полная информация доступна в файле ниже ⬇️")
-        return "\n\n".join(blocks)
-
-    if q_type == "telegram":
+            blocks.append(
+                f"✈️ Telegram: {html.escape(tg_username or '—')} (ID: <code>{html.escape(str(tg_id or '—'))}</code>)"
+            )
+    elif q_type == "telegram":
         shown_tg = tg_username or query or "Не найдено"
-        shown_id = str(tg_id) if tg_id else "Не найдено"
+        shown_id = str(tg_id) if tg_id else (query if re.fullmatch(r"\d{6,11}", query) else "Не найдено")
         blocks = [
-            f"✈️ Telegram · {html.escape(str(shown_tg))}\n"
-            f"▸ ID: {html.escape(shown_id)}\n"
+            f"✈️ <b>Telegram</b> · {html.escape(str(shown_tg))}\n"
+            f"▸ ID: <code>{html.escape(shown_id)}</code>\n"
             f"▸ Номер: {html.escape(phone_val)}\n"
             f"📅 Регистрация: {html.escape(reg_date)}",
             f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
             "\n".join(history_lines),
-            f"💬 Telegram: {html.escape(str(shown_tg))} (ID: {html.escape(shown_id)})",
+            f"💬 Telegram: {html.escape(str(shown_tg))} (ID: <code>{html.escape(shown_id)}</code>)",
+        ]
+    elif q_type == "email":
+        blocks = [
+            f"✉️ <b>Email</b> · <code>{html.escape(query)}</code>\n"
+            f"▸ ФИО: {html.escape(fio)}\n"
+            f"▸ Номер: {html.escape(phone_val)}\n"
+            f"▸ Дата рождения: {html.escape(dob)}",
+            f"🔎 Телефонные книги: {html.escape(phonebooks_str)}",
+            "\n".join(history_lines),
+        ]
+    elif q_type in ("vin", "vehicle"):
+        icon = "🚘 VIN" if q_type == "vin" else "🚗 Госномер"
+        blocks = [
+            f"{icon} · <code>{html.escape(query.upper())}</code>\n"
+            f"▸ Владелец / ФИО: {html.escape(fio)}\n"
+            f"▸ Номер: {html.escape(phone_val)}\n"
+            f"▸ Регион: {html.escape(region)}",
+            "\n".join(history_lines),
+        ]
+    elif q_type == "ip":
+        loc_parts = [x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x]
+        loc_line = " / ".join(loc_parts) if loc_parts else "Не найдено"
+        blocks = [
+            f"🌐 <b>IP-адрес</b> · <code>{html.escape(query)}</code>\n"
+            f"▸ Провайдер / Регион: {html.escape(loc_line)}\n"
+            f"▸ ФИО / Владелец: {html.escape(fio)}\n"
+            f"▸ Контакты: {html.escape(phone_val)}",
+            "\n".join(history_lines),
         ]
     else:
-        icon = "✉️ Email" if q_type == "email" else "🔎 Запрос"
         blocks = [
-            f"{icon} · {html.escape(query or 'Не найдено')}\n"
+            f"🔎 <b>Запрос</b> · {html.escape(query or 'Не найдено')}\n"
             f"▸ ФИО: {html.escape(fio)}\n"
             f"▸ Номер: {html.escape(phone_val)}\n"
             f"▸ Дата рождения: {html.escape(dob)}",
@@ -734,12 +744,87 @@ def format_report_text(data: dict) -> str:
             "\n".join(history_lines),
         ]
 
-    blocks.append(f"👁 Интересовались этим: {html.escape(str(views_val))}")
-    blocks.append("Полная информация доступна в файле ниже ⬇️")
+    if not _has_report_findings(data):
+        blocks.append("⚠️ По открытым источникам и базам совпадений не найдено.")
+
+    blocks.append(f"👁 Найдено записей / совпадений: <b>{html.escape(str(views_val))}</b>")
+    blocks.append("Полный отчёт, граф связей и выгрузки доступны по кнопкам ниже ⬇️")
     return "\n\n".join(blocks)
 
 
-# --- ГЕНЕРАЦИЯ АДАПТИВНОГО HTML ОТЧЕТА (ПК + МОБИЛЬНЫЕ) ---
+def analyze_locally(data: dict) -> str:
+    if data.get("local_analysis"):
+        return str(data["local_analysis"])
+
+    if not _has_report_findings(data):
+        return "❌ Недостаточно данных для анализа — по запросу совпадений не найдено."
+
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    tg_id = tg.get("id") or tg.get("user_id")
+    raw_uname = tg.get("username") or ""
+    tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
+
+    phone = str(data.get("phone_number") or "").strip()
+    fio = str(data.get("fio") or "").strip()
+    reg_date = str(data.get("reg_date") or "").strip()
+    region = str(data.get("region") or "").strip()
+    operator = str(data.get("operator") or "").strip()
+    phonebooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip()]
+    history = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip()]
+    dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
+
+    usernames_seen: list[str] = []
+    seen_set: set[str] = set()
+    for cand in [tg_uname] + list(data.get("usernames_set") or []):
+        if cand and cand.lower() not in seen_set:
+            seen_set.add(cand.lower())
+            usernames_seen.append(cand)
+
+    for h in history:
+        for match in re.findall(r"@[A-Za-z0-9_]{3,}", h):
+            low = match.lower()
+            if low not in seen_set:
+                seen_set.add(low)
+                usernames_seen.append(match)
+
+    facts = []
+    if tg_uname or tg_id:
+        facts.append(f"Профиль TG: {tg_uname or '—'} (ID: {tg_id or '—'})")
+    if phone and phone != "Не найдено":
+        loc_part = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x)
+        facts.append(f"Телефон: {phone}" + (f" ({loc_part})" if loc_part else ""))
+    if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
+        facts.append(f"ФИО/Имя: {fio}")
+    if reg_date and reg_date != "Не найдено":
+        facts.append(f"Регистрация: {reg_date}")
+    if phonebooks:
+        facts.append(f"Записные книги: {', '.join(phonebooks[:6])}")
+
+    patterns = []
+    if history:
+        patterns.append(f"Изменений имени/ника зафиксировано: {len(history)}")
+    if usernames_seen:
+        patterns.append(f"Связанные никнеймы ({len(usernames_seen)}): {', '.join(usernames_seen[:8])}")
+    if dbs:
+        total_recs = sum(len(v) for v in dbs.values() if isinstance(v, list))
+        patterns.append(f"Источников с данными: {len(dbs)} ({total_recs} записей)")
+
+    lines = ["📊 <b>Анализ связей и фактов</b>\n"]
+    if facts:
+        lines.append("<b>Факты:</b>")
+        for f_item in facts:
+            lines.append(f"• {html.escape(f_item)}")
+    if patterns:
+        lines.append("\n<b>Активность и источники:</b>")
+        for p_item in patterns:
+            lines.append(f"• {html.escape(p_item)}")
+
+    result = "\n".join(lines)
+    data["local_analysis"] = result
+    return result
+
+
+# ====================== АДАПТИВНЫЙ WEB-ОТЧЁТ (ПК + МОБИЛЬНЫЕ) ======================
 def _build_graph_payload(data: dict) -> dict:
     nodes = []
     edges = []
@@ -758,11 +843,7 @@ def _build_graph_payload(data: dict) -> dict:
 
         node_id = next_id
         next_id += 1
-        nodes.append({
-            "id": node_id,
-            "label": clean,
-            "group": group
-        })
+        nodes.append({"id": node_id, "label": clean, "group": group})
         if parent_id is not None:
             edge = {"from": parent_id, "to": node_id}
             if edge_label:
@@ -830,10 +911,7 @@ def generate_html_report(data: dict, report_id: str) -> str:
     phonebooks_html = html.escape(", ".join(phonebooks_list)) if phonebooks_list else "Не найдено"
 
     history_list = data.get("name_history") or []
-    if history_list:
-        history_html = "<br>".join(html.escape(str(item)) for item in history_list)
-    else:
-        history_html = "Не найдено"
+    history_html = "<br>".join(html.escape(str(item)) for item in history_list) if history_list else "Не найдено"
 
     graph_payload = _build_graph_payload(data)
     graph_json = json.dumps(graph_payload, ensure_ascii=False).replace("</", "<\\/")
@@ -1049,11 +1127,8 @@ def generate_html_report(data: dict, report_id: str) -> str:
             white-space: pre-wrap;
             word-break: break-word;
         }}
-
         @media (max-width: 820px) {{
-            .app-shell {{
-                flex-direction: column;
-            }}
+            .app-shell {{ flex-direction: column; }}
             .sidebar {{
                 width: 100%;
                 min-width: 0;
@@ -1070,41 +1145,24 @@ def generate_html_report(data: dict, report_id: str) -> str:
                 align-items: center;
                 justify-content: space-between;
             }}
-            .brand span {{
-                margin-top: 0;
-            }}
+            .brand span {{ margin-top: 0; }}
             .nav-group {{
                 flex-direction: row;
                 overflow-x: auto;
                 gap: 6px;
                 padding-bottom: 2px;
             }}
-            .nav-item {{
-                padding: 8px 12px;
-                font-size: 13px;
-            }}
+            .nav-item {{ padding: 8px 12px; font-size: 13px; }}
             .btn-fit {{
                 margin-top: 0;
                 padding: 8px 12px;
                 font-size: 12px;
                 align-self: flex-start;
             }}
-            .main-content {{
-                padding: 12px;
-            }}
-            .graph-wrap {{
-                height: calc(100vh - 150px);
-                min-height: 360px;
-            }}
-            .data-row {{
-                flex-direction: column;
-                gap: 4px;
-            }}
-            .data-label {{
-                width: auto;
-                min-width: 0;
-                font-size: 12px;
-            }}
+            .main-content {{ padding: 12px; }}
+            .graph-wrap {{ height: calc(100vh - 150px); min-height: 360px; }}
+            .data-row {{ flex-direction: column; gap: 4px; }}
+            .data-label {{ width: auto; min-width: 0; font-size: 12px; }}
         }}
     </style>
 </head>
@@ -1180,30 +1238,16 @@ def generate_html_report(data: dict, report_id: str) -> str:
                     shape: 'box',
                     margin: {{ top: 10, right: 14, bottom: 10, left: 14 }},
                     widthConstraint: {{ minimum: 120, maximum: 260 }},
-                    font: {{
-                        color: '#ffffff',
-                        size: 13,
-                        face: 'Inter, sans-serif'
-                    }},
+                    font: {{ color: '#ffffff', size: 13, face: 'Inter, sans-serif' }},
                     borderWidth: 1.5,
-                    shadow: {{
-                        enabled: true,
-                        color: 'rgba(0,0,0,0.45)',
-                        size: 10,
-                        x: 0,
-                        y: 4
-                    }}
+                    shadow: {{ enabled: true, color: 'rgba(0,0,0,0.45)', size: 10, x: 0, y: 4 }}
                 }},
                 edges: {{
                     arrows: {{ to: {{ enabled: true, scaleFactor: 0.7 }} }},
                     color: {{ color: '#475569', highlight: '#a855f7' }},
                     width: 1.8,
                     smooth: {{ type: 'dynamic' }},
-                    font: {{
-                        color: '#94a3b8',
-                        size: 11,
-                        strokeWidth: 0
-                    }}
+                    font: {{ color: '#94a3b8', size: 11, strokeWidth: 0 }}
                 }},
                 groups: {{
                     query: {{ color: {{ background: '#6d28d9', border: '#a78bfa' }} }},
@@ -1224,16 +1268,9 @@ def generate_html_report(data: dict, report_id: str) -> str:
                         springConstant: 0.06,
                         avoidOverlap: 1
                     }},
-                    stabilization: {{
-                        enabled: true,
-                        iterations: 150
-                    }}
+                    stabilization: {{ enabled: true, iterations: 150 }}
                 }},
-                interaction: {{
-                    hover: true,
-                    navigationButtons: true,
-                    keyboard: true
-                }}
+                interaction: {{ hover: true, navigationButtons: true, keyboard: true }}
             }};
 
             network = new vis.Network(container, data, options);
@@ -1249,15 +1286,10 @@ def generate_html_report(data: dict, report_id: str) -> str:
         }}
 
         function openTab(tabId, el) {{
-            document.querySelectorAll('.tab-content').forEach(function (t) {{
-                t.classList.remove('active');
-            }});
-            document.querySelectorAll('.nav-item').forEach(function (n) {{
-                n.classList.remove('active');
-            }});
+            document.querySelectorAll('.tab-content').forEach(function (t) {{ t.classList.remove('active'); }});
+            document.querySelectorAll('.nav-item').forEach(function (n) {{ n.classList.remove('active'); }});
             document.getElementById(tabId).classList.add('active');
             el.classList.add('active');
-
             if (tabId === 'tab-graph' && network) {{
                 setTimeout(function () {{
                     network.redraw();
@@ -1268,34 +1300,38 @@ def generate_html_report(data: dict, report_id: str) -> str:
 
         window.addEventListener('load', initGraph);
         window.addEventListener('resize', function () {{
-            if (network) {{
-                network.redraw();
-            }}
+            if (network) {{ network.redraw(); }}
         }});
     </script>
 </body>
 </html>"""
 
 
-# --- FASTAPI ---
+# ====================== FASTAPI ======================
 web_app = FastAPI()
 web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+@web_app.get("/")
+async def root_health():
+    return {"status": "ok", "service": "Oasis Digital"}
+
+
 @web_app.get("/report/{report_id}", response_class=HTMLResponse)
 async def web_report(report_id: str):
-    data = REPORTS_CACHE.get(report_id)
+    data = load_report(report_id)
     if not data:
         return HTMLResponse("<h1>404 Отчет не найден или устарел</h1>", status_code=404)
     return HTMLResponse(content=generate_html_report(data, report_id))
 
 
 async def run_web():
-    config = uvicorn.Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)), log_level="info")
+    port = int(os.getenv("PORT", "10000"))
+    config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="info")
     await uvicorn.Server(config).serve()
 
 
-# --- БОТ ХЕНДЛЕРЫ ---
+# ====================== БОТ ХЕНДЛЕРЫ ======================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1314,6 +1350,7 @@ async def cb_back(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "search_info")
 async def cb_search_info(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=back_kb())
     await cb.answer()
 
@@ -1328,20 +1365,24 @@ async def cb_profile(cb: CallbackQuery):
         f"Дата регистрации: {user[4] if user else '-'}\n"
         f"<i>(Вы агент уже: {days_str})</i>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡️ Скрытие данных ($5)", callback_data="hide_data_menu")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛡️ Скрытие данных ($5)", callback_data="hide_data_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")],
+        ]
+    )
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
 
 
 @dp.callback_query(F.data == "hide_data_menu")
 async def cb_hide_data_menu(cb: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")]
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")],
+        ]
+    )
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
     await cb.answer()
 
@@ -1350,17 +1391,27 @@ async def cb_hide_data_menu(cb: CallbackQuery):
 async def cb_pay_tonkeeper(cb: CallbackQuery):
     memo = f"Oasis_{cb.from_user.id}"
     link = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=link)],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")]
-    ])
-    await cb.message.edit_text(f"💎 <b>Оплата через TON</b>\n\nКошелек: <code>{TON_WALLET}</code>\nMemo: <code>{memo}</code>", parse_mode="HTML", reply_markup=kb)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📲 Оплатить в 1 клик", url=link)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")],
+        ]
+    )
+    await cb.message.edit_text(
+        f"💎 <b>Оплата через TON</b>\n\nКошелек: <code>{TON_WALLET}</code>\nMemo: <code>{memo}</code>",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
     await cb.answer()
 
 
 @dp.callback_query(F.data == "buy_requests")
 async def cb_buy_requests(cb: CallbackQuery):
-    await cb.message.edit_text("💎 <b>Покупка запросов</b>\nОбратитесь к администратору: " + ADMIN_USERNAME, parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        "💎 <b>Покупка запросов</b>\nОбратитесь к администратору: " + ADMIN_USERNAME,
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await cb.answer()
 
 
@@ -1368,7 +1419,11 @@ async def cb_buy_requests(cb: CallbackQuery):
 async def cb_ref_link(cb: CallbackQuery):
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={cb.from_user.id}"
-    await cb.message.edit_text(f"🔗 <b>Реферальная ссылка:</b>\n\n<code>{ref_link}</code>", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        f"🔗 <b>Реферальная ссылка:</b>\n\n<code>{ref_link}</code>",
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await cb.answer()
 
 
@@ -1383,55 +1438,67 @@ async def cb_support(cb: CallbackQuery, state: FSMContext):
 async def process_support_msg(msg: Message, state: FSMContext):
     await state.clear()
     try:
-        await bot.send_message(MAIN_ADMIN_ID, f"📩 Поддержка от {msg.from_user.full_name} (`{msg.from_user.id}`):\n\n{msg.text}", parse_mode="HTML")
+        await bot.send_message(
+            MAIN_ADMIN_ID,
+            f"📩 Поддержка от {html.escape(msg.from_user.full_name)} (<code>{msg.from_user.id}</code>):\n\n{html.escape(msg.text or '')}",
+            parse_mode="HTML",
+        )
         await msg.answer("✅ Отправлено администрации.", reply_markup=main_kb())
     except Exception:
         await msg.answer("❌ Ошибка отправки.", reply_markup=main_kb())
 
 
-# --- ПРОМОКОДЫ ---
 @dp.callback_query(F.data == "use_promo")
 async def cb_use_promo(cb: CallbackQuery, state: FSMContext):
     await state.set_state(SearchStates.wait_promo_input)
-    await cb.message.edit_text("🎟 <b>Активация промокода / чека</b>\n\nВведите код сообщением:", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        "🎟 <b>Активация промокода / чека</b>\n\nВведите код сообщением:",
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await cb.answer()
 
 
 @dp.message(SearchStates.wait_promo_input)
 async def process_promo_input(msg: Message, state: FSMContext):
     await state.clear()
-    code = msg.text.strip()
+    code = (msg.text or "").strip()
     user_id = msg.from_user.id
 
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("SELECT reward, max_uses, uses_count FROM promos WHERE code = ?", (code,))
-    promo = cursor.fetchone()
+    with get_db_connection() as conn:
+        promo = conn.execute(
+            "SELECT reward, max_uses, uses_count FROM promos WHERE code = ?",
+            (code,),
+        ).fetchone()
+        if not promo:
+            return await msg.answer("❌ Промокод не найден.", reply_markup=main_kb())
 
-    if not promo:
-        conn.close()
-        return await msg.answer("❌ Промокод не найден.", reply_markup=main_kb())
+        used = conn.execute(
+            "SELECT 1 FROM promo_activations WHERE user_id = ? AND code = ?",
+            (user_id, code),
+        ).fetchone()
+        if used:
+            return await msg.answer("⚠️ Вы уже активировали этот промокод!", reply_markup=main_kb())
 
-    reward, max_uses, uses_count = promo
-    cursor.execute("SELECT 1 FROM promo_activations WHERE user_id = ? AND code = ?", (user_id, code))
-    if cursor.fetchone():
-        conn.close()
-        return await msg.answer("⚠️ Вы уже активировали этот промокод!", reply_markup=main_kb())
+        if promo["uses_count"] >= promo["max_uses"]:
+            return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_kb())
 
-    if uses_count >= max_uses:
-        conn.close()
-        return await msg.answer("❌ Лимит активаций исчерпан.", reply_markup=main_kb())
+        conn.execute("UPDATE promos SET uses_count = uses_count + 1 WHERE code = ?", (code,))
+        conn.execute(
+            "INSERT INTO promo_activations (user_id, code) VALUES (?, ?)",
+            (user_id, code),
+        )
+        conn.commit()
 
-    add_requests(user_id, reward)
-    cursor.execute("UPDATE promos SET uses_count = uses_count + 1 WHERE code = ?", (code,))
-    cursor.execute("INSERT INTO promo_activations (user_id, code) VALUES (?, ?)", (user_id, code))
-    conn.commit()
-    conn.close()
+    add_requests(user_id, promo["reward"])
+    await msg.answer(
+        f"🎉 <b>Успешно!</b> Начислено: <b>+{promo['reward']} запросов</b> ⚡️",
+        parse_mode="HTML",
+        reply_markup=main_kb(),
+    )
 
-    await msg.answer(f"🎉 <b>Успешно!</b> Начислено: <b>+{reward} запросов</b> ⚡️", parse_mode="HTML", reply_markup=main_kb())
 
-
-# --- АДМИНКА ---
+# ====================== АДМИНКА ======================
 @dp.message(Command("admin"))
 async def admin_panel(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
@@ -1443,7 +1510,11 @@ async def admin_panel(msg: Message):
 async def cb_adm_promo(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("🎟 <b>Создание промокода</b>\n\nФормат: <code>КОД НАГРАДА ЛИМИТ</code>", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        "🎟 <b>Создание промокода</b>\n\nФормат: <code>КОД НАГРАДА ЛИМИТ</code>",
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await state.set_state(SearchStates.wait_admin_create_promo)
     await cb.answer()
 
@@ -1453,29 +1524,41 @@ async def process_admin_create_promo(msg: Message, state: FSMContext):
     if msg.from_user.id != MAIN_ADMIN_ID:
         return
     await state.clear()
-    parts = msg.text.strip().split()
+    parts = (msg.text or "").strip().split()
     if len(parts) < 2:
         return await msg.answer("❌ Неверный формат.", reply_markup=admin_menu_kb())
-    code, reward = parts[0], int(parts[1])
-    max_uses = int(parts[2]) if len(parts) > 2 else 1
-
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, ?, 0, ?)", (code, reward, max_uses, msg.from_user.id))
-        conn.commit()
-    except Exception:
-        conn.close()
-        return await msg.answer("❌ Такой код уже есть!", reply_markup=admin_menu_kb())
-    conn.close()
-    await msg.answer(f"✅ Промокод <code>{code}</code> на +{reward} запросов создан!", parse_mode="HTML", reply_markup=admin_menu_kb())
+        code, reward = parts[0], int(parts[1])
+        max_uses = int(parts[2]) if len(parts) > 2 else 1
+    except ValueError:
+        return await msg.answer("❌ Награда и лимит должны быть числами.", reply_markup=admin_menu_kb())
+
+    with get_db_connection() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, ?, 0, ?)",
+                (code, reward, max_uses, msg.from_user.id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return await msg.answer("❌ Такой код уже есть!", reply_markup=admin_menu_kb())
+
+    await msg.answer(
+        f"✅ Промокод <code>{html.escape(code)}</code> на +{reward} запросов создан!",
+        parse_mode="HTML",
+        reply_markup=admin_menu_kb(),
+    )
 
 
 @dp.callback_query(F.data == "adm_check")
 async def cb_adm_check(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("💳 <b>Создание чека</b>\n\nВведите номинал (запросов):", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        "💳 <b>Создание чека</b>\n\nВведите номинал (запросов):",
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await state.set_state(SearchStates.wait_admin_create_check)
     await cb.answer()
 
@@ -1486,25 +1569,34 @@ async def process_admin_create_check(msg: Message, state: FSMContext):
         return
     await state.clear()
     try:
-        reward = int(msg.text.strip())
+        reward = int((msg.text or "").strip())
     except ValueError:
         return await msg.answer("❌ Введите число.", reply_markup=admin_menu_kb())
 
     check_code = f"CHECK-{uuid.uuid4().hex[:8].upper()}"
-    conn = sqlite3.connect(USERS_DB)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, 1, 0, ?)", (check_code, reward, msg.from_user.id))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        conn.execute(
+            "INSERT INTO promos (code, reward, max_uses, uses_count, created_by) VALUES (?, ?, 1, 0, ?)",
+            (check_code, reward, msg.from_user.id),
+        )
+        conn.commit()
 
-    await msg.answer(f"✅ Чек создан: <code>{check_code}</code> на <b>{reward}</b> запросов.", parse_mode="HTML", reply_markup=admin_menu_kb())
+    await msg.answer(
+        f"✅ Чек создан: <code>{check_code}</code> на <b>{reward}</b> запросов.",
+        parse_mode="HTML",
+        reply_markup=admin_menu_kb(),
+    )
 
 
 @dp.callback_query(F.data == "adm_test_api")
 async def cb_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await cb.answer("Нет доступа", show_alert=True)
-    await cb.message.edit_text("📡 <b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):", parse_mode="HTML", reply_markup=back_kb())
+    await cb.message.edit_text(
+        "📡 <b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):",
+        parse_mode="HTML",
+        reply_markup=back_kb(),
+    )
     await state.set_state(SearchStates.wait_admin_raw)
     await cb.answer()
 
@@ -1514,13 +1606,16 @@ async def process_admin_raw(msg: Message, state: FSMContext):
     if msg.from_user.id != MAIN_ADMIN_ID:
         return
     await state.clear()
-    q = msg.text.strip()
-    note = await msg.answer(f"📡 Опрашиваем Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...", parse_mode="HTML")
+    q = (msg.text or "").strip()
+    note = await msg.answer(
+        f"📡 Опрашиваем Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...",
+        parse_mode="HTML",
+    )
 
     res_bb, res_argus = await asyncio.gather(
         fetch_blackbox(q, BLACKBOX_KEY, return_debug=True),
         fetch_argus(q, ARGUS_KEY, return_debug=True),
-        return_exceptions=True
+        return_exceptions=True,
     )
 
     bb_str = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1400] if isinstance(res_bb, dict) else str(res_bb)
@@ -1536,20 +1631,24 @@ async def cb_adm_check_apis(cb: CallbackQuery):
         return await cb.answer("Нет доступа", show_alert=True)
     note = await cb.message.edit_text("🔌 Проверяем Black-Box и Argus...", parse_mode="HTML")
     results = await check_all_apis_health()
-    lines = [f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)" for r in results]
+    lines = [
+        f"• <b>{r['name']}</b>: {'✅ OK' if r['healthy'] else '❌ FAIL'} ({r['status']}, {r['latency_ms']}ms)"
+        for r in results
+    ]
     await note.edit_text("🔌 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
-# --- ЛОКАЛЬНЫЙ АНАЛИЗАТОР ПО КНОПКЕ ---
+# ====================== АНАЛИЗАТОР И ЭКСПОРТЫ ======================
 @dp.callback_query(F.data.startswith("ai_analyze_"))
 async def cb_ai_analyze(cb: CallbackQuery):
     report_id = cb.data.replace("ai_analyze_", "")
-    data = REPORTS_CACHE.get(report_id)
+    data = load_report(report_id)
     if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
+        return await cb.answer("Отчет не найден или устарел", show_alert=True)
 
     await cb.answer("⚡ Анализирую...")
     summary = analyze_locally(data)
+    save_report(report_id, data)
     text = f"🔍 <b>Цель:</b> <code>{html.escape(str(data.get('query') or ''))}</code>\n\n{summary}"
     await cb.message.answer(text[:4000], parse_mode="HTML")
 
@@ -1557,16 +1656,19 @@ async def cb_ai_analyze(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("get_txt_"))
 async def cb_send_txt(cb: CallbackQuery):
     report_id = cb.data.replace("get_txt_", "")
-    data = REPORTS_CACHE.get(report_id)
+    data = load_report(report_id)
     if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
+        return await cb.answer("Отчет не найден или устарел", show_alert=True)
+
     text = (
         f"OASIS DIGITAL\n"
         f"Запрос: {data.get('query')}\n"
+        f"Тип: {data.get('query_type')}\n"
         f"Номер: {data.get('phone_number', 'Не найдено')}\n"
         f"ФИО: {data.get('fio', 'Не найдено')}\n"
         f"Дата рождения: {data.get('dob', 'Нет')}\n"
-        f"СНИЛС: {data.get('snils', 'Нет')}"
+        f"СНИЛС: {data.get('snils', 'Нет')}\n"
+        f"Оператор / Регион: {data.get('operator', 'Нет')} / {data.get('region', 'Нет')}"
     )
     file = BufferedInputFile(text.encode("utf-8"), filename=f"oasis_{report_id}.txt")
     await cb.message.answer_document(document=file, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
@@ -1576,11 +1678,14 @@ async def cb_send_txt(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("get_json_"))
 async def cb_send_json(cb: CallbackQuery):
     report_id = cb.data.replace("get_json_", "")
-    data = REPORTS_CACHE.get(report_id)
+    data = load_report(report_id)
     if not data:
-        return await cb.answer("Отчет устарел", show_alert=True)
+        return await cb.answer("Отчет не найден или устарел", show_alert=True)
+
     export_obj = {
+        "report_id": report_id,
         "query": data.get("query"),
+        "query_type": data.get("query_type"),
         "date": data.get("date"),
         "phone_number": data.get("phone_number"),
         "fio": data.get("fio"),
@@ -1596,34 +1701,53 @@ async def cb_send_json(cb: CallbackQuery):
     await cb.answer()
 
 
-# --- ОСНОВНОЙ ПОИСК ---
+# ====================== ОСНОВНОЙ ПОИСК ======================
 @dp.message(F.text & ~F.text.startswith("/"))
 async def process_search(msg: Message, state: FSMContext):
     if await state.get_state() is not None or msg.from_user.is_bot:
         return
     if is_banned(msg.from_user.id):
         return await msg.answer("🚫 Вы заблокированы.")
+
+    q = (msg.text or "").strip()
+    if not q:
+        return
+
     if not deduct_request(msg.from_user.id):
         return await msg.answer("❌ У вас закончились запросы.")
 
-    q = msg.text.strip()
-    note = await msg.answer(f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box и Argus (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>", parse_mode="HTML")
+    note = await msg.answer(
+        f"🔍 <b>[Oasis Digital]</b> Идет поиск по Black-Box и Argus (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>",
+        parse_mode="HTML",
+    )
 
-    data = await search_everywhere(q)
-    report_id = str(uuid.uuid4())[:8]
-    REPORTS_CACHE[report_id] = data
+    try:
+        data = await search_everywhere(q)
+        report_id = uuid.uuid4().hex[:8]
+        save_report(report_id, data)
 
-    body = format_report_text(data)
-    chunks = [body[i:i + 3900] for i in range(0, len(body), 3900)]
-    await note.edit_text(chunks[0], parse_mode="HTML", reply_markup=result_kb(report_id) if len(chunks) == 1 else None)
-    for extra in chunks[1:-1]:
-        await msg.answer(extra, parse_mode="HTML")
-    if len(chunks) > 1:
-        await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
+        body = format_report_text(data)
+        chunks = [body[i : i + 3900] for i in range(0, len(body), 3900)]
+        await note.edit_text(
+            chunks[0],
+            parse_mode="HTML",
+            reply_markup=result_kb(report_id) if len(chunks) == 1 else None,
+        )
+        for extra in chunks[1:-1]:
+            await msg.answer(extra, parse_mode="HTML")
+        if len(chunks) > 1:
+            await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=result_kb(report_id))
+    except Exception as e:
+        log.exception("Ошибка при обработке поискового запроса '%s': %s", q, e)
+        await note.edit_text(
+            f"❌ Ошибка при формировании отчёта: <code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+            reply_markup=main_kb(),
+        )
 
 
 async def main():
-    log.info("Бот Oasis Digital запускается на Polling...")
+    log.info("Бот Oasis Digital запускается на Polling + FastAPI...")
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(run_web())
     await dp.start_polling(bot)
