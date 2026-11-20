@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 # --- Конфиг ---
-BOT_TOKEN = os.getenv("BOT_TOKEN","9024954594:AAGj3lihxCTSGgCMaeE_mCi2519paMgIYms")
+BOT_TOKEN = os.getenv("BOT_TOKEN",9024954594:AAEfMyBpSrm5B9Epw5uIG5s-Sq_Gf7NApX4)
 BOT_USERNAME = "@MobiusSearchBot"
 
 MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", "8394631079"))
