@@ -285,6 +285,8 @@ def get_tenure(joined_str: str) -> str:
         return "0 дн."
 
 
+PIN_BANNER_TEXT = '🕵‍♂<a href="https://oasissearchcom.localhost.cc">oasis.cc</a> - бот для поиска информации'
+
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
 
 🕵️ <b>Личность</b>
@@ -359,6 +361,17 @@ def kb_admin():
             [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_start")],
         ]
     )
+
+
+def is_masked_value(val: str) -> bool:
+    s = (val or "").strip()
+    if not s:
+        return True
+    if "*" in s or "•" in s:
+        return True
+    if re.fullmatch(r"[*•_\-?]+", s):
+        return True
+    return False
 
 
 def detect_qtype(query: str) -> str:
@@ -619,9 +632,13 @@ SKIP_KEYS = {
 }
 
 
-def push_unique(target: list[str], val: str):
+def push_unique(target: list[str], val: str, allow_masked: bool = False):
     s = str(val).strip()
-    if s and s not in target:
+    if not s:
+        return
+    if not allow_masked and is_masked_value(s):
+        return
+    if s not in target:
         target.append(s)
 
 
@@ -645,7 +662,7 @@ def parse_text_block(text: str, out: dict):
         k_part, v_part = clean.split(":", 1)
         lk = k_part.strip().lower()
         val = v_part.strip()
-        if not val or val.lower() in ("none", "null", "не найдено", "-"):
+        if not val or val.lower() in ("none", "null", "не найдено", "-") or is_masked_value(val):
             continue
 
         if any(w in lk for w in ("фио", "fio", "full_name", "имя", "владелец")):
@@ -715,6 +732,8 @@ def absorb_response(resp: Any, out: dict, src: str):
                     sel = str(el).strip()
                     if not sel or sel.lower() in ("none", "null", "nan", "не найдено", "unknown", "-"):
                         continue
+                    if is_masked_value(sel):
+                        continue
                     if lk in PHONE_KEYS:
                         digits = re.sub(r"\D", "", sel)
                         if 7 <= len(digits) <= 15:
@@ -736,6 +755,8 @@ def absorb_response(resp: Any, out: dict, src: str):
 
             sval = str(v).strip()
             if not sval or sval.lower() in ("none", "null", "nan", "не найдено", "unknown", "-"):
+                continue
+            if is_masked_value(sval):
                 continue
 
             items[str(k)] = sval
@@ -790,7 +811,7 @@ def absorb_response(resp: Any, out: dict, src: str):
 
         if fname or lname:
             full = f"{lname} {fname}".strip()
-            if full:
+            if full and not is_masked_value(full):
                 out["fio_set"].add(full)
 
         if items and path:
@@ -860,7 +881,8 @@ async def run_search(q: str) -> dict:
         if est:
             data["reg_date"] = est
 
-    data["fio"] = ", ".join(sorted(data["fio_set"])) if data["fio_set"] else "Не найдено"
+    clean_fios = [x for x in sorted(data["fio_set"]) if not is_masked_value(x)]
+    data["fio"] = ", ".join(clean_fios) if clean_fios else "Не найдено"
     data["dob"] = ", ".join(sorted(data["dob_set"])) if data["dob_set"] else "Нет"
     data["snils"] = ", ".join(sorted(data["snils_set"])) if data["snils_set"] else "Нет"
 
@@ -882,11 +904,12 @@ async def run_search(q: str) -> dict:
 
 def has_findings(data: dict) -> bool:
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    fio_val = str(data.get("fio") or "")
     return bool(
         tg.get("id")
         or tg.get("username")
         or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
-        or (data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО"))
+        or (fio_val and fio_val not in ("Не найдено", "НЕ НАЙДЕНО") and not is_masked_value(fio_val))
         or bool(data.get("phonebooks"))
         or bool(data.get("name_history"))
         or bool(data.get("databases"))
@@ -904,7 +927,8 @@ def build_text_report(data: dict) -> str:
     raw_uname = tg.get("username") or (query if query.startswith("@") else "")
     tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
 
-    fio = str(data.get("fio") or "Не найдено").strip()
+    raw_fio = str(data.get("fio") or "Не найдено").strip()
+    fio = "Не найдено" if is_masked_value(raw_fio) else raw_fio
     dob = str(data.get("dob") or "Нет").strip()
     age = str(data.get("age") or "Не найдено").strip()
     phone = str(data.get("phone_number") or "Не найдено").strip()
@@ -912,10 +936,10 @@ def build_text_report(data: dict) -> str:
     region = str(data.get("region") or "Нет").strip()
     reg_date = str(data.get("reg_date") or "Не найдено").strip()
 
-    pbooks = data.get("phonebooks") or []
+    pbooks = [x for x in (data.get("phonebooks") or []) if not is_masked_value(str(x))]
     pbooks_txt = ", ".join(str(x) for x in pbooks) if pbooks else "Не найдено"
 
-    hist = data.get("name_history") or []
+    hist = [x for x in (data.get("name_history") or []) if not is_masked_value(str(x))]
     hist_lines = [f"📝 <b>История изменений ({len(hist)}):</b>"]
     if hist:
         for item in hist[:12]:
@@ -931,6 +955,8 @@ def build_text_report(data: dict) -> str:
         if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
         k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
+        if is_masked_value(v_s):
+            continue
         sig = f"{k_s.lower()}:{v_s.lower()}"
         if sig in seen:
             continue
@@ -979,7 +1005,7 @@ def build_text_report(data: dict) -> str:
             tg_lines.append(f"🌐 <b>DC:</b> {html.escape(str(tg['dc']))}")
         if tg.get("premium"):
             tg_lines.append(f"⭐ <b>Premium:</b> {html.escape(str(tg['premium']))}")
-        if tg.get("bio"):
+        if tg.get("bio") and not is_masked_value(str(tg["bio"])):
             tg_lines.append(f"ℹ️ <b>О себе:</b> {html.escape(str(tg['bio']))}")
         parts = [
             "\n".join(tg_lines),
@@ -1051,18 +1077,19 @@ def make_local_analysis(data: dict) -> str:
     tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
 
     phone = str(data.get("phone_number") or "").strip()
-    fio = str(data.get("fio") or "").strip()
+    raw_fio = str(data.get("fio") or "").strip()
+    fio = "" if is_masked_value(raw_fio) else raw_fio
     reg_date = str(data.get("reg_date") or "").strip()
     region = str(data.get("region") or "").strip()
     operator = str(data.get("operator") or "").strip()
-    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip()]
-    hist = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip()]
+    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip() and not is_masked_value(str(x))]
+    hist = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip() and not is_masked_value(str(x))]
     dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
 
     unames: list[str] = []
     seen_u: set[str] = set()
     for cand in [tg_uname] + list(data.get("usernames_set") or []):
-        if cand and cand.lower() not in seen_u:
+        if cand and not is_masked_value(cand) and cand.lower() not in seen_u:
             seen_u.add(cand.lower())
             unames.append(cand)
     for h in hist:
@@ -1117,10 +1144,11 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
     if phones:
         blocks.append({"title": "ТЕЛЕФОНЫ", "items": [("Телефон", p) for p in phones]})
 
-    fios = list(data.get("fio_set") or [])
-    if data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО"):
-        for f in str(data["fio"]).split(","):
-            push_unique(fios, f)
+    fios = []
+    for f_src in list(data.get("fio_set") or []) + (
+        str(data["fio"]).split(",") if data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО") else []
+    ):
+        push_unique(fios, f_src)
     if fios:
         blocks.append({"title": "ФИО", "items": [("ФИО", x) for x in fios]})
 
@@ -1136,17 +1164,17 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     tg_items: list[tuple[str, str]] = []
-    if tg.get("username"):
+    if tg.get("username") and not is_masked_value(str(tg["username"])):
         tg_items.append(("Username", str(tg["username"])))
-    if tg.get("id"):
+    if tg.get("id") and not is_masked_value(str(tg["id"])):
         tg_items.append(("Telegram ID", str(tg["id"])))
     if data.get("reg_date") and data.get("reg_date") != "Не найдено":
         tg_items.append(("Дата регистрации", str(data["reg_date"])))
-    if tg.get("dc"):
+    if tg.get("dc") and not is_masked_value(str(tg["dc"])):
         tg_items.append(("DC", str(tg["dc"])))
-    if tg.get("premium"):
+    if tg.get("premium") and not is_masked_value(str(tg["premium"])):
         tg_items.append(("Premium", str(tg["premium"])))
-    if tg.get("bio"):
+    if tg.get("bio") and not is_masked_value(str(tg["bio"])):
         tg_items.append(("О себе", str(tg["bio"])))
     if tg_items:
         blocks.append({"title": "TELEGRAM", "items": tg_items})
@@ -1159,15 +1187,15 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
     if loc_items:
         blocks.append({"title": "ОПЕРАТОР И РЕГИОН", "items": loc_items})
 
-    emails = list(data.get("emails_set") or [])
+    emails = [e for e in (data.get("emails_set") or []) if not is_masked_value(str(e))]
     if emails:
         blocks.append({"title": "EMAIL", "items": [("Email", e) for e in emails]})
 
-    pbs = list(data.get("phonebooks") or [])
+    pbs = [p for p in (data.get("phonebooks") or []) if not is_masked_value(str(p))]
     if pbs:
         blocks.append({"title": "ТЕЛЕФОННЫЕ КНИГИ", "items": [("Запись", p) for p in pbs]})
 
-    hist = list(data.get("name_history") or [])
+    hist = [h for h in (data.get("name_history") or []) if not is_masked_value(str(h))]
     if hist:
         blocks.append({"title": "ИСТОРИЯ ИЗМЕНЕНИЙ", "items": [("Изменение", h) for h in hist]})
 
@@ -1179,6 +1207,8 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
                 continue
             k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
+            if is_masked_value(v_s):
+                continue
             sig = f"{k_s.lower()}:{v_s.lower()}"
             if sig in seen:
                 continue
@@ -1671,6 +1701,12 @@ async def on_start(msg: Message, state: FSMContext):
     if check_banned(msg.from_user.id):
         return await msg.answer("⛔ Доступ ограничен.")
     create_user(msg.from_user.id, msg.from_user.username)
+    banner = await msg.answer(PIN_BANNER_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    try:
+        await bot.pin_chat_message(chat_id=msg.chat.id, message_id=banner.message_id, disable_notification=True)
+    except Exception:
+        pass
+    await asyncio.sleep(0.5)
     await msg.answer(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
 
 
