@@ -30,8 +30,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
-# --- Конфиг ---
-BOT_TOKEN = os.getenv("BOT_TOKEN","9024954594:AAEfMyBpSrm5B9Epw5uIG5s-Sq_Gf7NApX4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9024954594:AAEfMyBpSrm5B9Epw5uIG5s-Sq_Gf7NApX4").strip()
 BOT_USERNAME = "@MobiusSearchBot"
 
 MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", "8394631079"))
@@ -40,10 +39,10 @@ ADMIN_USERNAME = "@anodoxx"
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004311841781"))
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/+BqWOF7S3AqQ1YzI6")
 
-BLACKBOX_KEY = os.getenv("BLACKBOX_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y")
-ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE")
+BLACKBOX_KEY = os.getenv("BLACKBOX_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y").strip()
+ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE").strip()
 
-TON_WALLET = os.getenv("TON_WALLET", "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx")
+TON_WALLET = os.getenv("TON_WALLET", "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx").strip()
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://listopadov-search-1.onrender.com").rstrip("/")
 DB_PATH = os.getenv("USERS_DB", "users.db")
 
@@ -105,7 +104,6 @@ async def ack_cb(cb: CallbackQuery, text: str | None = None, alert: bool = False
         pass
 
 
-# --- БД ---
 def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -279,7 +277,6 @@ def get_tenure(joined_str: str) -> str:
         return "0 дн."
 
 
-# --- Тексты и кнопки ---
 START_TEXT = """<b>ℹ️ Примеры для ввода запросов</b>
 
 🕵️ <b>Личность</b>
@@ -355,7 +352,6 @@ def kb_admin():
     )
 
 
-# --- Типы запросов и вспомогательные функции ---
 def detect_qtype(query: str) -> str:
     q = (query or "").strip()
     low = q.lower()
@@ -430,7 +426,44 @@ def calc_age(dob_str: str) -> str | None:
     return None
 
 
-# --- Внешние API ---
+def split_html_lines(text: str, limit: int = 3800) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [text]
+
+
+async def safe_edit_or_send(
+    msg: Message,
+    note: Message,
+    text: str,
+    reply_markup=None,
+    edit_first: bool = False,
+):
+    try:
+        if edit_first:
+            await note.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await msg.answer(text, parse_mode="HTML", reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "can't parse entities" in str(exc).lower():
+            plain = re.sub(r"<[^>]+>", "", text)
+            if edit_first:
+                await note.edit_text(plain, reply_markup=reply_markup)
+            else:
+                await msg.answer(plain, reply_markup=reply_markup)
+        else:
+            raise
+
+
 async def req_json(
     url: str,
     api_key: str,
@@ -522,7 +555,6 @@ async def check_apis():
     )
 
 
-# --- Парсинг ответов ---
 FIO_KEYS = {
     "fio",
     "full_name",
@@ -839,7 +871,6 @@ async def run_search(q: str) -> dict:
     return to_json_safe(data)
 
 
-# --- Формирование текста отчета ---
 def has_findings(data: dict) -> bool:
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     return bool(
@@ -1059,7 +1090,6 @@ def make_local_analysis(data: dict) -> str:
     return res
 
 
-# --- Веб-отчет ---
 def collect_blocks(data: dict) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
 
@@ -1585,7 +1615,6 @@ def render_html_report(data: dict, report_id: str) -> str:
 </html>"""
 
 
-# --- FastAPI ---
 web_app = FastAPI()
 web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -1609,7 +1638,6 @@ async def serve_web():
     await uvicorn.Server(cfg).serve()
 
 
-# --- Хендлеры бота ---
 @dp.message(CommandStart())
 async def on_start(msg: Message, state: FSMContext):
     await state.clear()
@@ -1775,7 +1803,6 @@ async def handle_promo(msg: Message, state: FSMContext):
     )
 
 
-# --- Админка ---
 @dp.message(Command("admin"))
 async def on_admin(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
@@ -1916,7 +1943,6 @@ async def on_adm_check_apis(cb: CallbackQuery):
     await ack_cb(cb)
 
 
-# --- Анализатор и экспорт ---
 @dp.callback_query(F.data.startswith("ai_analyze_"))
 async def on_analyze(cb: CallbackQuery):
     rid = cb.data.replace("ai_analyze_", "", 1)
@@ -1984,7 +2010,6 @@ async def on_export_json(cb: CallbackQuery):
     await ack_cb(cb)
 
 
-# --- Поиск ---
 @dp.message(F.text & ~F.text.startswith("/"))
 async def on_search(msg: Message, state: FSMContext):
     if msg.from_user.is_bot or await state.get_state() is not None:
@@ -2010,16 +2035,18 @@ async def on_search(msg: Message, state: FSMContext):
         store_report(rid, data)
 
         body = build_text_report(data)
-        chunks = [body[i : i + 3900] for i in range(0, len(body), 3900)]
-        await note.edit_text(
+        chunks = split_html_lines(body, limit=3800)
+        await safe_edit_or_send(
+            msg,
+            note,
             chunks[0],
-            parse_mode="HTML",
             reply_markup=kb_result(rid) if len(chunks) == 1 else None,
+            edit_first=True,
         )
         for part in chunks[1:-1]:
-            await msg.answer(part, parse_mode="HTML")
+            await safe_edit_or_send(msg, note, part)
         if len(chunks) > 1:
-            await msg.answer(chunks[-1], parse_mode="HTML", reply_markup=kb_result(rid))
+            await safe_edit_or_send(msg, note, chunks[-1], reply_markup=kb_result(rid))
     except Exception as exc:
         log.exception("Ошибка поиска '%s': %s", q, exc)
         await note.edit_text(
