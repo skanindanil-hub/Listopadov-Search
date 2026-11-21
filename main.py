@@ -5,11 +5,13 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import ssl
+import time
 import uuid
 import zlib
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from typing import Any
 
@@ -28,9 +30,10 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9024954594:AAEfMyBpSrm5B9Epw5uIG5s-Sq_Gf7NApX4").strip()
 BOT_USERNAME = "@OasisDigitalro_bot"
@@ -89,6 +92,7 @@ class CacheLRU(OrderedDict):
 
 
 cache = CacheLRU(limit=2000)
+RATE_BUCKETS: dict[str, list[float]] = defaultdict(list)
 
 
 class States(StatesGroup):
@@ -110,6 +114,23 @@ def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def init_api_keys_table():
+    with db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_keys (
+                api_key TEXT PRIMARY KEY,
+                owner TEXT DEFAULT 'admin',
+                rate_limit INTEGER DEFAULT 70,
+                expires_at TEXT DEFAULT '2099-12-31 23:59:59',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT
+            )
+            """
+        )
+        conn.commit()
 
 
 def db_init():
@@ -158,9 +179,114 @@ def db_init():
             """
         )
         conn.commit()
+    init_api_keys_table()
 
 
 db_init()
+
+
+def generate_oasis_key() -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+    body = "".join(secrets.choice(alphabet) for _ in range(38))
+    return f"OASIS-IO-{body}"
+
+
+def create_oasis_api_key(
+    owner: str = "admin",
+    rate_limit: int = 70,
+    expires_at: str = "2099-12-31 23:59:59",
+) -> dict:
+    init_api_keys_table()
+    key = generate_oasis_key()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO api_keys (api_key, owner, rate_limit, expires_at, is_active, created_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (key, owner, rate_limit, expires_at, now_str),
+        )
+        conn.commit()
+    return {
+        "api_key": key,
+        "owner": owner,
+        "rate_limit": rate_limit,
+        "expires_at": expires_at,
+        "is_active": 1,
+        "created_at": now_str,
+    }
+
+
+def list_oasis_api_keys() -> list[dict]:
+    init_api_keys_table()
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT api_key, owner, rate_limit, expires_at, is_active, created_at FROM api_keys ORDER BY rowid DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_oasis_api_key(api_key: str) -> bool:
+    init_api_keys_table()
+    k = (api_key or "").strip()
+    if not k:
+        return False
+    with db_conn() as conn:
+        cur = conn.execute("UPDATE api_keys SET is_active = 0 WHERE api_key = ?", (k,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def format_api_key_card(item: dict) -> str:
+    key = html.escape(str(item["api_key"]))
+    exp = html.escape(str(item.get("expires_at") or "2099-12-31 23:59:59"))
+    rpm = int(item.get("rate_limit") or 70)
+    domain = html.escape(WEBHOOK_HOST)
+    return (
+        "🔑 <b>API-ключ успешно создан!</b>\n\n"
+        "Код ключа (нажмите для копирования):\n"
+        f"<code>{key}</code>\n\n"
+        f"⏳ <b>Срок действия:</b> Бессрочно (до {exp})\n"
+        "⚡️ <b>Доступ:</b> Безлимитный REST API\n"
+        f"🚀 <b>Лимит скорости:</b> {rpm} запросов в минуту\n"
+        f"🌐 <b>Домен API:</b> {domain}\n\n"
+        "Пример запроса cURL:\n"
+        f'<code>curl -H "X-API-Key: {key}" "{domain}/api/v1/search?q=79991234567"</code>\n\n'
+        "Список всех ключей: /apilist\n"
+        f"Отозвать: /delapi {key}"
+    )
+
+
+def verify_oasis_key(
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    init_api_keys_table()
+    token = (x_api_key or "").strip()
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key")
+
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT api_key, owner, rate_limit, expires_at, is_active FROM api_keys WHERE api_key = ?",
+            (token,),
+        ).fetchone()
+
+    if not row or int(row["is_active"]) != 1:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+
+    rpm = int(row["rate_limit"] or 70)
+    now_ts = time.monotonic()
+    bucket = RATE_BUCKETS[token]
+    bucket[:] = [ts for ts in bucket if now_ts - ts < 60.0]
+    if len(bucket) >= rpm:
+        raise HTTPException(status_code=429, detail=f"Rate limit exceeded ({rpm}/min)")
+    bucket.append(now_ts)
+    return dict(row)
 
 
 def to_json_safe(obj: Any) -> Any:
@@ -1737,6 +1863,10 @@ def render_html_report(data: dict, report_id: str) -> str:
 </html>"""
 
 
+class OasisSearchPayload(BaseModel):
+    q: str
+
+
 web_app = FastAPI()
 web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -1744,6 +1874,42 @@ web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
 @web_app.get("/")
 async def index():
     return {"status": "ok", "service": "Oasis Digital"}
+
+
+@web_app.get("/api/v1/search")
+async def oasis_api_search_get(q: str, _auth: dict = Depends(verify_oasis_key)):
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+    data = await run_search(query)
+    rid = uuid.uuid4().hex[:8]
+    store_report(rid, data)
+    token = pack_report_token(data)
+    return {
+        "ok": True,
+        "provider": "Oasis Digital",
+        "report_id": rid,
+        "web_report": f"{WEBHOOK_HOST}/r/{token}",
+        "data": data,
+    }
+
+
+@web_app.post("/api/v1/search")
+async def oasis_api_search_post(payload: OasisSearchPayload, _auth: dict = Depends(verify_oasis_key)):
+    query = (payload.q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Field 'q' is required")
+    data = await run_search(query)
+    rid = uuid.uuid4().hex[:8]
+    store_report(rid, data)
+    token = pack_report_token(data)
+    return {
+        "ok": True,
+        "provider": "Oasis Digital",
+        "report_id": rid,
+        "web_report": f"{WEBHOOK_HOST}/r/{token}",
+        "data": data,
+    }
 
 
 @web_app.get("/r/{token:path}", response_class=HTMLResponse)
@@ -1794,6 +1960,52 @@ async def on_start(msg: Message, state: FSMContext):
         pass
     await asyncio.sleep(0.5)
     await msg.answer(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
+
+
+@dp.message(Command("newapi"))
+async def on_cmd_newapi(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
+    parts = (msg.text or "").strip().split()
+    rpm = 70
+    if len(parts) > 1:
+        try:
+            rpm = max(1, int(parts[1]))
+        except ValueError:
+            return await msg.answer("❌ Лимит должен быть числом. Пример: <code>/newapi 70</code>", parse_mode="HTML")
+    item = create_oasis_api_key(owner=f"tg:{msg.from_user.id}", rate_limit=rpm)
+    await msg.answer(format_api_key_card(item), parse_mode="HTML", disable_web_page_preview=True)
+
+
+@dp.message(Command("apilist"))
+async def on_cmd_apilist(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
+    items = list_oasis_api_keys()
+    if not items:
+        return await msg.answer("📭 Ключей Oasis API пока нет. Создайте через /newapi")
+    lines = ["🔑 <b>Ключи Oasis API:</b>\n"]
+    for it in items[:30]:
+        st = "✅ Активен" if int(it.get("is_active", 1)) == 1 else "⛔ Отозван"
+        lines.append(
+            f"• <code>{html.escape(str(it['api_key']))}</code>\n"
+            f"  Статус: {st} | Лимит: {it.get('rate_limit', 70)}/мин | До: {html.escape(str(it.get('expires_at') or '2099-12-31 23:59:59'))}"
+        )
+    await msg.answer("\n".join(lines)[:4000], parse_mode="HTML")
+
+
+@dp.message(Command("delapi"))
+async def on_cmd_delapi(msg: Message):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return await msg.answer("⛔ Нет доступа.")
+    parts = (msg.text or "").strip().split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return await msg.answer("❌ Укажите ключ: <code>/delapi OASIS-IO-...</code>", parse_mode="HTML")
+    key_to_revoke = parts[1].strip()
+    if revoke_oasis_api_key(key_to_revoke):
+        await msg.answer(f"🗑️ Ключ отозван:\n<code>{html.escape(key_to_revoke)}</code>", parse_mode="HTML")
+    else:
+        await msg.answer("⚠️ Ключ не найден.", parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "back_to_start")
