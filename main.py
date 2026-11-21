@@ -26,7 +26,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -171,10 +171,18 @@ def to_json_safe(obj: Any) -> Any:
     return obj
 
 
+def normalize_rid(report_id: str | None) -> str:
+    s = (report_id or "").strip().split("?")[0].strip("/")
+    if s.startswith("report/"):
+        s = s.split("/", 1)[1]
+    return re.sub(r"[^A-Za-z0-9_-]", "", s)
+
+
 def store_report(report_id: str, payload: dict):
+    rid = normalize_rid(report_id) or uuid.uuid4().hex[:8]
     db_init()
     safe = to_json_safe(payload)
-    cache[report_id] = safe
+    cache[rid] = safe
     with db_conn() as conn:
         conn.execute(
             """
@@ -182,7 +190,7 @@ def store_report(report_id: str, payload: dict):
             VALUES (?, ?, ?, ?)
             """,
             (
-                report_id,
+                rid,
                 str(safe.get("query") or ""),
                 json.dumps(safe, ensure_ascii=False),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -191,8 +199,8 @@ def store_report(report_id: str, payload: dict):
         conn.commit()
 
 
-def read_report(report_id: str) -> dict | None:
-    rid = (report_id or "").strip().split("?")[0].strip("/")
+def read_report(report_id: str | None) -> dict | None:
+    rid = normalize_rid(report_id)
     if not rid:
         return None
     if rid in cache:
@@ -200,7 +208,7 @@ def read_report(report_id: str) -> dict | None:
     db_init()
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT payload_json FROM reports WHERE report_id = ?",
+            "SELECT payload_json FROM reports WHERE LOWER(report_id) = LOWER(?)",
             (rid,),
         ).fetchone()
     if not row:
@@ -299,20 +307,20 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 
 <i>Отправьте запрос сообщением.</i>"""
 
-SUPPORT_TEXT = "<b>Связь с нами</b>\nНапишите ваше сообщение в чат."
-HIDE_DATA_TEXT = "<b>Скрытие данных</b>\nСтоимость скрытия данных: $7 (навсегда)"
+SUPPORT_TEXT = "💬 <b>Связь с нами</b>\nНапишите ваше сообщение в чат."
+HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость скрытия данных: $7 (навсегда)"
 
 
 def kb_main():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Поиск", callback_data="search_info")],
-            [InlineKeyboardButton(text="Купить запросы", callback_data="buy_requests")],
-            [InlineKeyboardButton(text="Профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="Активировать промокод", callback_data="use_promo")],
+            [InlineKeyboardButton(text="🔎 Поиск", callback_data="search_info")],
+            [InlineKeyboardButton(text="💳 Купить запросы", callback_data="buy_requests")],
+            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+            [InlineKeyboardButton(text="🎟️ Активировать промокод", callback_data="use_promo")],
             [
-                InlineKeyboardButton(text="Рефералка", callback_data="ref_link"),
-                InlineKeyboardButton(text="Связь с нами", callback_data="support"),
+                InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"),
+                InlineKeyboardButton(text="💬 Связь с нами", callback_data="support"),
             ],
         ]
     )
@@ -320,20 +328,21 @@ def kb_main():
 
 def kb_back():
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data="back_to_start")]]
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]]
     )
 
 
 def kb_result(report_id: str):
+    rid = normalize_rid(report_id)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Анализатор", callback_data=f"ai_analyze_{report_id}")],
-            [InlineKeyboardButton(text="Веб-отчет", url=f"{WEBHOOK_HOST}/report/{report_id}")],
+            [InlineKeyboardButton(text="🧠 Анализатор", callback_data=f"ai_analyze_{rid}")],
+            [InlineKeyboardButton(text="🌐 Веб-отчет", url=f"{WEBHOOK_HOST}/report/{rid}")],
             [
-                InlineKeyboardButton(text="TXT", callback_data=f"get_txt_{report_id}"),
-                InlineKeyboardButton(text="JSON", callback_data=f"get_json_{report_id}"),
+                InlineKeyboardButton(text="📄 TXT", callback_data=f"get_txt_{rid}"),
+                InlineKeyboardButton(text="🗂️ JSON", callback_data=f"get_json_{rid}"),
             ],
-            [InlineKeyboardButton(text="В меню", callback_data="back_to_start")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_start")],
         ]
     )
 
@@ -341,13 +350,13 @@ def kb_result(report_id: str):
 def kb_admin():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Тест API (Raw)", callback_data="adm_test_api")],
-            [InlineKeyboardButton(text="Проверка API", callback_data="adm_check_apis")],
+            [InlineKeyboardButton(text="🧪 Тест API (Raw)", callback_data="adm_test_api")],
+            [InlineKeyboardButton(text="📡 Проверка API", callback_data="adm_check_apis")],
             [
-                InlineKeyboardButton(text="Создать промокод", callback_data="adm_promo"),
-                InlineKeyboardButton(text="Создать чек", callback_data="adm_check"),
+                InlineKeyboardButton(text="🎟️ Создать промокод", callback_data="adm_promo"),
+                InlineKeyboardButton(text="🧾 Создать чек", callback_data="adm_check"),
             ],
-            [InlineKeyboardButton(text="В меню", callback_data="back_to_start")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_start")],
         ]
     )
 
@@ -907,14 +916,14 @@ def build_text_report(data: dict) -> str:
     pbooks_txt = ", ".join(str(x) for x in pbooks) if pbooks else "Не найдено"
 
     hist = data.get("name_history") or []
-    hist_lines = [f"История изменения имени ({len(hist)}):"]
+    hist_lines = [f"📝 <b>История изменений ({len(hist)}):</b>"]
     if hist:
         for item in hist[:12]:
-            hist_lines.append(html.escape(str(item)))
+            hist_lines.append(f"• {html.escape(str(item))}")
         if len(hist) > 12:
-            hist_lines.append(f"... еще {len(hist) - 12}")
+            hist_lines.append(f"• ... еще {len(hist) - 12}")
     else:
-        hist_lines.append("Не найдено")
+        hist_lines.append("• Не найдено")
 
     extra_lines = []
     seen = set()
@@ -926,7 +935,7 @@ def build_text_report(data: dict) -> str:
         if sig in seen:
             continue
         seen.add(sig)
-        extra_lines.append(f"- {html.escape(k_s)}: <code>{html.escape(v_s)}</code>")
+        extra_lines.append(f"• {html.escape(k_s)}: <code>{html.escape(v_s)}</code>")
         if len(extra_lines) >= 12:
             break
 
@@ -934,90 +943,99 @@ def build_text_report(data: dict) -> str:
     if views is None:
         views = sum(len(v) for v in (data.get("databases") or {}).values() if isinstance(v, list))
 
+    sep = "━━━━━━━━━━━━━━━━━━━━"
+
     if qtype == "phone":
         digits = re.sub(r"\D", "", query)
         shown_ph = phone if phone != "Не найдено" else (digits or query or "Не найдено")
         loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
-        dob_txt = f"{dob} (возраст: {age})" if age != "Не найдено" else dob
+        dob_txt = f"{dob} ({age} лет)" if age != "Не найдено" else dob
         parts = [
-            f"<b>Номер</b> · <code>{html.escape(str(shown_ph))}</code>\n"
-            f"- Оператор / Регион: {html.escape(loc)}\n"
-            f"- ФИО: {html.escape(fio)}\n"
-            f"- Дата рождения: {html.escape(dob_txt)}",
-            f"Телефонные книги: {html.escape(pbooks_txt)}",
+            f"📲 <b>Номер</b> · <code>{html.escape(str(shown_ph))}</code>\n"
+            f"{sep}\n"
+            f"📡 <b>Оператор / Регион:</b> {html.escape(loc)}\n"
+            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
+            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
         if tg_id or (tg_uname and not re.fullmatch(r"@\+?\d+", tg_uname)):
             parts.append(
-                f"Telegram: {html.escape(tg_uname or '-')} (ID: <code>{html.escape(str(tg_id or '-'))}</code>)\n"
-                f"Регистрация TG: {html.escape(reg_date)}"
+                f"💬 <b>Telegram:</b> {html.escape(tg_uname or '-')} (ID: <code>{html.escape(str(tg_id or '-'))}</code>)\n"
+                f"🗓️ <b>Регистрация TG:</b> {html.escape(reg_date)}"
             )
     elif qtype == "telegram":
         shown_tg = tg_uname or query or "Не найдено"
         shown_id = str(tg_id) if tg_id else (query if re.fullmatch(r"\d{6,11}", query) else "Не найдено")
         tg_lines = [
-            f"<b>Telegram</b> · {html.escape(str(shown_tg))}",
-            f"- ID: <code>{html.escape(shown_id)}</code>",
-            f"- Имя / ФИО: {html.escape(fio)}",
-            f"- Номер: {html.escape(phone)}",
-            f"- Регистрация: {html.escape(reg_date)}",
+            f"💬 <b>Telegram</b> · {html.escape(str(shown_tg))}",
+            sep,
+            f"🆔 <b>ID:</b> <code>{html.escape(shown_id)}</code>",
+            f"🕵️ <b>Имя / ФИО:</b> {html.escape(fio)}",
+            f"📲 <b>Номер:</b> {html.escape(phone)}",
+            f"🗓️ <b>Регистрация:</b> {html.escape(reg_date)}",
         ]
         if tg.get("dc"):
-            tg_lines.append(f"- DC: {html.escape(str(tg['dc']))}")
+            tg_lines.append(f"🌐 <b>DC:</b> {html.escape(str(tg['dc']))}")
         if tg.get("premium"):
-            tg_lines.append(f"- Premium: {html.escape(str(tg['premium']))}")
+            tg_lines.append(f"⭐ <b>Premium:</b> {html.escape(str(tg['premium']))}")
         if tg.get("bio"):
-            tg_lines.append(f"- О себе: {html.escape(str(tg['bio']))}")
+            tg_lines.append(f"ℹ️ <b>О себе:</b> {html.escape(str(tg['bio']))}")
         parts = [
             "\n".join(tg_lines),
-            f"Телефонные книги: {html.escape(pbooks_txt)}",
+            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
     elif qtype == "email":
         parts = [
-            f"<b>Email</b> · <code>{html.escape(query)}</code>\n"
-            f"- ФИО: {html.escape(fio)}\n"
-            f"- Номер: {html.escape(phone)}\n"
-            f"- Дата рождения: {html.escape(dob)}",
-            f"Телефонные книги: {html.escape(pbooks_txt)}",
+            f"📧 <b>Email</b> · <code>{html.escape(query)}</code>\n"
+            f"{sep}\n"
+            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
+            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob)}",
+            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
     elif qtype in ("vin", "vehicle"):
+        icon = "🔑" if qtype == "vin" else "🚘"
         label = "VIN" if qtype == "vin" else "Госномер"
         parts = [
-            f"<b>{label}</b> · <code>{html.escape(query.upper())}</code>\n"
-            f"- Владелец / ФИО: {html.escape(fio)}\n"
-            f"- Номер: {html.escape(phone)}\n"
-            f"- Регион: {html.escape(region)}",
+            f"{icon} <b>{label}</b> · <code>{html.escape(query.upper())}</code>\n"
+            f"{sep}\n"
+            f"🕵️ <b>Владелец / ФИО:</b> {html.escape(fio)}\n"
+            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
+            f"📍 <b>Регион:</b> {html.escape(region)}",
             "\n".join(hist_lines),
         ]
     elif qtype == "ip":
         loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
         parts = [
-            f"<b>IP-адрес</b> · <code>{html.escape(query)}</code>\n"
-            f"- Провайдер / Регион: {html.escape(loc)}\n"
-            f"- ФИО / Владелец: {html.escape(fio)}\n"
-            f"- Контакты: {html.escape(phone)}",
+            f"🌐 <b>IP-адрес</b> · <code>{html.escape(query)}</code>\n"
+            f"{sep}\n"
+            f"📡 <b>Провайдер / Регион:</b> {html.escape(loc)}\n"
+            f"🕵️ <b>ФИО / Владелец:</b> {html.escape(fio)}\n"
+            f"📲 <b>Контакты:</b> {html.escape(phone)}",
             "\n".join(hist_lines),
         ]
     else:
         parts = [
-            f"<b>Запрос</b> · {html.escape(query or 'Не найдено')}\n"
-            f"- ФИО: {html.escape(fio)}\n"
-            f"- Номер: {html.escape(phone)}\n"
-            f"- Дата рождения: {html.escape(dob)}",
-            f"Телефонные книги: {html.escape(pbooks_txt)}",
+            f"🔎 <b>Запрос</b> · {html.escape(query or 'Не найдено')}\n"
+            f"{sep}\n"
+            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
+            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob)}",
+            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
 
     if extra_lines:
-        parts.append("<b>Поля:</b>\n" + "\n".join(extra_lines))
+        parts.append("🧩 <b>Дополнительные поля:</b>\n" + "\n".join(extra_lines))
 
     if not has_findings(data):
-        parts.append("По открытым источникам и базам совпадений не найдено.")
+        parts.append("⚠️ По открытым источникам и базам совпадений не найдено.")
 
-    parts.append(f"Найдено записей / совпадений: <b>{html.escape(str(views))}</b>")
-    parts.append("Веб-отчет и выгрузки доступны по кнопкам ниже.")
+    parts.append(f"{sep}\n📊 <b>Найдено записей / совпадений:</b> <b>{html.escape(str(views))}</b>")
+    parts.append("🌐 Веб-отчет и выгрузки доступны по кнопкам ниже.")
     return "\n\n".join(parts)
 
 
@@ -1025,7 +1043,7 @@ def make_local_analysis(data: dict) -> str:
     if data.get("local_analysis"):
         return str(data["local_analysis"])
     if not has_findings(data):
-        return "Недостаточно данных для анализа — совпадений не найдено."
+        return "⚠️ Недостаточно данных для анализа — совпадений не найдено."
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     tg_id = tg.get("id") or tg.get("user_id")
@@ -1075,15 +1093,15 @@ def make_local_analysis(data: dict) -> str:
         total = sum(len(v) for v in dbs.values() if isinstance(v, list))
         patterns.append(f"Источников с данными: {len(dbs)} ({total} записей)")
 
-    lines = ["<b>Анализ связей и фактов</b>\n"]
+    lines = ["🧠 <b>Анализ связей и фактов</b>\n"]
     if facts:
-        lines.append("<b>Факты:</b>")
+        lines.append("📌 <b>Факты:</b>")
         for item in facts:
-            lines.append(f"* {html.escape(item)}")
+            lines.append(f"• {html.escape(item)}")
     if patterns:
-        lines.append("\n<b>Активность и источники:</b>")
+        lines.append("\n📈 <b>Активность и источники:</b>")
         for item in patterns:
-            lines.append(f"* {html.escape(item)}")
+            lines.append(f"• {html.escape(item)}")
 
     res = "\n".join(lines)
     data["local_analysis"] = res
@@ -1624,12 +1642,21 @@ async def index():
     return {"status": "ok", "service": "Oasis Digital"}
 
 
-@web_app.get("/report/{report_id}", response_class=HTMLResponse)
+@web_app.get("/report", response_class=HTMLResponse)
+async def report_query_page(request: Request):
+    rid = request.query_params.get("id") or request.query_params.get("report_id") or ""
+    data = read_report(rid)
+    if not data:
+        return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
+    return HTMLResponse(content=render_html_report(data, normalize_rid(rid)))
+
+
+@web_app.get("/report/{report_id:path}", response_class=HTMLResponse)
 async def report_page(report_id: str):
     data = read_report(report_id)
     if not data:
         return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
-    return HTMLResponse(content=render_html_report(data, report_id))
+    return HTMLResponse(content=render_html_report(data, normalize_rid(report_id)))
 
 
 async def serve_web():
@@ -1642,7 +1669,7 @@ async def serve_web():
 async def on_start(msg: Message, state: FSMContext):
     await state.clear()
     if check_banned(msg.from_user.id):
-        return await msg.answer("Доступ ограничен.")
+        return await msg.answer("⛔ Доступ ограничен.")
     create_user(msg.from_user.id, msg.from_user.username)
     await msg.answer(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
 
@@ -1666,15 +1693,15 @@ async def on_profile(cb: CallbackQuery):
     user = fetch_user(cb.from_user.id)
     tenure = get_tenure(user[4]) if user else "0 дн."
     txt = (
-        f"<b>Профиль</b>\n\nID: <code>{cb.from_user.id}</code>\n"
-        f"Запросов: <b>{user[2] if user else 0}</b>\n"
-        f"Дата регистрации: {user[4] if user else '-'}\n"
-        f"<i>В системе: {tenure}</i>"
+        f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n"
+        f"🔎 Запросов: <b>{user[2] if user else 0}</b>\n"
+        f"📅 Дата регистрации: {user[4] if user else '-'}\n"
+        f"⏳ <i>В системе: {tenure}</i>"
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Скрытие данных ($5)", callback_data="hide_data_menu")],
-            [InlineKeyboardButton(text="Назад", callback_data="back_to_start")],
+            [InlineKeyboardButton(text="🛡️ Скрытие данных ($5)", callback_data="hide_data_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")],
         ]
     )
     await cb.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
@@ -1685,8 +1712,8 @@ async def on_profile(cb: CallbackQuery):
 async def on_hide_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
-            [InlineKeyboardButton(text="Назад", callback_data="profile")],
+            [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")],
         ]
     )
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
@@ -1699,12 +1726,12 @@ async def on_pay_ton(cb: CallbackQuery):
     url = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить в 1 клик", url=url)],
-            [InlineKeyboardButton(text="Назад", callback_data="hide_data_menu")],
+            [InlineKeyboardButton(text="💎 Оплатить в 1 клик", url=url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")],
         ]
     )
     await cb.message.edit_text(
-        f"<b>Оплата через TON</b>\n\nКошелек: <code>{TON_WALLET}</code>\nMemo: <code>{memo}</code>",
+        f"💎 <b>Оплата через TON</b>\n\n👛 Кошелек: <code>{TON_WALLET}</code>\n📝 Memo: <code>{memo}</code>",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -1714,7 +1741,7 @@ async def on_pay_ton(cb: CallbackQuery):
 @dp.callback_query(F.data == "buy_requests")
 async def on_buy(cb: CallbackQuery):
     await cb.message.edit_text(
-        "<b>Покупка запросов</b>\nПо вопросам пополнения: " + ADMIN_USERNAME,
+        "💳 <b>Покупка запросов</b>\nПо вопросам пополнения: " + ADMIN_USERNAME,
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1726,7 +1753,7 @@ async def on_ref(cb: CallbackQuery):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={cb.from_user.id}"
     await cb.message.edit_text(
-        f"<b>Реферальная ссылка:</b>\n\n<code>{link}</code>",
+        f"👥 <b>Реферальная ссылка:</b>\n\n<code>{link}</code>",
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1746,19 +1773,19 @@ async def handle_support(msg: Message, state: FSMContext):
     try:
         await bot.send_message(
             MAIN_ADMIN_ID,
-            f"Сообщение от {html.escape(msg.from_user.full_name)} (<code>{msg.from_user.id}</code>):\n\n{html.escape(msg.text or '')}",
+            f"📩 Сообщение от {html.escape(msg.from_user.full_name)} (<code>{msg.from_user.id}</code>):\n\n{html.escape(msg.text or '')}",
             parse_mode="HTML",
         )
-        await msg.answer("Отправлено.", reply_markup=kb_main())
+        await msg.answer("✅ Отправлено.", reply_markup=kb_main())
     except Exception:
-        await msg.answer("Ошибка отправки.", reply_markup=kb_main())
+        await msg.answer("❌ Ошибка отправки.", reply_markup=kb_main())
 
 
 @dp.callback_query(F.data == "use_promo")
 async def on_use_promo(cb: CallbackQuery, state: FSMContext):
     await state.set_state(States.promo_code)
     await cb.message.edit_text(
-        "<b>Активация промокода / чека</b>\n\nВведите код сообщением:",
+        "🎟️ <b>Активация промокода / чека</b>\n\nВведите код сообщением:",
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1777,16 +1804,16 @@ async def handle_promo(msg: Message, state: FSMContext):
             (code,),
         ).fetchone()
         if not promo:
-            return await msg.answer("Промокод не найден.", reply_markup=kb_main())
+            return await msg.answer("❌ Промокод не найден.", reply_markup=kb_main())
 
         if conn.execute(
             "SELECT 1 FROM promo_activations WHERE user_id = ? AND code = ?",
             (uid, code),
         ).fetchone():
-            return await msg.answer("Промокод уже активирован.", reply_markup=kb_main())
+            return await msg.answer("⚠️ Промокод уже активирован.", reply_markup=kb_main())
 
         if promo["uses_count"] >= promo["max_uses"]:
-            return await msg.answer("Лимит использований исчерпан.", reply_markup=kb_main())
+            return await msg.answer("⚠️ Лимит использований исчерпан.", reply_markup=kb_main())
 
         conn.execute("UPDATE promos SET uses_count = uses_count + 1 WHERE code = ?", (code,))
         conn.execute(
@@ -1797,7 +1824,7 @@ async def handle_promo(msg: Message, state: FSMContext):
 
     give_requests(uid, promo["reward"])
     await msg.answer(
-        f"Начислено <b>+{promo['reward']} запросов</b>.",
+        f"✅ Начислено <b>+{promo['reward']} запросов</b>.",
         parse_mode="HTML",
         reply_markup=kb_main(),
     )
@@ -1806,8 +1833,8 @@ async def handle_promo(msg: Message, state: FSMContext):
 @dp.message(Command("admin"))
 async def on_admin(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
-        return await msg.answer("Нет доступа.")
-    await msg.answer("<b>Админ-панель</b>", parse_mode="HTML", reply_markup=kb_admin())
+        return await msg.answer("⛔ Нет доступа.")
+    await msg.answer("🛠️ <b>Админ-панель</b>", parse_mode="HTML", reply_markup=kb_admin())
 
 
 @dp.callback_query(F.data == "adm_promo")
@@ -1815,7 +1842,7 @@ async def on_adm_promo(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await ack_cb(cb, "Нет доступа", alert=True)
     await cb.message.edit_text(
-        "<b>Создание промокода</b>\n\nФормат: <code>КОД НАГРАДА ЛИМИТ</code>",
+        "🎟️ <b>Создание промокода</b>\n\nФормат: <code>КОД НАГРАДА ЛИМИТ</code>",
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1830,12 +1857,12 @@ async def handle_adm_promo(msg: Message, state: FSMContext):
     await state.clear()
     parts = (msg.text or "").strip().split()
     if len(parts) < 2:
-        return await msg.answer("Неверный формат.", reply_markup=kb_admin())
+        return await msg.answer("❌ Неверный формат.", reply_markup=kb_admin())
     try:
         code, reward = parts[0], int(parts[1])
         limit_uses = int(parts[2]) if len(parts) > 2 else 1
     except ValueError:
-        return await msg.answer("Награда и лимит должны быть числами.", reply_markup=kb_admin())
+        return await msg.answer("❌ Награда и лимит должны быть числами.", reply_markup=kb_admin())
 
     with db_conn() as conn:
         try:
@@ -1845,10 +1872,10 @@ async def handle_adm_promo(msg: Message, state: FSMContext):
             )
             conn.commit()
         except sqlite3.IntegrityError:
-            return await msg.answer("Такой код уже существует.", reply_markup=kb_admin())
+            return await msg.answer("⚠️ Такой код уже существует.", reply_markup=kb_admin())
 
     await msg.answer(
-        f"Промокод <code>{html.escape(code)}</code> на +{reward} запросов создан.",
+        f"✅ Промокод <code>{html.escape(code)}</code> на +{reward} запросов создан.",
         parse_mode="HTML",
         reply_markup=kb_admin(),
     )
@@ -1859,7 +1886,7 @@ async def on_adm_check(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await ack_cb(cb, "Нет доступа", alert=True)
     await cb.message.edit_text(
-        "<b>Создание чека</b>\n\nВведите номинал (запросов):",
+        "🧾 <b>Создание чека</b>\n\nВведите номинал (запросов):",
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1875,7 +1902,7 @@ async def handle_adm_check(msg: Message, state: FSMContext):
     try:
         reward = int((msg.text or "").strip())
     except ValueError:
-        return await msg.answer("Введите число.", reply_markup=kb_admin())
+        return await msg.answer("❌ Введите число.", reply_markup=kb_admin())
 
     code = f"CHECK-{uuid.uuid4().hex[:8].upper()}"
     with db_conn() as conn:
@@ -1886,7 +1913,7 @@ async def handle_adm_check(msg: Message, state: FSMContext):
         conn.commit()
 
     await msg.answer(
-        f"Чек создан: <code>{code}</code> на <b>{reward}</b> запросов.",
+        f"✅ Чек создан: <code>{code}</code> на <b>{reward}</b> запросов.",
         parse_mode="HTML",
         reply_markup=kb_admin(),
     )
@@ -1897,7 +1924,7 @@ async def on_adm_test_api(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await ack_cb(cb, "Нет доступа", alert=True)
     await cb.message.edit_text(
-        "<b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):",
+        "🧪 <b>Тест API (Raw)</b>\n\nВведите запрос (таймаут 90 сек):",
         parse_mode="HTML",
         reply_markup=kb_back(),
     )
@@ -1912,7 +1939,7 @@ async def handle_adm_raw(msg: Message, state: FSMContext):
     await state.clear()
     q = (msg.text or "").strip()
     note = await msg.answer(
-        f"Запрос к Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...",
+        f"⏳ Запрос к Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...",
         parse_mode="HTML",
     )
 
@@ -1933,19 +1960,19 @@ async def handle_adm_raw(msg: Message, state: FSMContext):
 async def on_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await ack_cb(cb, "Нет доступа", alert=True)
-    note = await cb.message.edit_text("Проверка Black-Box и Argus...", parse_mode="HTML")
+    note = await cb.message.edit_text("📡 Проверка Black-Box и Argus...", parse_mode="HTML")
     results = await check_apis()
     lines = [
-        f"* <b>{r['name']}</b>: {'OK' if r['ok'] else 'FAIL'} ({r['status']}, {r['ms']}ms)"
+        f"• <b>{r['name']}</b>: {'✅ OK' if r['ok'] else '❌ FAIL'} ({r['status']}, {r['ms']}ms)"
         for r in results
     ]
-    await note.edit_text("<b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=kb_admin())
+    await note.edit_text("📡 <b>Статус API:</b>\n\n" + "\n".join(lines), parse_mode="HTML", reply_markup=kb_admin())
     await ack_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("ai_analyze_"))
 async def on_analyze(cb: CallbackQuery):
-    rid = cb.data.replace("ai_analyze_", "", 1)
+    rid = normalize_rid(cb.data.replace("ai_analyze_", "", 1))
     data = read_report(rid)
     if not data:
         return await ack_cb(cb, "Отчет не найден", alert=True)
@@ -1953,13 +1980,13 @@ async def on_analyze(cb: CallbackQuery):
     await ack_cb(cb, "Анализ...")
     summary = make_local_analysis(data)
     store_report(rid, data)
-    txt = f"<b>Цель:</b> <code>{html.escape(str(data.get('query') or ''))}</code>\n\n{summary}"
+    txt = f"🎯 <b>Цель:</b> <code>{html.escape(str(data.get('query') or ''))}</code>\n\n{summary}"
     await cb.message.answer(txt[:4000], parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("get_txt_"))
 async def on_export_txt(cb: CallbackQuery):
-    rid = cb.data.replace("get_txt_", "", 1)
+    rid = normalize_rid(cb.data.replace("get_txt_", "", 1))
     data = read_report(rid)
     if not data:
         return await ack_cb(cb, "Отчет не найден", alert=True)
@@ -1977,13 +2004,13 @@ async def on_export_txt(cb: CallbackQuery):
         f"Оператор / Регион: {data.get('operator', 'Нет')} / {data.get('region', 'Нет')}"
     )
     doc = BufferedInputFile(txt.encode("utf-8"), filename=f"oasis_{rid}.txt")
-    await cb.message.answer_document(document=doc, caption="<b>TXT Отчет</b>", parse_mode="HTML")
+    await cb.message.answer_document(document=doc, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await ack_cb(cb)
 
 
 @dp.callback_query(F.data.startswith("get_json_"))
 async def on_export_json(cb: CallbackQuery):
-    rid = cb.data.replace("get_json_", "", 1)
+    rid = normalize_rid(cb.data.replace("get_json_", "", 1))
     data = read_report(rid)
     if not data:
         return await ack_cb(cb, "Отчет не найден", alert=True)
@@ -2006,7 +2033,7 @@ async def on_export_json(cb: CallbackQuery):
     }
     raw = json.dumps(obj, ensure_ascii=False, indent=2)
     doc = BufferedInputFile(raw.encode("utf-8"), filename=f"oasis_{rid}.json")
-    await cb.message.answer_document(document=doc, caption="<b>JSON Отчет</b>", parse_mode="HTML")
+    await cb.message.answer_document(document=doc, caption="🗂️ <b>JSON Отчет</b>", parse_mode="HTML")
     await ack_cb(cb)
 
 
@@ -2015,17 +2042,17 @@ async def on_search(msg: Message, state: FSMContext):
     if msg.from_user.is_bot or await state.get_state() is not None:
         return
     if check_banned(msg.from_user.id):
-        return await msg.answer("Доступ ограничен.")
+        return await msg.answer("⛔ Доступ ограничен.")
 
     q = (msg.text or "").strip()
     if not q:
         return
 
     if not spend_request(msg.from_user.id):
-        return await msg.answer("Закончились запросы.")
+        return await msg.answer("⚠️ Закончились запросы.")
 
     note = await msg.answer(
-        f"<b>[Oasis Digital]</b> Поиск по Black-Box и Argus (до 90 сек)...\n\n<b>Цель:</b> <code>{html.escape(q)}</code>",
+        f"[Oasis Digital] Начался Поиск информации\n(Время поиска от 10-90 сек)\nЦель : <code>{html.escape(q)}</code>",
         parse_mode="HTML",
     )
 
@@ -2050,7 +2077,7 @@ async def on_search(msg: Message, state: FSMContext):
     except Exception as exc:
         log.exception("Ошибка поиска '%s': %s", q, exc)
         await note.edit_text(
-            f"Ошибка при формировании отчета: <code>{html.escape(str(exc))}</code>",
+            f"❌ Ошибка при формировании отчета: <code>{html.escape(str(exc))}</code>",
             parse_mode="HTML",
             reply_markup=kb_main(),
         )
