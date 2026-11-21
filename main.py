@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import json
 import logging
@@ -7,6 +8,7 @@ import re
 import sqlite3
 import ssl
 import uuid
+import zlib
 from collections import OrderedDict
 from datetime import datetime
 from typing import Any
@@ -44,7 +46,7 @@ ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrt
 
 TON_WALLET = os.getenv("TON_WALLET", "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx").strip()
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://listopadov-search-1.onrender.com").rstrip("/")
-DB_PATH = os.getenv("USERS_DB", "users.db")
+DB_PATH = os.getenv("USERS_DB", "/tmp/users.db")
 
 URL_BB = "https://api.black-box.cc/v1.1/search"
 URL_ARGUS = "https://argus.cc.cd/api/v1/search"
@@ -182,7 +184,9 @@ def store_report(report_id: str, payload: dict):
     rid = normalize_rid(report_id) or uuid.uuid4().hex[:8]
     db_init()
     safe = to_json_safe(payload)
+    safe["report_id"] = rid
     cache[rid] = safe
+    cache[rid.lower()] = safe
     with db_conn() as conn:
         conn.execute(
             """
@@ -205,10 +209,12 @@ def read_report(report_id: str | None) -> dict | None:
         return None
     if rid in cache:
         return cache[rid]
+    if rid.lower() in cache:
+        return cache[rid.lower()]
     db_init()
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT payload_json FROM reports WHERE LOWER(report_id) = LOWER(?)",
+            "SELECT payload_json FROM reports WHERE LOWER(TRIM(report_id)) = LOWER(?)",
             (rid,),
         ).fetchone()
     if not row:
@@ -216,7 +222,70 @@ def read_report(report_id: str | None) -> dict | None:
     try:
         data = json.loads(row["payload_json"])
         cache[rid] = data
+        cache[rid.lower()] = data
         return data
+    except Exception:
+        return None
+
+
+def pack_report_token(data: dict) -> str:
+    tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
+    compact = {
+        "q": data.get("query") or "",
+        "qt": data.get("query_type") or "general",
+        "dt": data.get("date") or "",
+        "fio": data.get("fio") or "Не найдено",
+        "dob": data.get("dob") or "Нет",
+        "age": data.get("age") or "Не найдено",
+        "ph": data.get("phone_number") or "Не найдено",
+        "op": data.get("operator") or "Нет",
+        "reg": data.get("region") or "Нет",
+        "tgr": data.get("reg_date") or "Не найдено",
+        "tgi": tg.get("id") or "",
+        "tgu": tg.get("username") or "",
+        "pb": (data.get("phonebooks") or [])[:15],
+        "nh": (data.get("name_history") or [])[:15],
+        "ex": (data.get("extra_kv") or [])[:20],
+    }
+    raw_bytes = json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    compressed = zlib.compress(raw_bytes, level=9)
+    return base64.urlsafe_b64encode(compressed).decode("ascii").rstrip("=")
+
+
+def unpack_report_token(token: str) -> dict | None:
+    if not token:
+        return None
+    s = token.strip().split("?")[0].strip("/")
+    if s.startswith("r/"):
+        s = s.split("/", 1)[1]
+    pad = "=" * ((4 - len(s) % 4) % 4)
+    try:
+        compressed = base64.urlsafe_b64decode((s + pad).encode("ascii"))
+        raw_bytes = zlib.decompress(compressed)
+        c = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(c, dict):
+            return None
+        return {
+            "query": c.get("q") or "",
+            "query_type": c.get("qt") or "general",
+            "date": c.get("dt") or "",
+            "fio": c.get("fio") or "Не найдено",
+            "dob": c.get("dob") or "Нет",
+            "age": c.get("age") or "Не найдено",
+            "phone_number": c.get("ph") or "Не найдено",
+            "operator": c.get("op") or "Нет",
+            "region": c.get("reg") or "Нет",
+            "reg_date": c.get("tgr") or "Не найдено",
+            "tg_info": {
+                "id": c.get("tgi") or "",
+                "username": c.get("tgu") or "",
+            },
+            "phonebooks": c.get("pb") or [],
+            "name_history": c.get("nh") or [],
+            "extra_kv": c.get("ex") or [],
+            "databases": {},
+            "raw_response": {},
+        }
     except Exception:
         return None
 
@@ -334,12 +403,14 @@ def kb_back():
     )
 
 
-def kb_result(report_id: str):
+def kb_result(report_id: str, data: dict | None = None):
     rid = normalize_rid(report_id)
+    token = pack_report_token(data) if data else ""
+    web_url = f"{WEBHOOK_HOST}/r/{token}" if token else f"{WEBHOOK_HOST}/report/{rid}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🧠 Анализатор", callback_data=f"ai_analyze_{rid}")],
-            [InlineKeyboardButton(text="🌐 Веб-отчет", url=f"{WEBHOOK_HOST}/report/{rid}")],
+            [InlineKeyboardButton(text="🌐 Веб-отчет", url=web_url)],
             [
                 InlineKeyboardButton(text="📄 TXT", callback_data=f"get_txt_{rid}"),
                 InlineKeyboardButton(text="🗂️ JSON", callback_data=f"get_json_{rid}"),
@@ -379,9 +450,11 @@ def detect_qtype(query: str) -> str:
     low = q.lower()
     digits = re.sub(r"\D", "", q)
 
-    if q.startswith("@") or "t.me/" in low or "telegram" in low or re.fullmatch(r"\d{6,11}", q):
+    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 10 <= len(digits) <= 15:
+        return "phone"
+    if q.startswith("@") or "t.me/" in low or "telegram" in low or re.fullmatch(r"\d{6,9}", q):
         return "telegram"
-    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 15:
+    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 9:
         return "phone"
     if "@" in q and "." in q.split("@")[-1]:
         return "email"
@@ -1232,6 +1305,7 @@ def render_html_report(data: dict, report_id: str) -> str:
     blocks_cnt = len(blocks)
 
     export_obj = {
+        "brand": "Oasis Digital",
         "report_id": report_id,
         "query": data.get("query"),
         "query_type": qtype,
@@ -1672,21 +1746,33 @@ async def index():
     return {"status": "ok", "service": "Oasis Digital"}
 
 
-@web_app.get("/report", response_class=HTMLResponse)
-async def report_query_page(request: Request):
-    rid = request.query_params.get("id") or request.query_params.get("report_id") or ""
-    data = read_report(rid)
+@web_app.get("/r/{token:path}", response_class=HTMLResponse)
+async def report_stateless(token: str):
+    data = unpack_report_token(token)
     if not data:
         return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
-    return HTMLResponse(content=render_html_report(data, normalize_rid(rid)))
+    return HTMLResponse(content=render_html_report(data, "oasis"))
 
 
 @web_app.get("/report/{report_id:path}", response_class=HTMLResponse)
 async def report_page(report_id: str):
-    data = read_report(report_id)
+    rid = normalize_rid(report_id)
+    data = read_report(rid)
+    if not data:
+        data = unpack_report_token(report_id)
     if not data:
         return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
-    return HTMLResponse(content=render_html_report(data, normalize_rid(report_id)))
+    return HTMLResponse(content=render_html_report(data, rid or "oasis"))
+
+
+@web_app.get("/report", response_class=HTMLResponse)
+async def report_query_page(request: Request):
+    raw_id = request.query_params.get("id") or request.query_params.get("report_id") or ""
+    rid = normalize_rid(raw_id)
+    data = read_report(rid) or unpack_report_token(raw_id)
+    if not data:
+        return HTMLResponse("<h1>404 Отчет не найден</h1>", status_code=404)
+    return HTMLResponse(content=render_html_report(data, rid or "oasis"))
 
 
 async def serve_web():
@@ -2096,6 +2182,7 @@ async def on_search(msg: Message, state: FSMContext):
         data = await run_search(q)
         rid = uuid.uuid4().hex[:8]
         store_report(rid, data)
+        markup = kb_result(rid, data)
 
         body = build_text_report(data)
         chunks = split_html_lines(body, limit=3800)
@@ -2103,13 +2190,13 @@ async def on_search(msg: Message, state: FSMContext):
             msg,
             note,
             chunks[0],
-            reply_markup=kb_result(rid) if len(chunks) == 1 else None,
+            reply_markup=markup if len(chunks) == 1 else None,
             edit_first=True,
         )
         for part in chunks[1:-1]:
             await safe_edit_or_send(msg, note, part)
         if len(chunks) > 1:
-            await safe_edit_or_send(msg, note, chunks[-1], reply_markup=kb_result(rid))
+            await safe_edit_or_send(msg, note, chunks[-1], reply_markup=markup)
     except Exception as exc:
         log.exception("Ошибка поиска '%s': %s", q, exc)
         await note.edit_text(
