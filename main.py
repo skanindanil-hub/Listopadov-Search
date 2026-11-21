@@ -101,6 +101,7 @@ class States(StatesGroup):
     adm_raw = State()
     adm_promo = State()
     adm_check = State()
+    adm_make_api = State()
 
 
 async def ack_cb(cb: CallbackQuery, text: str | None = None, alert: bool = False):
@@ -120,15 +121,51 @@ def init_api_keys_table():
     with db_conn() as conn:
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('api_enabled', '1')"
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS api_keys (
                 api_key TEXT PRIMARY KEY,
                 owner TEXT DEFAULT 'admin',
+                requests_limit INTEGER DEFAULT 0,
+                requests_used INTEGER DEFAULT 0,
                 rate_limit INTEGER DEFAULT 70,
                 expires_at TEXT DEFAULT '2099-12-31 23:59:59',
                 is_active INTEGER DEFAULT 1,
                 created_at TEXT
             )
             """
+        )
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+        if "requests_limit" not in cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN requests_limit INTEGER DEFAULT 0")
+        if "requests_used" not in cols:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN requests_used INTEGER DEFAULT 0")
+        conn.commit()
+
+
+def is_api_enabled() -> bool:
+    init_api_keys_table()
+    with db_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'api_enabled'").fetchone()
+    return str(row["value"] if row else "1") == "1"
+
+
+def set_api_enabled(enabled: bool):
+    init_api_keys_table()
+    val = "1" if enabled else "0"
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('api_enabled', ?)",
+            (val,),
         )
         conn.commit()
 
@@ -193,25 +230,32 @@ def generate_oasis_key() -> str:
 
 def create_oasis_api_key(
     owner: str = "admin",
+    requests_limit: int = 0,
     rate_limit: int = 70,
     expires_at: str = "2099-12-31 23:59:59",
 ) -> dict:
     init_api_keys_table()
     key = generate_oasis_key()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    req_lim = max(0, int(requests_limit))
+    rpm = max(1, int(rate_limit))
     with db_conn() as conn:
         conn.execute(
             """
-            INSERT INTO api_keys (api_key, owner, rate_limit, expires_at, is_active, created_at)
-            VALUES (?, ?, ?, ?, 1, ?)
+            INSERT INTO api_keys (
+                api_key, owner, requests_limit, requests_used, rate_limit, expires_at, is_active, created_at
+            )
+            VALUES (?, ?, ?, 0, ?, ?, 1, ?)
             """,
-            (key, owner, rate_limit, expires_at, now_str),
+            (key, owner, req_lim, rpm, expires_at, now_str),
         )
         conn.commit()
     return {
         "api_key": key,
         "owner": owner,
-        "rate_limit": rate_limit,
+        "requests_limit": req_lim,
+        "requests_used": 0,
+        "rate_limit": rpm,
         "expires_at": expires_at,
         "is_active": 1,
         "created_at": now_str,
@@ -222,7 +266,10 @@ def list_oasis_api_keys() -> list[dict]:
     init_api_keys_table()
     with db_conn() as conn:
         rows = conn.execute(
-            "SELECT api_key, owner, rate_limit, expires_at, is_active, created_at FROM api_keys ORDER BY rowid DESC"
+            """
+            SELECT api_key, owner, requests_limit, requests_used, rate_limit, expires_at, is_active, created_at
+            FROM api_keys ORDER BY rowid DESC
+            """
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -242,13 +289,16 @@ def format_api_key_card(item: dict) -> str:
     key = html.escape(str(item["api_key"]))
     exp = html.escape(str(item.get("expires_at") or "2099-12-31 23:59:59"))
     rpm = int(item.get("rate_limit") or 70)
+    req_lim = int(item.get("requests_limit") or 0)
+    quota_txt = "Безлимитный" if req_lim <= 0 else f"{req_lim} запросов"
     domain = html.escape(WEBHOOK_HOST)
     return (
         "🔑 <b>API-ключ успешно создан!</b>\n\n"
         "Код ключа (нажмите для копирования):\n"
         f"<code>{key}</code>\n\n"
         f"⏳ <b>Срок действия:</b> Бессрочно (до {exp})\n"
-        "⚡️ <b>Доступ:</b> Безлимитный REST API\n"
+        f"📦 <b>Лимит запросов:</b> {quota_txt}\n"
+        "⚡️ <b>Доступ:</b> REST API\n"
         f"🚀 <b>Лимит скорости:</b> {rpm} запросов в минуту\n"
         f"🌐 <b>Домен API:</b> {domain}\n\n"
         "Пример запроса cURL:\n"
@@ -262,6 +312,9 @@ def verify_oasis_key(
     x_api_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
+    if not is_api_enabled():
+        raise HTTPException(status_code=503, detail="Oasis API is disabled")
+
     init_api_keys_table()
     token = (x_api_key or "").strip()
     if not token and authorization and authorization.lower().startswith("bearer "):
@@ -272,21 +325,38 @@ def verify_oasis_key(
 
     with db_conn() as conn:
         row = conn.execute(
-            "SELECT api_key, owner, rate_limit, expires_at, is_active FROM api_keys WHERE api_key = ?",
+            """
+            SELECT api_key, owner, requests_limit, requests_used, rate_limit, expires_at, is_active
+            FROM api_keys WHERE api_key = ?
+            """,
             (token,),
         ).fetchone()
 
-    if not row or int(row["is_active"]) != 1:
-        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+        if not row or int(row["is_active"]) != 1:
+            raise HTTPException(status_code=401, detail="Invalid or revoked API key")
 
-    rpm = int(row["rate_limit"] or 70)
-    now_ts = time.monotonic()
-    bucket = RATE_BUCKETS[token]
-    bucket[:] = [ts for ts in bucket if now_ts - ts < 60.0]
-    if len(bucket) >= rpm:
-        raise HTTPException(status_code=429, detail=f"Rate limit exceeded ({rpm}/min)")
-    bucket.append(now_ts)
-    return dict(row)
+        req_lim = int(row["requests_limit"] or 0)
+        req_used = int(row["requests_used"] or 0)
+        if req_lim > 0 and req_used >= req_lim:
+            raise HTTPException(status_code=429, detail="API request quota exhausted")
+
+        rpm = int(row["rate_limit"] or 70)
+        now_ts = time.monotonic()
+        bucket = RATE_BUCKETS[token]
+        bucket[:] = [ts for ts in bucket if now_ts - ts < 60.0]
+        if len(bucket) >= rpm:
+            raise HTTPException(status_code=429, detail=f"Rate limit exceeded ({rpm}/min)")
+        bucket.append(now_ts)
+
+        conn.execute(
+            "UPDATE api_keys SET requests_used = requests_used + 1 WHERE api_key = ?",
+            (token,),
+        )
+        conn.commit()
+
+    info = dict(row)
+    info["requests_used"] = req_used + 1
+    return info
 
 
 def to_json_safe(obj: Any) -> Any:
@@ -547,10 +617,15 @@ def kb_result(report_id: str, data: dict | None = None):
 
 
 def kb_admin():
+    api_state_txt = "🔌 API: ВКЛ (нажми чтобы выкл)" if is_api_enabled() else "🔌 API: ВЫКЛ (нажми чтобы вкл)"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧪 Тест API (Raw)", callback_data="adm_test_api")],
-            [InlineKeyboardButton(text="📡 Проверка API", callback_data="adm_check_apis")],
+            [InlineKeyboardButton(text="🔑 Сделать API", callback_data="adm_make_api")],
+            [InlineKeyboardButton(text=api_state_txt, callback_data="adm_toggle_api")],
+            [
+                InlineKeyboardButton(text="🧪 Тест API (Raw)", callback_data="adm_test_api"),
+                InlineKeyboardButton(text="📡 Проверка API", callback_data="adm_check_apis"),
+            ],
             [
                 InlineKeyboardButton(text="🎟️ Создать промокод", callback_data="adm_promo"),
                 InlineKeyboardButton(text="🧾 Создать чек", callback_data="adm_check"),
@@ -1873,7 +1948,7 @@ web_app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
 
 @web_app.get("/")
 async def index():
-    return {"status": "ok", "service": "Oasis Digital"}
+    return {"status": "ok", "service": "Oasis Digital", "api_enabled": is_api_enabled()}
 
 
 @web_app.get("/api/v1/search")
@@ -1967,13 +2042,19 @@ async def on_cmd_newapi(msg: Message):
     if msg.from_user.id != MAIN_ADMIN_ID:
         return await msg.answer("⛔ Нет доступа.")
     parts = (msg.text or "").strip().split()
+    req_lim = 0
     rpm = 70
     if len(parts) > 1:
         try:
-            rpm = max(1, int(parts[1]))
+            req_lim = max(0, int(parts[1]))
         except ValueError:
-            return await msg.answer("❌ Лимит должен быть числом. Пример: <code>/newapi 70</code>", parse_mode="HTML")
-    item = create_oasis_api_key(owner=f"tg:{msg.from_user.id}", rate_limit=rpm)
+            return await msg.answer("❌ Формат: <code>/newapi [лимит_запросов] [запросов_в_мин]</code>", parse_mode="HTML")
+    if len(parts) > 2:
+        try:
+            rpm = max(1, int(parts[2]))
+        except ValueError:
+            return await msg.answer("❌ Лимит в минуту должен быть числом.", parse_mode="HTML")
+    item = create_oasis_api_key(owner=f"tg:{msg.from_user.id}", requests_limit=req_lim, rate_limit=rpm)
     await msg.answer(format_api_key_card(item), parse_mode="HTML", disable_web_page_preview=True)
 
 
@@ -1984,12 +2065,16 @@ async def on_cmd_apilist(msg: Message):
     items = list_oasis_api_keys()
     if not items:
         return await msg.answer("📭 Ключей Oasis API пока нет. Создайте через /newapi")
-    lines = ["🔑 <b>Ключи Oasis API:</b>\n"]
+    state_str = "ВКЛ ✅" if is_api_enabled() else "ВЫКЛ ⛔"
+    lines = [f"🔑 <b>Ключи Oasis API</b> (общий статус API: <b>{state_str}</b>):\n"]
     for it in items[:30]:
         st = "✅ Активен" if int(it.get("is_active", 1)) == 1 else "⛔ Отозван"
+        lim = int(it.get("requests_limit") or 0)
+        used = int(it.get("requests_used") or 0)
+        lim_txt = "∞" if lim <= 0 else f"{used}/{lim}"
         lines.append(
             f"• <code>{html.escape(str(it['api_key']))}</code>\n"
-            f"  Статус: {st} | Лимит: {it.get('rate_limit', 70)}/мин | До: {html.escape(str(it.get('expires_at') or '2099-12-31 23:59:59'))}"
+            f"  Статус: {st} | Запросы: {lim_txt} | Скорость: {it.get('rate_limit', 70)}/мин"
         )
     await msg.answer("\n".join(lines)[:4000], parse_mode="HTML")
 
@@ -2006,6 +2091,53 @@ async def on_cmd_delapi(msg: Message):
         await msg.answer(f"🗑️ Ключ отозван:\n<code>{html.escape(key_to_revoke)}</code>", parse_mode="HTML")
     else:
         await msg.answer("⚠️ Ключ не найден.", parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "adm_make_api")
+async def on_adm_make_api(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    await cb.message.edit_text(
+        "🔑 <b>Создание ключа Oasis API</b>\n\n"
+        "Введите: <code>ЛИМИТ_ЗАПРОСОВ ЛИМИТ_В_МИНУТУ</code>\n"
+        "• <code>0</code> — безлимит запросов\n"
+        "• Пример: <code>500 70</code> (500 запросов, 70/мин)\n"
+        "• Пример: <code>0 70</code> (безлимит, 70/мин)",
+        parse_mode="HTML",
+        reply_markup=kb_back(),
+    )
+    await state.set_state(States.adm_make_api)
+    await ack_cb(cb)
+
+
+@dp.message(States.adm_make_api)
+async def handle_adm_make_api(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    parts = (msg.text or "").strip().split()
+    if not parts:
+        return await msg.answer("❌ Укажите лимит запросов.", reply_markup=kb_admin())
+    try:
+        req_lim = max(0, int(parts[0]))
+        rpm = max(1, int(parts[1])) if len(parts) > 1 else 70
+    except ValueError:
+        return await msg.answer("❌ Введите числа. Пример: <code>100 70</code> или <code>0 70</code>", parse_mode="HTML", reply_markup=kb_admin())
+
+    item = create_oasis_api_key(owner=f"tg:{msg.from_user.id}", requests_limit=req_lim, rate_limit=rpm)
+    await msg.answer(format_api_key_card(item), parse_mode="HTML", disable_web_page_preview=True)
+    await msg.answer("🛠️ <b>Админ-панель</b>", parse_mode="HTML", reply_markup=kb_admin())
+
+
+@dp.callback_query(F.data == "adm_toggle_api")
+async def on_adm_toggle_api(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    new_state = not is_api_enabled()
+    set_api_enabled(new_state)
+    status_msg = "Oasis API включён ✅" if new_state else "Oasis API отключён ⛔"
+    await cb.message.edit_text(f"🛠️ <b>Админ-панель</b>\n\n{status_msg}", parse_mode="HTML", reply_markup=kb_admin())
+    await ack_cb(cb, status_msg)
 
 
 @dp.callback_query(F.data == "back_to_start")
