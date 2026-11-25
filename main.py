@@ -1,4 +1,4 @@
-# language: Python, file: oasis_digital.py, runtime: Python 3.11+, target: aiogram v3 + FastAPI + SQLite
+# language: Python, file: oasis_digital_full.py, runtime: Python 3.11+, target: aiogram v3 + FastAPI + SQLite
 import asyncio
 import base64
 import html
@@ -100,10 +100,31 @@ RATE_BUCKETS: dict[str, list[float]] = defaultdict(list)
 class States(StatesGroup):
     support_msg = State()
     promo_code = State()
+    search_typed = State()
     adm_raw = State()
     adm_promo = State()
     adm_check = State()
     adm_make_api = State()
+    adm_add_sub = State()
+    adm_del_sub = State()
+
+
+SEARCH_MODES: dict[str, tuple[str, str]] = {
+    "vk": ("VK", "Введите ID, ссылку или профиль VK:"),
+    "username": ("@username", "Введите @username (например @durov):"),
+    "domen": ("Domen", "Введите домен или сайт (например example.com):"),
+    "phone": ("Phone", "Введите номер телефона (например 79104813955):"),
+    "ip": ("ip", "Введите IP-адрес (например 78.26.242.244):"),
+    "email": ("email", "Введите email (например user@example.com):"),
+    "tg_id": ("tg id", "Введите числовой Telegram ID (например 1090472807):"),
+}
+
+
+def red_btn(label: str, **kwargs) -> InlineKeyboardButton:
+    clean = label.strip()
+    if not clean.startswith("🔴"):
+        clean = f"🔴 {clean}"
+    return InlineKeyboardButton(text=clean[:64], **kwargs)
 
 
 async def ack_cb(cb: CallbackQuery, text: str | None = None, alert: bool = False):
@@ -132,6 +153,33 @@ def init_api_keys_table():
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('api_enabled', '1')"
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('sub_enabled', '1')"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS required_channels (
+                chat_id INTEGER PRIMARY KEY,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at TEXT
+            )
+            """
+        )
+        cnt = conn.execute("SELECT COUNT(*) AS c FROM required_channels").fetchone()["c"]
+        if cnt == 0 and CHANNEL_ID and CHANNEL_URL:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO required_channels (chat_id, url, title, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(CHANNEL_ID),
+                    CHANNEL_URL,
+                    "Основной канал",
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -170,6 +218,128 @@ def set_api_enabled(enabled: bool):
             (val,),
         )
         conn.commit()
+
+
+def is_sub_enabled() -> bool:
+    init_api_keys_table()
+    with db_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'sub_enabled'").fetchone()
+    return str(row["value"] if row else "1") == "1"
+
+
+def set_sub_enabled(enabled: bool):
+    init_api_keys_table()
+    with db_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('sub_enabled', ?)",
+            ("1" if enabled else "0",),
+        )
+        conn.commit()
+
+
+def list_required_channels() -> list[dict]:
+    init_api_keys_table()
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT chat_id, url, title, created_at FROM required_channels ORDER BY rowid ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_required_channel(chat_id: int, url: str, title: str):
+    init_api_keys_table()
+    clean_title = (title or "Обязательный канал").strip()[:50]
+    clean_url = url.strip()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO required_channels (chat_id, url, title, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(chat_id), clean_url, clean_title, now_str),
+        )
+        conn.commit()
+
+
+def delete_required_channel(chat_id: int) -> bool:
+    init_api_keys_table()
+    with db_conn() as conn:
+        cur = conn.execute("DELETE FROM required_channels WHERE chat_id = ?", (int(chat_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+async def get_missing_channels(user_id: int) -> list[dict]:
+    if user_id == MAIN_ADMIN_ID or not is_sub_enabled():
+        return []
+    channels = list_required_channels()
+    if not channels:
+        return []
+    missing: list[dict] = []
+    for ch in channels:
+        chat_id = int(ch["chat_id"])
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+            ok = member.status in {
+                ChatMemberStatus.MEMBER,
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.CREATOR,
+            }
+        except Exception as exc:
+            log.warning("Ошибка проверки подписки user_id=%s chat_id=%s: %s", user_id, chat_id, exc)
+            ok = False
+        if not ok:
+            missing.append(ch)
+    return missing
+
+
+def kb_sub_required(missing: list[dict] | None = None) -> InlineKeyboardMarkup:
+    targets = missing if missing else list_required_channels()
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, ch in enumerate(targets, start=1):
+        btn_txt = ch.get("title") or f"Канал #{idx}"
+        rows.append([red_btn(f"Подписаться: {btn_txt}", url=ch["url"])])
+    rows.append([red_btn("Я подписался", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def is_user_subscribed(user_id: int) -> bool:
+    return len(await get_missing_channels(user_id)) == 0
+
+
+async def require_sub_msg(msg: Message) -> bool:
+    if not msg.from_user:
+        return False
+    missing = await get_missing_channels(msg.from_user.id)
+    if not missing:
+        return True
+    await msg.answer(
+        "🔒 <b>Доступ закрыт без подписки</b>\n\n"
+        "Подпишись на обязательные каналы по кнопкам ниже и нажми <b>«Я подписался»</b>.",
+        parse_mode="HTML",
+        reply_markup=kb_sub_required(missing),
+    )
+    return False
+
+
+async def require_sub_cb(cb: CallbackQuery) -> bool:
+    if not cb.from_user:
+        return False
+    missing = await get_missing_channels(cb.from_user.id)
+    if not missing:
+        return True
+    await ack_cb(cb, "Сначала подпишись на обязательные каналы!", alert=True)
+    try:
+        await cb.message.edit_text(
+            "🔒 <b>Доступ закрыт без подписки</b>\n\n"
+            "Подпишись на обязательные каналы по кнопкам ниже и нажми <b>«Я подписался»</b>.",
+            parse_mode="HTML",
+            reply_markup=kb_sub_required(missing),
+        )
+    except Exception:
+        pass
+    return False
 
 
 def db_init():
@@ -222,64 +392,6 @@ def db_init():
 
 
 db_init()
-
-
-def kb_sub_required() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔒 Подписаться на канал", url=CHANNEL_URL)],
-            [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")],
-        ]
-    )
-
-
-async def is_user_subscribed(user_id: int) -> bool:
-    if user_id == MAIN_ADMIN_ID:
-        return True
-    if not CHANNEL_ID:
-        return True
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in {
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-        }
-    except Exception as exc:
-        log.warning("Ошибка проверки подписки user_id=%s chat_id=%s: %s", user_id, CHANNEL_ID, exc)
-        return False
-
-
-async def require_sub_msg(msg: Message) -> bool:
-    if not msg.from_user:
-        return False
-    if await is_user_subscribed(msg.from_user.id):
-        return True
-    await msg.answer(
-        "🔒 <b>Доступ закрыт без подписки</b>\n\n"
-        "Чтобы пользоваться ботом, подпишись на закрытый канал по кнопке ниже и нажми <b>«Я подписался»</b>.",
-        parse_mode="HTML",
-        reply_markup=kb_sub_required(),
-    )
-    return False
-
-
-async def require_sub_cb(cb: CallbackQuery) -> bool:
-    if not cb.from_user:
-        return False
-    if await is_user_subscribed(cb.from_user.id):
-        return True
-    await ack_cb(cb, "Сначала подпишись на канал!", alert=True)
-    try:
-        await cb.message.edit_text(
-            "🔒 <b>Доступ закрыт без подписки</b>\n\n"
-            "Чтобы пользоваться ботом, подпишись на закрытый канал по кнопке ниже и нажми <b>«Я подписался»</b>.",
-            parse_mode="HTML",
-            reply_markup=kb_sub_required(),
-        )
-    except Exception:
-        pass
-    return False
 
 
 def generate_oasis_key() -> str:
@@ -644,7 +756,7 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 🌐 <b>Онлайн-следы</b>
 <blockquote>78.26.242.244, google.com</blockquote>
 
-<i>Отправьте запрос сообщением.</i>"""
+<i>Отправьте запрос сообщением или выберите тип в разделе «Поиск».</i>"""
 
 SUPPORT_TEXT = "💬 <b>Связь с нами</b>\nНапишите ваше сообщение в чат."
 HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость скрытия данных: $7 (навсегда)"
@@ -653,21 +765,42 @@ HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость
 def kb_main():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔎 Поиск", callback_data="search_info")],
-            [InlineKeyboardButton(text="💳 Купить запросы", callback_data="buy_requests")],
-            [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-            [InlineKeyboardButton(text="🎟️ Активировать промокод", callback_data="use_promo")],
+            [red_btn("Поиск", callback_data="search_info")],
+            [red_btn("Купить запросы", callback_data="buy_requests")],
+            [red_btn("Профиль", callback_data="profile")],
+            [red_btn("Активировать промокод", callback_data="use_promo")],
             [
-                InlineKeyboardButton(text="👥 Рефералка", callback_data="ref_link"),
-                InlineKeyboardButton(text="💬 Связь с нами", callback_data="support"),
+                red_btn("Рефералка", callback_data="ref_link"),
+                red_btn("Связь с нами", callback_data="support"),
             ],
+        ]
+    )
+
+
+def kb_search_types():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                red_btn("VK", callback_data="stype_vk"),
+                red_btn("@username", callback_data="stype_username"),
+            ],
+            [
+                red_btn("Domen", callback_data="stype_domen"),
+                red_btn("Phone", callback_data="stype_phone"),
+            ],
+            [
+                red_btn("ip", callback_data="stype_ip"),
+                red_btn("email", callback_data="stype_email"),
+            ],
+            [red_btn("tg id", callback_data="stype_tg_id")],
+            [red_btn("Назад", callback_data="back_to_start")],
         ]
     )
 
 
 def kb_back():
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")]]
+        inline_keyboard=[[red_btn("Назад", callback_data="back_to_start")]]
     )
 
 
@@ -677,32 +810,39 @@ def kb_result(report_id: str, data: dict | None = None):
     web_url = f"{WEBHOOK_HOST}/r/{token}" if token else f"{WEBHOOK_HOST}/report/{rid}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧠 Анализатор", callback_data=f"ai_analyze_{rid}")],
-            [InlineKeyboardButton(text="🌐 Веб-отчет", url=web_url)],
+            [red_btn("Анализатор", callback_data=f"ai_analyze_{rid}")],
+            [red_btn("Веб-отчет", url=web_url)],
             [
-                InlineKeyboardButton(text="📄 TXT", callback_data=f"get_txt_{rid}"),
-                InlineKeyboardButton(text="🗂️ JSON", callback_data=f"get_json_{rid}"),
+                red_btn("TXT", callback_data=f"get_txt_{rid}"),
+                red_btn("JSON", callback_data=f"get_json_{rid}"),
             ],
-            [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_start")],
+            [red_btn("В меню", callback_data="back_to_start")],
         ]
     )
 
 
 def kb_admin():
-    api_state_txt = "🔌 API: ВКЛ (нажми чтобы выкл)" if is_api_enabled() else "🔌 API: ВЫКЛ (нажми чтобы вкл)"
+    sub_txt = "ОП: ВКЛ (выкл)" if is_sub_enabled() else "ОП: ВЫКЛ (вкл)"
+    api_txt = "API: ВКЛ (выкл)" if is_api_enabled() else "API: ВЫКЛ (вкл)"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔑 Сделать API", callback_data="adm_make_api")],
-            [InlineKeyboardButton(text=api_state_txt, callback_data="adm_toggle_api")],
+            [red_btn(sub_txt, callback_data="adm_toggle_sub")],
             [
-                InlineKeyboardButton(text="🧪 Тест API (Raw)", callback_data="adm_test_api"),
-                InlineKeyboardButton(text="📡 Проверка API", callback_data="adm_check_apis"),
+                red_btn("Добавить канал", callback_data="adm_add_sub"),
+                red_btn("Удалить канал", callback_data="adm_del_sub"),
+            ],
+            [red_btn("Список каналов", callback_data="adm_list_sub")],
+            [red_btn("Сделать API", callback_data="adm_make_api")],
+            [red_btn(api_txt, callback_data="adm_toggle_api")],
+            [
+                red_btn("Тест API (Raw)", callback_data="adm_test_api"),
+                red_btn("Проверка API", callback_data="adm_check_apis"),
             ],
             [
-                InlineKeyboardButton(text="🎟️ Создать промокод", callback_data="adm_promo"),
-                InlineKeyboardButton(text="🧾 Создать чек", callback_data="adm_check"),
+                red_btn("Создать промокод", callback_data="adm_promo"),
+                red_btn("Создать чек", callback_data="adm_check"),
             ],
-            [InlineKeyboardButton(text="🏠 В меню", callback_data="back_to_start")],
+            [red_btn("В меню", callback_data="back_to_start")],
         ]
     )
 
@@ -753,12 +893,14 @@ def detect_qtype(query: str) -> str:
     low = q.lower()
     digits = re.sub(r"\D", "", q)
 
+    if "vk.com/" in low or "vk.me/" in low or low.startswith("vk"):
+        return "vk"
     if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 10 <= len(digits) <= 15:
         return "phone"
-    if q.startswith("@") or "t.me/" in low or "telegram" in low or re.fullmatch(r"\d{6,9}", q):
+    if re.fullmatch(r"\d{6,11}", q):
         return "telegram"
-    if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 7 <= len(digits) <= 9:
-        return "phone"
+    if q.startswith("@") or "t.me/" in low or "telegram" in low:
+        return "telegram"
     if "@" in q and "." in q.split("@")[-1]:
         return "email"
     if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", q.upper()):
@@ -770,6 +912,8 @@ def detect_qtype(query: str) -> str:
         re.sub(r"\s+", "", q.upper()),
     ):
         return "vehicle"
+    if re.fullmatch(r"(?:https?://)?(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:/.*)?", q):
+        return "domain"
     return "general"
 
 
@@ -777,6 +921,8 @@ def qtype_title(qtype: str) -> str:
     return {
         "phone": "ТЕЛЕФОН",
         "telegram": "TELEGRAM",
+        "vk": "VK",
+        "domain": "ДОМЕН",
         "email": "EMAIL",
         "vin": "VIN",
         "vehicle": "АВТО",
@@ -1350,7 +1496,7 @@ def absorb_response(resp: Any, out: dict, src: str):
                 out["databases"][bucket].append(items)
 
 
-async def run_search(q: str) -> dict:
+async def run_search(q: str, forced_qtype: str | None = None) -> dict:
     res_bb, res_argus = await asyncio.gather(
         query_blackbox(q, BLACKBOX_KEY),
         query_argus(q, ARGUS_KEY),
@@ -1358,7 +1504,7 @@ async def run_search(q: str) -> dict:
     )
 
     q_clean = q.strip()
-    q_type = detect_qtype(q_clean)
+    q_type = forced_qtype or detect_qtype(q_clean)
 
     data: dict[str, Any] = {
         "query": q_clean,
@@ -1646,7 +1792,7 @@ def build_text_report(data: dict) -> str:
         ]
     else:
         parts = [
-            f"🔎 <b>Запрос</b> · {html.escape(query or 'Не найдено')}\n"
+            f"🔎 <b>Запрос ({html.escape(qtype_title(qtype))})</b> · {html.escape(query or 'Не найдено')}\n"
             f"{sep}\n"
             f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
             f"📲 <b>Номер:</b> {html.escape(phone)}\n"
@@ -2423,6 +2569,51 @@ async def serve_web():
     await uvicorn.Server(cfg).serve()
 
 
+async def execute_search_flow(msg: Message, q: str, forced_qtype: str | None = None):
+    if not msg.from_user:
+        return
+    if check_banned(msg.from_user.id):
+        await msg.answer("⛔ Доступ ограничен.")
+        return
+    if not await require_sub_msg(msg):
+        return
+    if not spend_request(msg.from_user.id):
+        await msg.answer("⚠️ Закончились запросы.")
+        return
+
+    note = await msg.answer(
+        f"[Oasis Digital] Начался Поиск информации\n(Время поиска от 10-90 сек)\nЦель : <code>{html.escape(q)}</code>",
+        parse_mode="HTML",
+    )
+
+    try:
+        data = await run_search(q, forced_qtype=forced_qtype)
+        rid = uuid.uuid4().hex[:8]
+        store_report(rid, data)
+        markup = kb_result(rid, data)
+
+        body = build_text_report(data)
+        chunks = split_html_lines(body, limit=3800)
+        await safe_edit_or_send(
+            msg,
+            note,
+            chunks[0],
+            reply_markup=markup if len(chunks) == 1 else None,
+            edit_first=True,
+        )
+        for part in chunks[1:-1]:
+            await safe_edit_or_send(msg, note, part)
+        if len(chunks) > 1:
+            await safe_edit_or_send(msg, note, chunks[-1], reply_markup=markup)
+    except Exception as exc:
+        log.exception("Ошибка поиска '%s': %s", q, exc)
+        await note.edit_text(
+            f"❌ Ошибка при формировании отчета: <code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
+            reply_markup=kb_main(),
+        )
+
+
 @dp.callback_query(F.data == "check_sub")
 async def on_check_sub(cb: CallbackQuery, state: FSMContext):
     if not cb.from_user:
@@ -2450,6 +2641,76 @@ async def on_start(msg: Message, state: FSMContext):
         pass
     await asyncio.sleep(0.5)
     await msg.answer(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
+
+
+@dp.callback_query(F.data == "search_info")
+async def on_search_info(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
+    await state.clear()
+    await cb.message.edit_text(
+        "🔎 <b>Выберите тип поиска:</b>\n\n"
+        "• <b>VK</b> — профиль / ID / ссылка\n"
+        "• <b>@username</b> — никнейм\n"
+        "• <b>Domen</b> — домен / сайт\n"
+        "• <b>Phone</b> — номер телефона\n"
+        "• <b>ip</b> — IP-адрес\n"
+        "• <b>email</b> — электронная почта\n"
+        "• <b>tg id</b> — ID аккаунта Telegram",
+        parse_mode="HTML",
+        reply_markup=kb_search_types(),
+    )
+    await ack_cb(cb)
+
+
+@dp.callback_query(F.data.startswith("stype_"))
+async def on_select_search_type(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
+    mode_key = cb.data.replace("stype_", "", 1)
+    mode_info = SEARCH_MODES.get(mode_key)
+    if not mode_info:
+        return await ack_cb(cb, "Неизвестный тип", alert=True)
+
+    label, prompt_txt = mode_info
+    await state.set_state(States.search_typed)
+    await state.update_data(search_mode=mode_key)
+    await cb.message.edit_text(
+        f"🔎 <b>Поиск: {html.escape(label)}</b>\n\n{html.escape(prompt_txt)}",
+        parse_mode="HTML",
+        reply_markup=kb_back(),
+    )
+    await ack_cb(cb)
+
+
+@dp.message(States.search_typed)
+async def handle_typed_search(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    mode_key = data.get("search_mode")
+    await state.clear()
+    q = (msg.text or "").strip()
+    if not q:
+        return await msg.answer("❌ Пустой запрос.", reply_markup=kb_main())
+
+    forced_qt = None
+    if mode_key == "vk":
+        forced_qt = "vk"
+    elif mode_key == "username":
+        forced_qt = "telegram"
+        if not q.startswith("@") and not re.fullmatch(r"\d+", q):
+            q = "@" + q
+    elif mode_key == "domen":
+        forced_qt = "domain"
+    elif mode_key == "phone":
+        forced_qt = "phone"
+    elif mode_key == "ip":
+        forced_qt = "ip"
+    elif mode_key == "email":
+        forced_qt = "email"
+    elif mode_key == "tg_id":
+        forced_qt = "telegram"
+
+    await execute_search_flow(msg, q, forced_qtype=forced_qt)
 
 
 @dp.message(Command("newapi"))
@@ -2555,21 +2816,123 @@ async def on_adm_toggle_api(cb: CallbackQuery):
     await ack_cb(cb, status_msg)
 
 
+@dp.callback_query(F.data == "adm_toggle_sub")
+async def on_adm_toggle_sub(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    new_state = not is_sub_enabled()
+    set_sub_enabled(new_state)
+    msg_txt = "Обязательная подписка включена ✅" if new_state else "Обязательная подписка выключена ⛔"
+    await cb.message.edit_text(f"🛠️ <b>Админ-панель</b>\n\n{msg_txt}", parse_mode="HTML", reply_markup=kb_admin())
+    await ack_cb(cb, msg_txt)
+
+
+@dp.callback_query(F.data == "adm_add_sub")
+async def on_adm_add_sub(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    await cb.message.edit_text(
+        "➕ <b>Добавление канала в обязательную подписку</b>\n\n"
+        "Отправь строку в формате:\n"
+        "<code>ID_КАНАЛА | ССЫЛКА | НАЗВАНИЕ</code>\n\n"
+        "Пример:\n"
+        "<code>-1002233445566 | https://t.me/+InviteLink | Канал друга</code>",
+        parse_mode="HTML",
+        reply_markup=kb_back(),
+    )
+    await state.set_state(States.adm_add_sub)
+    await ack_cb(cb)
+
+
+@dp.message(States.adm_add_sub)
+async def handle_adm_add_sub(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    raw = (msg.text or "").strip()
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) < 2:
+        return await msg.answer(
+            "❌ Неверный формат. Нужно: <code>ID_КАНАЛА | ССЫЛКА | НАЗВАНИЕ</code>",
+            parse_mode="HTML",
+            reply_markup=kb_admin(),
+        )
+    try:
+        chat_id = int(parts[0])
+    except ValueError:
+        return await msg.answer("❌ ID канала должен быть числом (например -1001234567890).", reply_markup=kb_admin())
+
+    url = parts[1]
+    if not url.startswith(("https://t.me/", "http://t.me/", "https://telegram.me/")):
+        return await msg.answer("❌ Ссылка должна вести на Telegram (https://t.me/...).", reply_markup=kb_admin())
+
+    title = parts[2] if len(parts) >= 3 and parts[2] else "Обязательный канал"
+    add_required_channel(chat_id=chat_id, url=url, title=title)
+    await msg.answer(
+        f"✅ Канал добавлен:\n• Название: <b>{html.escape(title)}</b>\n• ID: <code>{chat_id}</code>\n• Ссылка: {html.escape(url)}",
+        parse_mode="HTML",
+        reply_markup=kb_admin(),
+    )
+
+
+@dp.callback_query(F.data == "adm_list_sub")
+async def on_adm_list_sub(cb: CallbackQuery):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    channels = list_required_channels()
+    state_txt = "ВКЛ ✅" if is_sub_enabled() else "ВЫКЛ ⛔"
+    if not channels:
+        txt = f"📋 <b>Каналы подписки</b> (ОП: <b>{state_txt}</b>)\n\nСписок пуст."
+    else:
+        lines = [f"📋 <b>Каналы подписки</b> (ОП: <b>{state_txt}</b>)\n"]
+        for ch in channels:
+            lines.append(
+                f"• <b>{html.escape(str(ch['title']))}</b>\n"
+                f"  ID: <code>{ch['chat_id']}</code> | {html.escape(str(ch['url']))}"
+            )
+        txt = "\n".join(lines)
+    await cb.message.edit_text(txt[:4000], parse_mode="HTML", reply_markup=kb_admin())
+    await ack_cb(cb)
+
+
+@dp.callback_query(F.data == "adm_del_sub")
+async def on_adm_del_sub(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id != MAIN_ADMIN_ID:
+        return await ack_cb(cb, "Нет доступа", alert=True)
+    channels = list_required_channels()
+    hint = "\n".join(f"• <code>{c['chat_id']}</code> — {html.escape(str(c['title']))}" for c in channels) or "Список пуст"
+    await cb.message.edit_text(
+        f"🗑️ <b>Удаление канала из подписки</b>\n\nОтправь <code>ID_КАНАЛА</code> для удаления:\n\n{hint}",
+        parse_mode="HTML",
+        reply_markup=kb_back(),
+    )
+    await state.set_state(States.adm_del_sub)
+    await ack_cb(cb)
+
+
+@dp.message(States.adm_del_sub)
+async def handle_adm_del_sub(msg: Message, state: FSMContext):
+    if msg.from_user.id != MAIN_ADMIN_ID:
+        return
+    await state.clear()
+    raw = (msg.text or "").strip()
+    try:
+        chat_id = int(raw)
+    except ValueError:
+        return await msg.answer("❌ Введи числовой ID канала.", reply_markup=kb_admin())
+
+    if delete_required_channel(chat_id):
+        await msg.answer(f"🗑️ Канал <code>{chat_id}</code> удалён из обязательной подписки.", parse_mode="HTML", reply_markup=kb_admin())
+    else:
+        await msg.answer("⚠️ Канал с таким ID не найден в списке.", reply_markup=kb_admin())
+
+
 @dp.callback_query(F.data == "back_to_start")
 async def on_back(cb: CallbackQuery, state: FSMContext):
     if not await require_sub_cb(cb):
         return
     await state.clear()
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
-    await ack_cb(cb)
-
-
-@dp.callback_query(F.data == "search_info")
-async def on_search_info(cb: CallbackQuery, state: FSMContext):
-    if not await require_sub_cb(cb):
-        return
-    await state.clear()
-    await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=kb_back())
     await ack_cb(cb)
 
 
@@ -2587,8 +2950,8 @@ async def on_profile(cb: CallbackQuery):
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛡️ Скрытие данных ($5)", callback_data="hide_data_menu")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_start")],
+            [red_btn("Скрытие данных ($5)", callback_data="hide_data_menu")],
+            [red_btn("Назад", callback_data="back_to_start")],
         ]
     )
     await cb.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
@@ -2601,8 +2964,8 @@ async def on_hide_menu(cb: CallbackQuery):
         return
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="profile")],
+            [red_btn("Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
+            [red_btn("Назад", callback_data="profile")],
         ]
     )
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
@@ -2617,8 +2980,8 @@ async def on_pay_ton(cb: CallbackQuery):
     url = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Оплатить в 1 клик", url=url)],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="hide_data_menu")],
+            [red_btn("Оплатить в 1 клик", url=url)],
+            [red_btn("Назад", callback_data="hide_data_menu")],
         ]
     )
     await cb.message.edit_text(
@@ -2960,49 +3323,10 @@ async def on_export_json(cb: CallbackQuery):
 async def on_search(msg: Message, state: FSMContext):
     if msg.from_user.is_bot or await state.get_state() is not None:
         return
-    if check_banned(msg.from_user.id):
-        return await msg.answer("⛔ Доступ ограничен.")
-    if not await require_sub_msg(msg):
-        return
-
     q = (msg.text or "").strip()
     if not q:
         return
-
-    if not spend_request(msg.from_user.id):
-        return await msg.answer("⚠️ Закончились запросы.")
-
-    note = await msg.answer(
-        f"[Oasis Digital] Начался Поиск информации\n(Время поиска от 10-90 сек)\nЦель : <code>{html.escape(q)}</code>",
-        parse_mode="HTML",
-    )
-
-    try:
-        data = await run_search(q)
-        rid = uuid.uuid4().hex[:8]
-        store_report(rid, data)
-        markup = kb_result(rid, data)
-
-        body = build_text_report(data)
-        chunks = split_html_lines(body, limit=3800)
-        await safe_edit_or_send(
-            msg,
-            note,
-            chunks[0],
-            reply_markup=markup if len(chunks) == 1 else None,
-            edit_first=True,
-        )
-        for part in chunks[1:-1]:
-            await safe_edit_or_send(msg, note, part)
-        if len(chunks) > 1:
-            await safe_edit_or_send(msg, note, chunks[-1], reply_markup=markup)
-    except Exception as exc:
-        log.exception("Ошибка поиска '%s': %s", q, exc)
-        await note.edit_text(
-            f"❌ Ошибка при формировании отчета: <code>{html.escape(str(exc))}</code>",
-            parse_mode="HTML",
-            reply_markup=kb_main(),
-        )
+    await execute_search_flow(msg, q)
 
 
 async def main():
