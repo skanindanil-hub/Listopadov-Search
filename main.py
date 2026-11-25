@@ -1,3 +1,4 @@
+# language: Python, file: oasis_digital.py, runtime: Python 3.11+, target: aiogram v3 + FastAPI + SQLite
 import asyncio
 import base64
 import html
@@ -18,6 +19,7 @@ from typing import Any
 import aiohttp
 import uvicorn
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -42,7 +44,7 @@ MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", "8394631079"))
 ADMIN_USERNAME = "@anodoxx"
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1004311841781"))
-CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/+BqWOF7S3AqQ1YzI6")
+CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/+BqWOF7S3AqQ1YzI6").strip()
 
 BLACKBOX_KEY = os.getenv("BLACKBOX_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y").strip()
 ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE").strip()
@@ -222,6 +224,64 @@ def db_init():
 db_init()
 
 
+def kb_sub_required() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔒 Подписаться на канал", url=CHANNEL_URL)],
+            [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub")],
+        ]
+    )
+
+
+async def is_user_subscribed(user_id: int) -> bool:
+    if user_id == MAIN_ADMIN_ID:
+        return True
+    if not CHANNEL_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in {
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        }
+    except Exception as exc:
+        log.warning("Ошибка проверки подписки user_id=%s chat_id=%s: %s", user_id, CHANNEL_ID, exc)
+        return False
+
+
+async def require_sub_msg(msg: Message) -> bool:
+    if not msg.from_user:
+        return False
+    if await is_user_subscribed(msg.from_user.id):
+        return True
+    await msg.answer(
+        "🔒 <b>Доступ закрыт без подписки</b>\n\n"
+        "Чтобы пользоваться ботом, подпишись на закрытый канал по кнопке ниже и нажми <b>«Я подписался»</b>.",
+        parse_mode="HTML",
+        reply_markup=kb_sub_required(),
+    )
+    return False
+
+
+async def require_sub_cb(cb: CallbackQuery) -> bool:
+    if not cb.from_user:
+        return False
+    if await is_user_subscribed(cb.from_user.id):
+        return True
+    await ack_cb(cb, "Сначала подпишись на канал!", alert=True)
+    try:
+        await cb.message.edit_text(
+            "🔒 <b>Доступ закрыт без подписки</b>\n\n"
+            "Чтобы пользоваться ботом, подпишись на закрытый канал по кнопке ниже и нажми <b>«Я подписался»</b>.",
+            parse_mode="HTML",
+            reply_markup=kb_sub_required(),
+        )
+    except Exception:
+        pass
+    return False
+
+
 def generate_oasis_key() -> str:
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
     body = "".join(secrets.choice(alphabet) for _ in range(38))
@@ -298,7 +358,7 @@ def format_api_key_card(item: dict) -> str:
         f"<code>{key}</code>\n\n"
         f"⏳ <b>Срок действия:</b> Бессрочно (до {exp})\n"
         f"📦 <b>Лимит запросов:</b> {quota_txt}\n"
-        "⚡️ <b>Доступ:</b> REST API\n"
+        "⚡️ <b>Доступ:</b> Full Data REST API (без фильтрации полей)\n"
         f"🚀 <b>Лимит скорости:</b> {rpm} запросов в минуту\n"
         f"🌐 <b>Домен API:</b> {domain}\n\n"
         "Пример запроса cURL:\n"
@@ -433,6 +493,12 @@ def pack_report_token(data: dict) -> str:
         "fio": data.get("fio") or "Не найдено",
         "dob": data.get("dob") or "Нет",
         "age": data.get("age") or "Не найдено",
+        "inn": data.get("inn") or "Нет",
+        "passport": data.get("passport") or "Нет",
+        "snils": data.get("snils") or "Нет",
+        "addr": (data.get("addresses") or [])[:10],
+        "veh": (data.get("vehicles") or [])[:10],
+        "soc": (data.get("social_links") or [])[:10],
         "ph": data.get("phone_number") or "Не найдено",
         "op": data.get("operator") or "Нет",
         "reg": data.get("region") or "Нет",
@@ -441,7 +507,7 @@ def pack_report_token(data: dict) -> str:
         "tgu": tg.get("username") or "",
         "pb": (data.get("phonebooks") or [])[:15],
         "nh": (data.get("name_history") or [])[:15],
-        "ex": (data.get("extra_kv") or [])[:20],
+        "ex": (data.get("extra_kv") or [])[:30],
     }
     raw_bytes = json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     compressed = zlib.compress(raw_bytes, level=9)
@@ -468,6 +534,12 @@ def unpack_report_token(token: str) -> dict | None:
             "fio": c.get("fio") or "Не найдено",
             "dob": c.get("dob") or "Нет",
             "age": c.get("age") or "Не найдено",
+            "inn": c.get("inn") or "Нет",
+            "passport": c.get("passport") or "Нет",
+            "snils": c.get("snils") or "Нет",
+            "addresses": c.get("addr") or [],
+            "vehicles": c.get("veh") or [],
+            "social_links": c.get("soc") or [],
             "phone_number": c.get("ph") or "Не найдено",
             "operator": c.get("op") or "Нет",
             "region": c.get("reg") or "Нет",
@@ -635,13 +707,43 @@ def kb_admin():
     )
 
 
-def is_masked_value(val: str) -> bool:
+JUNK_VALUES = {
+    "",
+    "-",
+    "--",
+    "---",
+    ".",
+    "..",
+    "none",
+    "null",
+    "nan",
+    "n/a",
+    "na",
+    "undefined",
+    "false",
+    "true",
+    "не найдено",
+    "неизвестно",
+    "unknown",
+    "нет данных",
+    "отсутствует",
+    "скрыто",
+    "hidden",
+    "private",
+    "0",
+}
+
+
+def is_junk_value(val: str) -> bool:
     s = (val or "").strip()
-    if not s:
+    low = s.lower()
+    if low in JUNK_VALUES:
         return True
-    if "*" in s or "•" in s:
+    if "*" in s or "•" in s or "█" in s or "■" in s:
         return True
-    if re.fullmatch(r"[*•_\-?]+", s):
+    if re.fullmatch(r"[*•_\-?#.]+", s):
+        return True
+    if re.fullmatch(r"(?:не\s+найдено|нет\s+данных|неизвестно|unknown|null|none)", low):
         return True
     return False
 
@@ -861,18 +963,110 @@ FIO_KEYS = {
     "holder",
     "first_name",
     "last_name",
+    "middle_name",
+    "patronymic",
     "фио",
     "имя",
     "фамилия",
     "отчество",
     "владелец",
 }
-DOB_KEYS = {"dob", "birth_date", "birthdate", "birthday", "date_of_birth", "bday", "дата_рождения", "дата рождения"}
+DOB_KEYS = {
+    "dob",
+    "birth_date",
+    "birthdate",
+    "birthday",
+    "date_of_birth",
+    "bday",
+    "born",
+    "дата_рождения",
+    "дата рождения",
+    "др",
+}
 AGE_KEYS = {"age", "возраст"}
+INN_KEYS = {"inn", "tin", "tax_id", "инн", "инн_фл", "инн_юл"}
+PASSPORT_KEYS = {
+    "passport",
+    "passport_number",
+    "passport_series",
+    "pass_num",
+    "pass_ser",
+    "doc_number",
+    "document",
+    "паспорт",
+    "серия_паспорта",
+    "номер_паспорта",
+    "паспортные_данные",
+}
 SNILS_KEYS = {"snils", "снилс"}
+ADDRESS_KEYS = {
+    "address",
+    "addr",
+    "registration_address",
+    "reg_address",
+    "living_address",
+    "fact_address",
+    "home_address",
+    "street",
+    "city",
+    "region",
+    "area",
+    "location",
+    "адрес",
+    "прописка",
+    "адрес_регистрации",
+    "фактический_адрес",
+    "город",
+    "регион",
+}
+VEHICLE_KEYS = {
+    "car",
+    "cars",
+    "vehicle",
+    "vehicles",
+    "auto",
+    "vin",
+    "plate",
+    "gosnomer",
+    "license_plate",
+    "sts",
+    "pts",
+    "авто",
+    "автомобиль",
+    "госномер",
+    "вин",
+}
+SOCIAL_KEYS = {
+    "vk",
+    "vk_id",
+    "vkontakte",
+    "ok",
+    "odnoklassniki",
+    "instagram",
+    "ig",
+    "facebook",
+    "fb",
+    "tiktok",
+    "github",
+    "linkedin",
+    "discord",
+    "skype",
+    "whatsapp",
+    "viber",
+    "url",
+    "profile_url",
+    "link",
+    "links",
+    "socials",
+    "social",
+    "accounts",
+    "соцсети",
+    "ссылка",
+    "ссылки",
+    "профиль",
+}
 PHONE_KEYS = {"phone", "phone_number", "mobile", "msisdn", "number", "tel", "phones", "телефон", "номер"}
 OPERATOR_KEYS = {"operator", "carrier", "provider", "оператор"}
-REGION_KEYS = {"region", "city", "area", "location", "address", "регион", "город", "адрес"}
 REG_KEYS = {
     "reg_date",
     "registration",
@@ -903,6 +1097,9 @@ SKIP_KEYS = {
     "total",
     "elapsed",
     "time",
+    "request_id",
+    "trace_id",
+    "version",
 }
 
 
@@ -910,7 +1107,7 @@ def push_unique(target: list[str], val: str, allow_masked: bool = False):
     s = str(val).strip()
     if not s:
         return
-    if not allow_masked and is_masked_value(s):
+    if not allow_masked and is_junk_value(s):
         return
     if s not in target:
         target.append(s)
@@ -928,7 +1125,22 @@ def walk_tree(node: Any, path: str = ""):
             yield from walk_tree(item, nxt)
 
 
+def extract_regex_entities(text: str, out: dict):
+    if not text or is_junk_value(text):
+        return
+    for m in re.findall(r"\b\d{10}(?:\d{2})?\b", text):
+        if not re.fullmatch(r"\d{8}", m):
+            push_unique(out["inn_list"], m)
+    for m in re.findall(r"\b\d{4}\s?\d{6}\b", text):
+        push_unique(out["passport_list"], re.sub(r"\s+", " ", m).strip())
+    for m in re.findall(r"\b\d{3}-\d{3}-\d{3}[\s-]\d{2}\b", text):
+        push_unique(out["snils_list"], m)
+    for m in re.findall(r"https?://[^\s<>\"']+", text):
+        push_unique(out["social_links"], m.rstrip(".,);]"))
+
+
 def parse_text_block(text: str, out: dict):
+    extract_regex_entities(text, out)
     for raw in text.splitlines():
         clean = re.sub(r"<[^>]+>", "", raw).strip(" -*|\t")
         if ":" not in clean:
@@ -936,8 +1148,10 @@ def parse_text_block(text: str, out: dict):
         k_part, v_part = clean.split(":", 1)
         lk = k_part.strip().lower()
         val = v_part.strip()
-        if not val or val.lower() in ("none", "null", "не найдено", "-") or is_masked_value(val):
+        if is_junk_value(val):
             continue
+
+        extract_regex_entities(val, out)
 
         if any(w in lk for w in ("фио", "fio", "full_name", "имя", "владелец")):
             out["fio_set"].add(val)
@@ -945,6 +1159,20 @@ def parse_text_block(text: str, out: dict):
             out["dob_set"].add(val)
         elif any(w in lk for w in ("возраст", "age")):
             out["age"] = val
+        elif any(w in lk for w in ("инн", "inn", "tin")):
+            push_unique(out["inn_list"], val)
+        elif any(w in lk for w in ("паспорт", "passport", "серия", "document")):
+            push_unique(out["passport_list"], val)
+        elif any(w in lk for w in ("снилс", "snils")):
+            push_unique(out["snils_list"], val)
+        elif any(w in lk for w in ("адрес", "прописк", "address", "addr", "город", "регион")):
+            push_unique(out["addresses"], val)
+            if lk in ("регион", "region", "город", "city") and out["region"] == "Нет":
+                out["region"] = val
+        elif any(w in lk for w in ("авто", "vin", "госномер", "vehicle", "car", "стс", "птс")):
+            push_unique(out["vehicles"], val)
+        elif any(w in lk for w in ("vk", "inst", "соц", "профиль", "ссылк", "url", "link", "account")):
+            push_unique(out["social_links"], val)
         elif any(w in lk for w in ("телефон", "phone", "номер", "msisdn")):
             digits = re.sub(r"\D", "", val)
             if 7 <= len(digits) <= 15:
@@ -954,9 +1182,6 @@ def parse_text_block(text: str, out: dict):
         elif any(w in lk for w in ("оператор", "operator")):
             if out["operator"] == "Нет":
                 out["operator"] = val
-        elif any(w in lk for w in ("регион", "город", "region", "city", "адрес")):
-            if out["region"] == "Нет":
-                out["region"] = val
         elif any(w in lk for w in ("регистрац", "created", "reg_date", "first_seen")):
             out["reg_date"] = val
         elif lk in ("id", "telegram id", "tg id", "user_id", "tg_id"):
@@ -970,7 +1195,7 @@ def parse_text_block(text: str, out: dict):
         elif "@" in val and "." in val.split("@")[-1]:
             out["emails_set"].add(val)
 
-        if len(k_part.strip()) <= 40 and len(val) <= 200:
+        if len(k_part.strip()) <= 50 and len(val) <= 300:
             out["extra_kv"].append((k_part.strip(), val))
 
 
@@ -982,32 +1207,38 @@ def absorb_response(resp: Any, out: dict, src: str):
         items: dict[str, str] = {}
         fname = ""
         lname = ""
+        mname = ""
 
         for k, v in obj.items():
             lk = str(k).lower().strip()
             if lk in SKIP_KEYS:
                 continue
 
-            if isinstance(v, str) and ("\n" in v or ":" in v) and lk in {
+            if isinstance(v, str) and ("\n" in v or ":" in v or "http" in v) and lk in {
                 "text",
                 "raw_text",
                 "report",
                 "content",
                 "output",
                 "answer",
+                "description",
+                "bio",
+                "about",
             }:
                 parse_text_block(v, out)
-                continue
 
             if isinstance(v, list):
                 for el in v:
-                    if el is None or isinstance(el, (dict, list)):
+                    if el is None:
+                        continue
+                    if isinstance(el, (dict, list)):
+                        nested_txt = json.dumps(el, ensure_ascii=False)
+                        extract_regex_entities(nested_txt, out)
                         continue
                     sel = str(el).strip()
-                    if not sel or sel.lower() in ("none", "null", "nan", "не найдено", "unknown", "-"):
+                    if is_junk_value(sel):
                         continue
-                    if is_masked_value(sel):
-                        continue
+                    extract_regex_entities(sel, out)
                     if lk in PHONE_KEYS:
                         digits = re.sub(r"\D", "", sel)
                         if 7 <= len(digits) <= 15:
@@ -1016,6 +1247,18 @@ def absorb_response(resp: Any, out: dict, src: str):
                                 out["phone_number"] = sel
                     elif lk in EMAIL_KEYS and "@" in sel:
                         out["emails_set"].add(sel)
+                    elif lk in INN_KEYS:
+                        push_unique(out["inn_list"], sel)
+                    elif lk in PASSPORT_KEYS:
+                        push_unique(out["passport_list"], sel)
+                    elif lk in SNILS_KEYS:
+                        push_unique(out["snils_list"], sel)
+                    elif lk in ADDRESS_KEYS:
+                        push_unique(out["addresses"], sel)
+                    elif lk in VEHICLE_KEYS:
+                        push_unique(out["vehicles"], sel)
+                    elif lk in SOCIAL_KEYS or sel.startswith(("http://", "https://")):
+                        push_unique(out["social_links"], sel)
                     elif any(tok in lk for tok in ("history", "name_history", "changes", "nicknames", "usernames")):
                         push_unique(out["name_history"], sel)
                     elif any(tok in lk for tok in ("phonebook", "contacts", "tags", "saved_as", "book")):
@@ -1028,17 +1271,18 @@ def absorb_response(resp: Any, out: dict, src: str):
                 continue
 
             sval = str(v).strip()
-            if not sval or sval.lower() in ("none", "null", "nan", "не найдено", "unknown", "-"):
-                continue
-            if is_masked_value(sval):
+            if is_junk_value(sval):
                 continue
 
+            extract_regex_entities(sval, out)
             items[str(k)] = sval
 
             if lk in {"first_name", "имя"}:
                 fname = sval
             elif lk in {"last_name", "фамилия"}:
                 lname = sval
+            elif lk in {"middle_name", "patronymic", "отчество"}:
+                mname = sval
 
             if lk in FIO_KEYS and len(sval) >= 2 and not re.fullmatch(r"\+?[\d\s\-()]+", sval):
                 out["fio_set"].add(sval)
@@ -1046,8 +1290,21 @@ def absorb_response(resp: Any, out: dict, src: str):
                 out["dob_set"].add(sval)
             elif lk in AGE_KEYS and out["age"] == "Не найдено":
                 out["age"] = sval
+            elif lk in INN_KEYS:
+                push_unique(out["inn_list"], sval)
+            elif lk in PASSPORT_KEYS:
+                push_unique(out["passport_list"], sval)
             elif lk in SNILS_KEYS:
+                push_unique(out["snils_list"], sval)
                 out["snils_set"].add(sval)
+            elif lk in ADDRESS_KEYS:
+                push_unique(out["addresses"], sval)
+                if lk in {"region", "city", "регион", "город"} and out["region"] == "Нет":
+                    out["region"] = sval
+            elif lk in VEHICLE_KEYS:
+                push_unique(out["vehicles"], sval)
+            elif lk in SOCIAL_KEYS or sval.startswith(("http://", "https://")):
+                push_unique(out["social_links"], sval)
             elif lk in PHONE_KEYS:
                 digits = re.sub(r"\D", "", sval)
                 if 7 <= len(digits) <= 15:
@@ -1056,8 +1313,6 @@ def absorb_response(resp: Any, out: dict, src: str):
                         out["phone_number"] = sval
             elif lk in OPERATOR_KEYS and out["operator"] == "Нет":
                 out["operator"] = sval
-            elif lk in REGION_KEYS and out["region"] == "Нет":
-                out["region"] = sval
             elif lk in REG_KEYS:
                 if out["reg_date"] == "Не найдено" or "tg" in lk or "reg" in lk:
                     out["reg_date"] = sval
@@ -1083,9 +1338,9 @@ def absorb_response(resp: Any, out: dict, src: str):
             else:
                 out["extra_kv"].append((str(k), sval))
 
-        if fname or lname:
-            full = f"{lname} {fname}".strip()
-            if full and not is_masked_value(full):
+        if fname or lname or mname:
+            full = " ".join(p for p in (lname, fname, mname) if p).strip()
+            if full and not is_junk_value(full):
                 out["fio_set"].add(full)
 
         if items and path:
@@ -1115,10 +1370,18 @@ async def run_search(q: str) -> dict:
         "phones_set": set(),
         "emails_set": set(),
         "usernames_set": [],
+        "inn_list": [],
+        "passport_list": [],
+        "snils_list": [],
+        "addresses": [],
+        "vehicles": [],
+        "social_links": [],
         "extra_kv": [],
         "fio": "Не найдено",
         "dob": "Нет",
         "age": "Не найдено",
+        "inn": "Нет",
+        "passport": "Нет",
         "snils": "Нет",
         "phone_number": "Не найдено",
         "operator": "Нет",
@@ -1155,23 +1418,59 @@ async def run_search(q: str) -> dict:
         if est:
             data["reg_date"] = est
 
-    clean_fios = [x for x in sorted(data["fio_set"]) if not is_masked_value(x)]
+    clean_fios = [x for x in sorted(data["fio_set"]) if not is_junk_value(x)]
+    clean_dobs = [x for x in sorted(data["dob_set"]) if not is_junk_value(x)]
+    clean_snils = [x for x in dict.fromkeys(list(data["snils_list"]) + sorted(data["snils_set"])) if not is_junk_value(x)]
+    clean_inn = [x for x in dict.fromkeys(data["inn_list"]) if not is_junk_value(x)]
+    clean_pass = [x for x in dict.fromkeys(data["passport_list"]) if not is_junk_value(x)]
+    clean_addr = [x for x in dict.fromkeys(data["addresses"]) if not is_junk_value(x)]
+    clean_veh = [x for x in dict.fromkeys(data["vehicles"]) if not is_junk_value(x)]
+    clean_soc = [x for x in dict.fromkeys(data["social_links"]) if not is_junk_value(x)]
+    clean_phones = [x for x in sorted(data["phones_set"]) if not is_junk_value(x)]
+    clean_emails = [x for x in sorted(data["emails_set"]) if not is_junk_value(x)]
+
+    data["fio_set"] = set(clean_fios)
+    data["dob_set"] = set(clean_dobs)
+    data["snils_set"] = set(clean_snils)
+    data["phones_set"] = set(clean_phones)
+    data["emails_set"] = set(clean_emails)
+    data["inn_list"] = clean_inn
+    data["passport_list"] = clean_pass
+    data["snils_list"] = clean_snils
+    data["addresses"] = clean_addr
+    data["vehicles"] = clean_veh
+    data["social_links"] = clean_soc
+
     data["fio"] = ", ".join(clean_fios) if clean_fios else "Не найдено"
-    data["dob"] = ", ".join(sorted(data["dob_set"])) if data["dob_set"] else "Нет"
-    data["snils"] = ", ".join(sorted(data["snils_set"])) if data["snils_set"] else "Нет"
+    data["dob"] = ", ".join(clean_dobs) if clean_dobs else "Нет"
+    data["inn"] = ", ".join(clean_inn) if clean_inn else "Нет"
+    data["passport"] = ", ".join(clean_pass) if clean_pass else "Нет"
+    data["snils"] = ", ".join(clean_snils) if clean_snils else "Нет"
 
     if data["age"] == "Не найдено" and data["dob"] != "Нет":
         age_calc = calc_age(data["dob"])
         if age_calc:
             data["age"] = age_calc
 
-    if data["phone_number"] == "Не найдено" and data["phones_set"]:
-        data["phone_number"] = sorted(data["phones_set"])[0]
+    if data["phone_number"] == "Не найдено" and clean_phones:
+        data["phone_number"] = clean_phones[0]
 
     total_recs = sum(len(v) for v in data["databases"].values() if isinstance(v, list))
     data["sources_count"] = len(data["databases"])
     if data["views_count"] is None:
-        data["views_count"] = max(total_recs, len(data["extra_kv"]))
+        data["views_count"] = max(
+            total_recs,
+            len(clean_fios)
+            + len(clean_phones)
+            + len(clean_emails)
+            + len(clean_inn)
+            + len(clean_pass)
+            + len(clean_snils)
+            + len(clean_addr)
+            + len(clean_veh)
+            + len(clean_soc)
+            + len(data["extra_kv"]),
+        )
 
     return to_json_safe(data)
 
@@ -1183,7 +1482,13 @@ def has_findings(data: dict) -> bool:
         tg.get("id")
         or tg.get("username")
         or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
-        or (fio_val and fio_val not in ("Не найдено", "НЕ НАЙДЕНО") and not is_masked_value(fio_val))
+        or (fio_val and fio_val not in ("Не найдено", "НЕ НАЙДЕНО") and not is_junk_value(fio_val))
+        or bool(data.get("inn_list"))
+        or bool(data.get("passport_list"))
+        or bool(data.get("snils_list"))
+        or bool(data.get("addresses"))
+        or bool(data.get("vehicles"))
+        or bool(data.get("social_links"))
         or bool(data.get("phonebooks"))
         or bool(data.get("name_history"))
         or bool(data.get("databases"))
@@ -1202,24 +1507,33 @@ def build_text_report(data: dict) -> str:
     tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
 
     raw_fio = str(data.get("fio") or "Не найдено").strip()
-    fio = "Не найдено" if is_masked_value(raw_fio) else raw_fio
+    fio = "Не найдено" if is_junk_value(raw_fio) else raw_fio
     dob = str(data.get("dob") or "Нет").strip()
     age = str(data.get("age") or "Не найдено").strip()
+    inn = str(data.get("inn") or "Нет").strip()
+    passport = str(data.get("passport") or "Нет").strip()
+    snils = str(data.get("snils") or "Нет").strip()
     phone = str(data.get("phone_number") or "Не найдено").strip()
     operator = str(data.get("operator") or "Нет").strip()
     region = str(data.get("region") or "Нет").strip()
     reg_date = str(data.get("reg_date") or "Не найдено").strip()
 
-    pbooks = [x for x in (data.get("phonebooks") or []) if not is_masked_value(str(x))]
+    phones_all = [str(x).strip() for x in (data.get("phones_set") or []) if not is_junk_value(str(x))]
+    emails_all = [str(x).strip() for x in (data.get("emails_set") or []) if not is_junk_value(str(x))]
+    addrs_all = [str(x).strip() for x in (data.get("addresses") or []) if not is_junk_value(str(x))]
+    vehs_all = [str(x).strip() for x in (data.get("vehicles") or []) if not is_junk_value(str(x))]
+    socs_all = [str(x).strip() for x in (data.get("social_links") or []) if not is_junk_value(str(x))]
+
+    pbooks = [x for x in (data.get("phonebooks") or []) if not is_junk_value(str(x))]
     pbooks_txt = ", ".join(str(x) for x in pbooks) if pbooks else "Не найдено"
 
-    hist = [x for x in (data.get("name_history") or []) if not is_masked_value(str(x))]
+    hist = [x for x in (data.get("name_history") or []) if not is_junk_value(str(x))]
     hist_lines = [f"📝 <b>История изменений ({len(hist)}):</b>"]
     if hist:
-        for item in hist[:12]:
+        for item in hist[:15]:
             hist_lines.append(f"• {html.escape(str(item))}")
-        if len(hist) > 12:
-            hist_lines.append(f"• ... еще {len(hist) - 12}")
+        if len(hist) > 15:
+            hist_lines.append(f"• ... еще {len(hist) - 15}")
     else:
         hist_lines.append("• Не найдено")
 
@@ -1229,14 +1543,14 @@ def build_text_report(data: dict) -> str:
         if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
         k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
-        if is_masked_value(v_s):
+        if is_junk_value(v_s):
             continue
         sig = f"{k_s.lower()}:{v_s.lower()}"
         if sig in seen:
             continue
         seen.add(sig)
         extra_lines.append(f"• {html.escape(k_s)}: <code>{html.escape(v_s)}</code>")
-        if len(extra_lines) >= 12:
+        if len(extra_lines) >= 20:
             break
 
     views = data.get("views_count")
@@ -1244,18 +1558,26 @@ def build_text_report(data: dict) -> str:
         views = sum(len(v) for v in (data.get("databases") or {}).values() if isinstance(v, list))
 
     sep = "━━━━━━━━━━━━━━━━━━━━"
+    dob_txt = f"{dob} ({age} лет)" if age != "Не найдено" else dob
+
+    docs_block = (
+        f"🪪 <b>Документы и идентификаторы:</b>\n"
+        f"• ИНН: <code>{html.escape(inn)}</code>\n"
+        f"• Паспорт: <code>{html.escape(passport)}</code>\n"
+        f"• СНИЛС: <code>{html.escape(snils)}</code>"
+    )
 
     if qtype == "phone":
         digits = re.sub(r"\D", "", query)
         shown_ph = phone if phone != "Не найдено" else (digits or query or "Не найдено")
         loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
-        dob_txt = f"{dob} ({age} лет)" if age != "Не найдено" else dob
         parts = [
             f"📲 <b>Номер</b> · <code>{html.escape(str(shown_ph))}</code>\n"
             f"{sep}\n"
             f"📡 <b>Оператор / Регион:</b> {html.escape(loc)}\n"
             f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
             f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
+            docs_block,
             f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
@@ -1272,6 +1594,7 @@ def build_text_report(data: dict) -> str:
             sep,
             f"🆔 <b>ID:</b> <code>{html.escape(shown_id)}</code>",
             f"🕵️ <b>Имя / ФИО:</b> {html.escape(fio)}",
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
             f"📲 <b>Номер:</b> {html.escape(phone)}",
             f"🗓️ <b>Регистрация:</b> {html.escape(reg_date)}",
         ]
@@ -1279,10 +1602,11 @@ def build_text_report(data: dict) -> str:
             tg_lines.append(f"🌐 <b>DC:</b> {html.escape(str(tg['dc']))}")
         if tg.get("premium"):
             tg_lines.append(f"⭐ <b>Premium:</b> {html.escape(str(tg['premium']))}")
-        if tg.get("bio") and not is_masked_value(str(tg["bio"])):
+        if tg.get("bio") and not is_junk_value(str(tg["bio"])):
             tg_lines.append(f"ℹ️ <b>О себе:</b> {html.escape(str(tg['bio']))}")
         parts = [
             "\n".join(tg_lines),
+            docs_block,
             f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
@@ -1292,7 +1616,8 @@ def build_text_report(data: dict) -> str:
             f"{sep}\n"
             f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
             f"📲 <b>Номер:</b> {html.escape(phone)}\n"
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob)}",
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
+            docs_block,
             f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
@@ -1305,6 +1630,7 @@ def build_text_report(data: dict) -> str:
             f"🕵️ <b>Владелец / ФИО:</b> {html.escape(fio)}\n"
             f"📲 <b>Номер:</b> {html.escape(phone)}\n"
             f"📍 <b>Регион:</b> {html.escape(region)}",
+            docs_block,
             "\n".join(hist_lines),
         ]
     elif qtype == "ip":
@@ -1315,6 +1641,7 @@ def build_text_report(data: dict) -> str:
             f"📡 <b>Провайдер / Регион:</b> {html.escape(loc)}\n"
             f"🕵️ <b>ФИО / Владелец:</b> {html.escape(fio)}\n"
             f"📲 <b>Контакты:</b> {html.escape(phone)}",
+            docs_block,
             "\n".join(hist_lines),
         ]
     else:
@@ -1323,11 +1650,22 @@ def build_text_report(data: dict) -> str:
             f"{sep}\n"
             f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
             f"📲 <b>Номер:</b> {html.escape(phone)}\n"
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob)}",
+            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
+            docs_block,
             f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
             "\n".join(hist_lines),
         ]
 
+    if len(phones_all) > 1:
+        parts.append("📞 <b>Все телефоны:</b>\n" + "\n".join(f"• <code>{html.escape(p)}</code>" for p in phones_all[:15]))
+    if emails_all:
+        parts.append("✉️ <b>Emails:</b>\n" + "\n".join(f"• <code>{html.escape(e)}</code>" for e in emails_all[:15]))
+    if addrs_all:
+        parts.append("🏠 <b>Адреса:</b>\n" + "\n".join(f"• {html.escape(a)}" for a in addrs_all[:10]))
+    if vehs_all:
+        parts.append("🚗 <b>Транспорт / VIN:</b>\n" + "\n".join(f"• <code>{html.escape(v)}</code>" for v in vehs_all[:10]))
+    if socs_all:
+        parts.append("🔗 <b>Соцсети и ссылки:</b>\n" + "\n".join(f"• {html.escape(s)}" for s in socs_all[:12]))
     if extra_lines:
         parts.append("🧩 <b>Дополнительные поля:</b>\n" + "\n".join(extra_lines))
 
@@ -1352,18 +1690,18 @@ def make_local_analysis(data: dict) -> str:
 
     phone = str(data.get("phone_number") or "").strip()
     raw_fio = str(data.get("fio") or "").strip()
-    fio = "" if is_masked_value(raw_fio) else raw_fio
+    fio = "" if is_junk_value(raw_fio) else raw_fio
     reg_date = str(data.get("reg_date") or "").strip()
     region = str(data.get("region") or "").strip()
     operator = str(data.get("operator") or "").strip()
-    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip() and not is_masked_value(str(x))]
-    hist = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip() and not is_masked_value(str(x))]
+    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip() and not is_junk_value(str(x))]
+    hist = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip() and not is_junk_value(str(x))]
     dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
 
     unames: list[str] = []
     seen_u: set[str] = set()
     for cand in [tg_uname] + list(data.get("usernames_set") or []):
-        if cand and not is_masked_value(cand) and cand.lower() not in seen_u:
+        if cand and not is_junk_value(cand) and cand.lower() not in seen_u:
             seen_u.add(cand.lower())
             unames.append(cand)
     for h in hist:
@@ -1382,6 +1720,12 @@ def make_local_analysis(data: dict) -> str:
         facts.append(f"Телефон: {phone}" + (f" ({loc})" if loc else ""))
     if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
         facts.append(f"ФИО/Имя: {fio}")
+    if data.get("inn") and data.get("inn") != "Нет":
+        facts.append(f"ИНН: {data['inn']}")
+    if data.get("passport") and data.get("passport") != "Нет":
+        facts.append(f"Паспорт: {data['passport']}")
+    if data.get("snils") and data.get("snils") != "Нет":
+        facts.append(f"СНИЛС: {data['snils']}")
     if pbooks:
         facts.append(f"Записные книги: {', '.join(pbooks[:6])}")
 
@@ -1436,19 +1780,32 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
     if data.get("age") and data.get("age") != "Не найдено":
         blocks.append({"title": "ВОЗРАСТ", "items": [("Возраст", str(data["age"]))]})
 
+    doc_items: list[tuple[str, str]] = []
+    for x in data.get("inn_list") or []:
+        if not is_junk_value(str(x)):
+            doc_items.append(("ИНН", str(x)))
+    for x in data.get("passport_list") or []:
+        if not is_junk_value(str(x)):
+            doc_items.append(("Паспорт", str(x)))
+    for x in data.get("snils_list") or []:
+        if not is_junk_value(str(x)):
+            doc_items.append(("СНИЛС", str(x)))
+    if doc_items:
+        blocks.append({"title": "ДОКУМЕНТЫ (ИНН / ПАСПОРТ / СНИЛС)", "items": doc_items})
+
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     tg_items: list[tuple[str, str]] = []
-    if tg.get("username") and not is_masked_value(str(tg["username"])):
+    if tg.get("username") and not is_junk_value(str(tg["username"])):
         tg_items.append(("Username", str(tg["username"])))
-    if tg.get("id") and not is_masked_value(str(tg["id"])):
+    if tg.get("id") and not is_junk_value(str(tg["id"])):
         tg_items.append(("Telegram ID", str(tg["id"])))
     if data.get("reg_date") and data.get("reg_date") != "Не найдено":
         tg_items.append(("Дата регистрации", str(data["reg_date"])))
-    if tg.get("dc") and not is_masked_value(str(tg["dc"])):
+    if tg.get("dc") and not is_junk_value(str(tg["dc"])):
         tg_items.append(("DC", str(tg["dc"])))
-    if tg.get("premium") and not is_masked_value(str(tg["premium"])):
+    if tg.get("premium") and not is_junk_value(str(tg["premium"])):
         tg_items.append(("Premium", str(tg["premium"])))
-    if tg.get("bio") and not is_masked_value(str(tg["bio"])):
+    if tg.get("bio") and not is_junk_value(str(tg["bio"])):
         tg_items.append(("О себе", str(tg["bio"])))
     if tg_items:
         blocks.append({"title": "TELEGRAM", "items": tg_items})
@@ -1458,18 +1815,29 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
         loc_items.append(("Оператор", str(data["operator"])))
     if data.get("region") and data.get("region") != "Нет":
         loc_items.append(("Регион", str(data["region"])))
+    for a in (data.get("addresses") or [])[:10]:
+        if not is_junk_value(str(a)):
+            loc_items.append(("Адрес", str(a)))
     if loc_items:
-        blocks.append({"title": "ОПЕРАТОР И РЕГИОН", "items": loc_items})
+        blocks.append({"title": "ОПЕРАТОР, РЕГИОН И АДРЕСА", "items": loc_items})
 
-    emails = [e for e in (data.get("emails_set") or []) if not is_masked_value(str(e))]
+    vehs = [v for v in (data.get("vehicles") or []) if not is_junk_value(str(v))]
+    if vehs:
+        blocks.append({"title": "ТРАНСПОРТ / VIN", "items": [("Транспорт", str(v)) for v in vehs]})
+
+    socs = [s for s in (data.get("social_links") or []) if not is_junk_value(str(s))]
+    if socs:
+        blocks.append({"title": "СОЦСЕТИ И ССЫЛКИ", "items": [("Ссылка", str(s)) for s in socs]})
+
+    emails = [e for e in (data.get("emails_set") or []) if not is_junk_value(str(e))]
     if emails:
         blocks.append({"title": "EMAIL", "items": [("Email", e) for e in emails]})
 
-    pbs = [p for p in (data.get("phonebooks") or []) if not is_masked_value(str(p))]
+    pbs = [p for p in (data.get("phonebooks") or []) if not is_junk_value(str(p))]
     if pbs:
         blocks.append({"title": "ТЕЛЕФОННЫЕ КНИГИ", "items": [("Запись", p) for p in pbs]})
 
-    hist = [h for h in (data.get("name_history") or []) if not is_masked_value(str(h))]
+    hist = [h for h in (data.get("name_history") or []) if not is_junk_value(str(h))]
     if hist:
         blocks.append({"title": "ИСТОРИЯ ИЗМЕНЕНИЙ", "items": [("Изменение", h) for h in hist]})
 
@@ -1481,14 +1849,14 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
                 continue
             k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
-            if is_masked_value(v_s):
+            if is_junk_value(v_s):
                 continue
             sig = f"{k_s.lower()}:{v_s.lower()}"
             if sig in seen:
                 continue
             seen.add(sig)
             extra_items.append((k_s, v_s))
-            if len(extra_items) >= 30:
+            if len(extra_items) >= 40:
                 break
         if extra_items:
             blocks.append({"title": "ДОПОЛНИТЕЛЬНЫЕ ПОЛЯ", "items": extra_items})
@@ -1517,13 +1885,22 @@ def render_html_report(data: dict, report_id: str) -> str:
             "reg_date": data.get("reg_date"),
         },
         "phone_number": data.get("phone_number"),
+        "phones": list(data.get("phones_set") or []),
+        "emails": list(data.get("emails_set") or []),
         "fio": data.get("fio"),
         "dob": data.get("dob"),
         "age": data.get("age"),
+        "inn": data.get("inn"),
+        "passport": data.get("passport"),
+        "snils": data.get("snils"),
+        "addresses": data.get("addresses"),
+        "vehicles": data.get("vehicles"),
+        "social_links": data.get("social_links"),
         "operator": data.get("operator"),
         "region": data.get("region"),
         "phonebooks": data.get("phonebooks"),
         "name_history": data.get("name_history"),
+        "extra_kv": data.get("extra_kv"),
         "databases": data.get("databases"),
         "raw_response": data.get("raw_response"),
     }
@@ -1938,6 +2315,44 @@ def render_html_report(data: dict, report_id: str) -> str:
 </html>"""
 
 
+def build_full_api_payload(query: str, rid: str, data: dict) -> dict:
+    token = pack_report_token(data)
+    return {
+        "ok": True,
+        "provider": "Oasis Digital",
+        "full_dump": True,
+        "report_id": rid,
+        "web_report": f"{WEBHOOK_HOST}/r/{token}",
+        "query": query,
+        "query_type": data.get("query_type"),
+        "date": data.get("date"),
+        "summary": {
+            "fio": data.get("fio"),
+            "dob": data.get("dob"),
+            "age": data.get("age"),
+            "inn": data.get("inn"),
+            "passport": data.get("passport"),
+            "snils": data.get("snils"),
+            "phone_number": data.get("phone_number"),
+            "operator": data.get("operator"),
+            "region": data.get("region"),
+            "reg_date": data.get("reg_date"),
+            "tg_info": data.get("tg_info"),
+            "phones": list(data.get("phones_set") or []),
+            "emails": list(data.get("emails_set") or []),
+            "addresses": data.get("addresses") or [],
+            "vehicles": data.get("vehicles") or [],
+            "social_links": data.get("social_links") or [],
+            "phonebooks": data.get("phonebooks") or [],
+            "name_history": data.get("name_history") or [],
+            "extra_kv": data.get("extra_kv") or [],
+            "sources_count": data.get("sources_count", 0),
+            "records_count": data.get("views_count", 0),
+        },
+        "data": data,
+    }
+
+
 class OasisSearchPayload(BaseModel):
     q: str
 
@@ -1959,14 +2374,7 @@ async def oasis_api_search_get(q: str, _auth: dict = Depends(verify_oasis_key)):
     data = await run_search(query)
     rid = uuid.uuid4().hex[:8]
     store_report(rid, data)
-    token = pack_report_token(data)
-    return {
-        "ok": True,
-        "provider": "Oasis Digital",
-        "report_id": rid,
-        "web_report": f"{WEBHOOK_HOST}/r/{token}",
-        "data": data,
-    }
+    return build_full_api_payload(query, rid, data)
 
 
 @web_app.post("/api/v1/search")
@@ -1977,14 +2385,7 @@ async def oasis_api_search_post(payload: OasisSearchPayload, _auth: dict = Depen
     data = await run_search(query)
     rid = uuid.uuid4().hex[:8]
     store_report(rid, data)
-    token = pack_report_token(data)
-    return {
-        "ok": True,
-        "provider": "Oasis Digital",
-        "report_id": rid,
-        "web_report": f"{WEBHOOK_HOST}/r/{token}",
-        "data": data,
-    }
+    return build_full_api_payload(query, rid, data)
 
 
 @web_app.get("/r/{token:path}", response_class=HTMLResponse)
@@ -2022,11 +2423,25 @@ async def serve_web():
     await uvicorn.Server(cfg).serve()
 
 
+@dp.callback_query(F.data == "check_sub")
+async def on_check_sub(cb: CallbackQuery, state: FSMContext):
+    if not cb.from_user:
+        return
+    if await is_user_subscribed(cb.from_user.id):
+        await ack_cb(cb, "Подписка подтверждена ✅")
+        create_user(cb.from_user.id, cb.from_user.username)
+        await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
+    else:
+        await ack_cb(cb, "Подписка не найдена. Вступи в канал и нажми снова.", alert=True)
+
+
 @dp.message(CommandStart())
 async def on_start(msg: Message, state: FSMContext):
     await state.clear()
     if check_banned(msg.from_user.id):
         return await msg.answer("⛔ Доступ ограничен.")
+    if not await require_sub_msg(msg):
+        return
     create_user(msg.from_user.id, msg.from_user.username)
     banner = await msg.answer(PIN_BANNER_TEXT, parse_mode="HTML", disable_web_page_preview=True)
     try:
@@ -2142,6 +2557,8 @@ async def on_adm_toggle_api(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "back_to_start")
 async def on_back(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
     await state.clear()
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
     await ack_cb(cb)
@@ -2149,6 +2566,8 @@ async def on_back(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "search_info")
 async def on_search_info(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
     await state.clear()
     await cb.message.edit_text(START_TEXT, parse_mode="HTML", reply_markup=kb_back())
     await ack_cb(cb)
@@ -2156,6 +2575,8 @@ async def on_search_info(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "profile")
 async def on_profile(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     user = fetch_user(cb.from_user.id)
     tenure = get_tenure(user[4]) if user else "0 дн."
     txt = (
@@ -2176,6 +2597,8 @@ async def on_profile(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "hide_data_menu")
 async def on_hide_menu(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💎 Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
@@ -2188,6 +2611,8 @@ async def on_hide_menu(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "pay_tonkeeper")
 async def on_pay_ton(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     memo = f"Oasis_{cb.from_user.id}"
     url = f"ton://transfer/{TON_WALLET}?amount=13040000000&text={memo}"
     kb = InlineKeyboardMarkup(
@@ -2206,6 +2631,8 @@ async def on_pay_ton(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "buy_requests")
 async def on_buy(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     await cb.message.edit_text(
         "💳 <b>Покупка запросов</b>\nПо вопросам пополнения: " + ADMIN_USERNAME,
         parse_mode="HTML",
@@ -2216,6 +2643,8 @@ async def on_buy(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "ref_link")
 async def on_ref(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start={cb.from_user.id}"
     await cb.message.edit_text(
@@ -2228,6 +2657,8 @@ async def on_ref(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "support")
 async def on_support(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
     await state.set_state(States.support_msg)
     await cb.message.edit_text(SUPPORT_TEXT, parse_mode="HTML", reply_markup=kb_back())
     await ack_cb(cb)
@@ -2249,6 +2680,8 @@ async def handle_support(msg: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "use_promo")
 async def on_use_promo(cb: CallbackQuery, state: FSMContext):
+    if not await require_sub_cb(cb):
+        return
     await state.set_state(States.promo_code)
     await cb.message.edit_text(
         "🎟️ <b>Активация промокода / чека</b>\n\nВведите код сообщением:",
@@ -2438,6 +2871,8 @@ async def on_adm_check_apis(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("ai_analyze_"))
 async def on_analyze(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     rid = normalize_rid(cb.data.replace("ai_analyze_", "", 1))
     data = read_report(rid)
     if not data:
@@ -2452,6 +2887,8 @@ async def on_analyze(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("get_txt_"))
 async def on_export_txt(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     rid = normalize_rid(cb.data.replace("get_txt_", "", 1))
     data = read_report(rid)
     if not data:
@@ -2465,8 +2902,13 @@ async def on_export_txt(cb: CallbackQuery):
         f"ФИО: {data.get('fio', 'Не найдено')}\n"
         f"Дата рождения: {data.get('dob', 'Нет')}\n"
         f"Возраст: {data.get('age', 'Не найдено')}\n"
-        f"Регистрация: {data.get('reg_date', 'Не найдено')}\n"
+        f"ИНН: {data.get('inn', 'Нет')}\n"
+        f"Паспорт: {data.get('passport', 'Нет')}\n"
         f"СНИЛС: {data.get('snils', 'Нет')}\n"
+        f"Адреса: {', '.join(data.get('addresses') or []) or 'Нет'}\n"
+        f"Транспорт: {', '.join(data.get('vehicles') or []) or 'Нет'}\n"
+        f"Соцсети: {', '.join(data.get('social_links') or []) or 'Нет'}\n"
+        f"Регистрация: {data.get('reg_date', 'Не найдено')}\n"
         f"Оператор / Регион: {data.get('operator', 'Нет')} / {data.get('region', 'Нет')}"
     )
     doc = BufferedInputFile(txt.encode("utf-8"), filename=f"oasis_{rid}.txt")
@@ -2476,6 +2918,8 @@ async def on_export_txt(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("get_json_"))
 async def on_export_json(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
     rid = normalize_rid(cb.data.replace("get_json_", "", 1))
     data = read_report(rid)
     if not data:
@@ -2487,12 +2931,21 @@ async def on_export_json(cb: CallbackQuery):
         "query_type": data.get("query_type"),
         "date": data.get("date"),
         "phone_number": data.get("phone_number"),
+        "phones": list(data.get("phones_set") or []),
+        "emails": list(data.get("emails_set") or []),
         "fio": data.get("fio"),
         "dob": data.get("dob"),
         "age": data.get("age"),
+        "inn": data.get("inn"),
+        "passport": data.get("passport"),
+        "snils": data.get("snils"),
+        "addresses": data.get("addresses"),
+        "vehicles": data.get("vehicles"),
+        "social_links": data.get("social_links"),
         "reg_date": data.get("reg_date"),
         "phonebooks": data.get("phonebooks"),
         "name_history": data.get("name_history"),
+        "extra_kv": data.get("extra_kv"),
         "tg_info": data.get("tg_info"),
         "databases": data.get("databases"),
         "raw_response": data.get("raw_response"),
@@ -2509,6 +2962,8 @@ async def on_search(msg: Message, state: FSMContext):
         return
     if check_banned(msg.from_user.id):
         return await msg.answer("⛔ Доступ ограничен.")
+    if not await require_sub_msg(msg):
+        return
 
     q = (msg.text or "").strip()
     if not q:
