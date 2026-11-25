@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9024954594:AAEfMyBpSrm5B9Epw5uIG5s-Sq_Gf7NApX4").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9040601874:AAFN29zWh8G-Ghvm6at8tH7Ct_hh1HgDR7k").strip()
 BOT_USERNAME = "@OasisDigitalro_bot"
 
 MAIN_ADMIN_ID = int(os.getenv("MAIN_ADMIN_ID", "8394631079"))
