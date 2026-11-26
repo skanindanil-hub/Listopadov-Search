@@ -109,22 +109,26 @@ class States(StatesGroup):
     adm_del_sub = State()
 
 
-SEARCH_MODES: dict[str, tuple[str, str]] = {
-    "vk": ("VK", "Введите ID, ссылку или профиль VK:"),
-    "username": ("@username", "Введите @username (например @durov):"),
-    "domen": ("Domen", "Введите домен или сайт (например example.com):"),
-    "phone": ("Phone", "Введите номер телефона (например 79104813955):"),
-    "ip": ("ip", "Введите IP-адрес (например 78.26.242.244):"),
-    "email": ("email", "Введите email (например user@example.com):"),
-    "tg_id": ("tg id", "Введите числовой Telegram ID (например 1090472807):"),
+SEARCH_MODES: dict[str, tuple[str, str, str]] = {
+    "phone": ("Phone", "phone", "Введите номер телефона (например 79104813955):"),
+    "email": ("Email", "email", "Введите email (например user@example.com):"),
+    "username": ("Username", "telegram", "Введите @username (например @durov):"),
+    "ip": ("IP", "ip", "Введите IP-адрес (например 78.26.242.244):"),
+    "mac": ("MAC Address", "general", "Введите MAC-адрес (например 00:1A:2B:3C:4D:5E):"),
+    "metadata": ("Metadata", "general", "Введите метаданные, хэш, ссылку или домен:"),
+    "inn": ("ИНН", "general", "Введите ИНН физлица (12 цифр) или организации (10 цифр):"),
+    "snils": ("СНИЛС", "general", "Введите СНИЛС (например 112-233-445 95):"),
+    "passport": ("ПАСПОРТ", "general", "Введите серию и номер паспорта (например 4510 123456):"),
+    "universal": ("Universal Search", "general", "Введите любой запрос (ФИО, телефон, email, авто, ID, домен):"),
 }
 
 
 def red_btn(label: str, **kwargs) -> InlineKeyboardButton:
-    clean = label.strip()
-    if not clean.startswith("🔴"):
-        clean = f"🔴 {clean}"
-    return InlineKeyboardButton(text=clean[:64], **kwargs)
+    text = label.strip()[:64]
+    try:
+        return InlineKeyboardButton(text=text, style="danger", **kwargs)
+    except TypeError:
+        return InlineKeyboardButton(text=text, **kwargs)
 
 
 async def ack_cb(cb: CallbackQuery, text: str | None = None, alert: bool = False):
@@ -781,26 +785,31 @@ def kb_search_types():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                red_btn("VK", callback_data="stype_vk"),
-                red_btn("@username", callback_data="stype_username"),
-            ],
-            [
-                red_btn("Domen", callback_data="stype_domen"),
                 red_btn("Phone", callback_data="stype_phone"),
+                red_btn("Email", callback_data="stype_email"),
             ],
             [
-                red_btn("ip", callback_data="stype_ip"),
-                red_btn("email", callback_data="stype_email"),
+                red_btn("Username", callback_data="stype_username"),
+                red_btn("IP", callback_data="stype_ip"),
             ],
-            [red_btn("tg id", callback_data="stype_tg_id")],
-            [red_btn("Назад", callback_data="back_to_start")],
+            [
+                red_btn("MAC Address", callback_data="stype_mac"),
+                red_btn("Metadata", callback_data="stype_metadata"),
+            ],
+            [
+                red_btn("ИНН", callback_data="stype_inn"),
+                red_btn("СНИЛС", callback_data="stype_snils"),
+            ],
+            [red_btn("ПАСПОРТ", callback_data="stype_passport")],
+            [red_btn("Universal Search", callback_data="stype_universal")],
+            [red_btn("Back", callback_data="back_to_start")],
         ]
     )
 
 
 def kb_back():
     return InlineKeyboardMarkup(
-        inline_keyboard=[[red_btn("Назад", callback_data="back_to_start")]]
+        inline_keyboard=[[red_btn("Back", callback_data="back_to_start")]]
     )
 
 
@@ -2649,15 +2658,7 @@ async def on_search_info(cb: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await cb.message.edit_text(
-        "🔎 <b>Выберите тип поиска:</b>\n\n"
-        "• <b>VK</b> — профиль / ID / ссылка\n"
-        "• <b>@username</b> — никнейм\n"
-        "• <b>Domen</b> — домен / сайт\n"
-        "• <b>Phone</b> — номер телефона\n"
-        "• <b>ip</b> — IP-адрес\n"
-        "• <b>email</b> — электронная почта\n"
-        "• <b>tg id</b> — ID аккаунта Telegram",
-        parse_mode="HTML",
+        "Select an analysis type.",
         reply_markup=kb_search_types(),
     )
     await ack_cb(cb)
@@ -2672,13 +2673,15 @@ async def on_select_search_type(cb: CallbackQuery, state: FSMContext):
     if not mode_info:
         return await ack_cb(cb, "Неизвестный тип", alert=True)
 
-    label, prompt_txt = mode_info
+    label, _, prompt_txt = mode_info
     await state.set_state(States.search_typed)
     await state.update_data(search_mode=mode_key)
     await cb.message.edit_text(
-        f"🔎 <b>Поиск: {html.escape(label)}</b>\n\n{html.escape(prompt_txt)}",
+        f"🔎 <b>{html.escape(label)}</b>\n\n{html.escape(prompt_txt)}",
         parse_mode="HTML",
-        reply_markup=kb_back(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[red_btn("Back", callback_data="search_info")]]
+        ),
     )
     await ack_cb(cb)
 
@@ -2692,23 +2695,13 @@ async def handle_typed_search(msg: Message, state: FSMContext):
     if not q:
         return await msg.answer("❌ Пустой запрос.", reply_markup=kb_main())
 
-    forced_qt = None
-    if mode_key == "vk":
-        forced_qt = "vk"
-    elif mode_key == "username":
-        forced_qt = "telegram"
-        if not q.startswith("@") and not re.fullmatch(r"\d+", q):
-            q = "@" + q
-    elif mode_key == "domen":
-        forced_qt = "domain"
-    elif mode_key == "phone":
-        forced_qt = "phone"
-    elif mode_key == "ip":
-        forced_qt = "ip"
-    elif mode_key == "email":
-        forced_qt = "email"
-    elif mode_key == "tg_id":
-        forced_qt = "telegram"
+    mode_info = SEARCH_MODES.get(str(mode_key))
+    forced_qt = mode_info[1] if mode_info else None
+
+    if mode_key == "username" and not q.startswith("@") and not re.fullmatch(r"\d+", q):
+        q = "@" + q
+    elif mode_key in ("inn", "snils", "passport"):
+        q = f"{mode_key.upper()}: {q}"
 
     await execute_search_flow(msg, q, forced_qtype=forced_qt)
 
@@ -2951,7 +2944,7 @@ async def on_profile(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [red_btn("Скрытие данных ($5)", callback_data="hide_data_menu")],
-            [red_btn("Назад", callback_data="back_to_start")],
+            [red_btn("Back", callback_data="back_to_start")],
         ]
     )
     await cb.message.edit_text(txt, parse_mode="HTML", reply_markup=kb)
@@ -2965,7 +2958,7 @@ async def on_hide_menu(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [red_btn("Оплатить Tonkeeper", callback_data="pay_tonkeeper")],
-            [red_btn("Назад", callback_data="profile")],
+            [red_btn("Back", callback_data="profile")],
         ]
     )
     await cb.message.edit_text(HIDE_DATA_TEXT, parse_mode="HTML", reply_markup=kb)
@@ -2981,7 +2974,7 @@ async def on_pay_ton(cb: CallbackQuery):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [red_btn("Оплатить в 1 клик", url=url)],
-            [red_btn("Назад", callback_data="hide_data_menu")],
+            [red_btn("Back", callback_data="hide_data_menu")],
         ]
     )
     await cb.message.edit_text(
