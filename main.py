@@ -113,13 +113,15 @@ SEARCH_MODES: dict[str, tuple[str, str, str]] = {
     "phone": ("Phone", "phone", "Введите номер телефона (например 79104813955):"),
     "email": ("Email", "email", "Введите email (например user@example.com):"),
     "username": ("Username", "telegram", "Введите @username (например @durov):"),
+    "tg_id": ("tg id", "telegram", "Введите числовой Telegram ID (например 1090472807):"),
     "ip": ("IP", "ip", "Введите IP-адрес (например 78.26.242.244):"),
     "mac": ("MAC Address", "general", "Введите MAC-адрес (например 00:1A:2B:3C:4D:5E):"),
     "metadata": ("Metadata", "general", "Введите метаданные, хэш, ссылку или домен:"),
+    "fio": ("ФИО", "general", "Введите ФИО полностью (например Иванов Иван Иванович):"),
+    "vu": ("В/У", "general", "Введите серию и номер водительского удостоверения:"),
     "inn": ("ИНН", "general", "Введите ИНН физлица (12 цифр) или организации (10 цифр):"),
     "snils": ("СНИЛС", "general", "Введите СНИЛС (например 112-233-445 95):"),
     "passport": ("ПАСПОРТ", "general", "Введите серию и номер паспорта (например 4510 123456):"),
-    "universal": ("Universal Search", "general", "Введите любой запрос (ФИО, телефон, email, авто, ID, домен):"),
 }
 
 
@@ -790,18 +792,24 @@ def kb_search_types():
             ],
             [
                 red_btn("Username", callback_data="stype_username"),
+                red_btn("tg id", callback_data="stype_tg_id"),
+            ],
+            [
                 red_btn("IP", callback_data="stype_ip"),
-            ],
-            [
                 red_btn("MAC Address", callback_data="stype_mac"),
-                red_btn("Metadata", callback_data="stype_metadata"),
             ],
             [
-                red_btn("ИНН", callback_data="stype_inn"),
-                red_btn("СНИЛС", callback_data="stype_snils"),
+                red_btn("Metadata", callback_data="stype_metadata"),
+                red_btn("ФИО", callback_data="stype_fio"),
             ],
-            [red_btn("ПАСПОРТ", callback_data="stype_passport")],
-            [red_btn("Universal Search", callback_data="stype_universal")],
+            [
+                red_btn("В/У", callback_data="stype_vu"),
+                red_btn("ИНН", callback_data="stype_inn"),
+            ],
+            [
+                red_btn("СНИЛС", callback_data="stype_snils"),
+                red_btn("ПАСПОРТ", callback_data="stype_passport"),
+            ],
             [red_btn("Back", callback_data="back_to_start")],
         ]
     )
@@ -2702,6 +2710,10 @@ async def handle_typed_search(msg: Message, state: FSMContext):
         q = "@" + q
     elif mode_key in ("inn", "snils", "passport"):
         q = f"{mode_key.upper()}: {q}"
+    elif mode_key == "fio":
+        q = f"ФИО: {q}"
+    elif mode_key == "vu":
+        q = f"В/У: {q}"
 
     await execute_search_flow(msg, q, forced_qtype=forced_qt)
 
