@@ -784,12 +784,12 @@ def kb_main():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [red_btn("Поиск", callback_data="search_info")],
-            [red_btn("🔑API", callback_data="api_shop")],
             [red_btn("Купить запросы", callback_data="buy_requests")],
             [red_btn("Профиль", callback_data="profile")],
             [red_btn("Активировать промокод", callback_data="use_promo")],
+            [red_btn("Рефералка", callback_data="ref_link")],
             [
-                red_btn("Рефералка", callback_data="ref_link"),
+                red_btn("🔑API", callback_data="api_shop"),
                 red_btn("Связь с нами", callback_data="support"),
             ],
         ]
@@ -915,6 +915,7 @@ JUNK_VALUES = {
     "undefined",
     "false",
     "true",
+    "нет",
     "не найдено",
     "неизвестно",
     "unknown",
@@ -936,7 +937,7 @@ def is_junk_value(val: str) -> bool:
         return True
     if re.fullmatch(r"[*•_\-?#.]+", s):
         return True
-    if re.fullmatch(r"(?:не\s+найдено|нет\s+данных|неизвестно|unknown|null|none)", low):
+    if re.fullmatch(r"(?:не\s+найдено|нет\s+данных|неизвестно|unknown|null|none|нет)", low):
         return True
     return False
 
@@ -1724,47 +1725,40 @@ def has_findings(data: dict) -> bool:
     )
 
 
+def valid_str(val: Any) -> str:
+    s = str(val or "").strip()
+    return "" if is_junk_value(s) else s
+
+
 def build_text_report(data: dict) -> str:
     query = str(data.get("query") or "").strip()
     qtype = data.get("query_type") or detect_qtype(query)
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-    tg_id = tg.get("id") or tg.get("user_id")
-    raw_uname = tg.get("username") or (query if query.startswith("@") else "")
-    tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
+    tg_id = valid_str(tg.get("id") or tg.get("user_id"))
+    raw_uname = valid_str(tg.get("username") or (query if query.startswith("@") else ""))
+    tg_uname = f"@{raw_uname.lstrip('@')}" if raw_uname else ""
 
-    raw_fio = str(data.get("fio") or "Не найдено").strip()
-    fio = "Не найдено" if is_junk_value(raw_fio) else raw_fio
-    dob = str(data.get("dob") or "Нет").strip()
-    age = str(data.get("age") or "Не найдено").strip()
-    inn = str(data.get("inn") or "Нет").strip()
-    passport = str(data.get("passport") or "Нет").strip()
-    snils = str(data.get("snils") or "Нет").strip()
-    phone = str(data.get("phone_number") or "Не найдено").strip()
-    operator = str(data.get("operator") or "Нет").strip()
-    region = str(data.get("region") or "Нет").strip()
-    reg_date = str(data.get("reg_date") or "Не найдено").strip()
+    fio = valid_str(data.get("fio"))
+    dob = valid_str(data.get("dob"))
+    age = valid_str(data.get("age"))
+    inn = valid_str(data.get("inn"))
+    passport = valid_str(data.get("passport"))
+    snils = valid_str(data.get("snils"))
+    phone = valid_str(data.get("phone_number"))
+    operator = valid_str(data.get("operator"))
+    region = valid_str(data.get("region"))
+    reg_date = valid_str(data.get("reg_date"))
 
     phones_all = [str(x).strip() for x in (data.get("phones_set") or []) if not is_junk_value(str(x))]
     emails_all = [str(x).strip() for x in (data.get("emails_set") or []) if not is_junk_value(str(x))]
     addrs_all = [str(x).strip() for x in (data.get("addresses") or []) if not is_junk_value(str(x))]
     vehs_all = [str(x).strip() for x in (data.get("vehicles") or []) if not is_junk_value(str(x))]
     socs_all = [str(x).strip() for x in (data.get("social_links") or []) if not is_junk_value(str(x))]
+    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if not is_junk_value(str(x))]
+    hist = [str(x).strip() for x in (data.get("name_history") or []) if not is_junk_value(str(x))]
 
-    pbooks = [x for x in (data.get("phonebooks") or []) if not is_junk_value(str(x))]
-    pbooks_txt = ", ".join(str(x) for x in pbooks) if pbooks else "Не найдено"
-
-    hist = [x for x in (data.get("name_history") or []) if not is_junk_value(str(x))]
-    hist_lines = [f"📝 <b>История изменений ({len(hist)}):</b>"]
-    if hist:
-        for item in hist[:15]:
-            hist_lines.append(f"• {html.escape(str(item))}")
-        if len(hist) > 15:
-            hist_lines.append(f"• ... еще {len(hist) - 15}")
-    else:
-        hist_lines.append("• Не найдено")
-
-    extra_lines = []
+    extra_lines: list[str] = []
     seen = set()
     for pair in data.get("extra_kv") or []:
         if not isinstance(pair, (list, tuple)) or len(pair) < 2:
@@ -1785,103 +1779,116 @@ def build_text_report(data: dict) -> str:
         views = sum(len(v) for v in (data.get("databases") or {}).values() if isinstance(v, list))
 
     sep = "━━━━━━━━━━━━━━━━━━━━"
-    dob_txt = f"{dob} ({age} лет)" if age != "Не найдено" else dob
+    dob_txt = f"{dob} ({age} лет)" if (dob and age) else dob
+    loc = " / ".join(x for x in (operator, region) if x)
 
-    docs_block = (
-        f"🪪 <b>Документы и идентификаторы:</b>\n"
-        f"• ИНН: <code>{html.escape(inn)}</code>\n"
-        f"• Паспорт: <code>{html.escape(passport)}</code>\n"
-        f"• СНИЛС: <code>{html.escape(snils)}</code>"
-    )
-
+    header_lines: list[str] = []
     if qtype == "phone":
         digits = re.sub(r"\D", "", query)
-        shown_ph = phone if phone != "Не найдено" else (digits or query or "Не найдено")
-        loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
-        parts = [
-            f"📲 <b>Номер</b> · <code>{html.escape(str(shown_ph))}</code>\n"
-            f"{sep}\n"
-            f"📡 <b>Оператор / Регион:</b> {html.escape(loc)}\n"
-            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
-            docs_block,
-            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
-            "\n".join(hist_lines),
-        ]
-        if tg_id or (tg_uname and not re.fullmatch(r"@\+?\d+", tg_uname)):
-            parts.append(
-                f"💬 <b>Telegram:</b> {html.escape(tg_uname or '-')} (ID: <code>{html.escape(str(tg_id or '-'))}</code>)\n"
-                f"🗓️ <b>Регистрация TG:</b> {html.escape(reg_date)}"
-            )
+        shown_ph = phone or digits or query
+        header_lines.append(f"📲 <b>Номер</b> · <code>{html.escape(shown_ph)}</code>")
+        header_lines.append(sep)
+        if loc:
+            header_lines.append(f"📡 <b>Оператор / Регион:</b> {html.escape(loc)}")
+        if fio:
+            header_lines.append(f"🕵️ <b>ФИО:</b> {html.escape(fio)}")
+        if dob_txt:
+            header_lines.append(f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}")
     elif qtype == "telegram":
-        shown_tg = tg_uname or query or "Не найдено"
-        shown_id = str(tg_id) if tg_id else (query if re.fullmatch(r"\d{6,11}", query) else "Не найдено")
-        tg_lines = [
-            f"💬 <b>Telegram</b> · {html.escape(str(shown_tg))}",
-            sep,
-            f"🆔 <b>ID:</b> <code>{html.escape(shown_id)}</code>",
-            f"🕵️ <b>Имя / ФИО:</b> {html.escape(fio)}",
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
-            f"📲 <b>Номер:</b> {html.escape(phone)}",
-            f"🗓️ <b>Регистрация:</b> {html.escape(reg_date)}",
-        ]
-        if tg.get("dc"):
-            tg_lines.append(f"🌐 <b>DC:</b> {html.escape(str(tg['dc']))}")
-        if tg.get("premium"):
-            tg_lines.append(f"⭐ <b>Premium:</b> {html.escape(str(tg['premium']))}")
-        if tg.get("bio") and not is_junk_value(str(tg["bio"])):
-            tg_lines.append(f"ℹ️ <b>О себе:</b> {html.escape(str(tg['bio']))}")
-        parts = [
-            "\n".join(tg_lines),
-            docs_block,
-            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
-            "\n".join(hist_lines),
-        ]
+        shown_tg = tg_uname or query
+        header_lines.append(f"💬 <b>Telegram</b> · {html.escape(shown_tg)}")
+        header_lines.append(sep)
+        shown_id = tg_id or (query if re.fullmatch(r"\d{6,11}", query) else "")
+        if shown_id:
+            header_lines.append(f"🆔 <b>ID:</b> <code>{html.escape(shown_id)}</code>")
+        if fio:
+            header_lines.append(f"🕵️ <b>Имя / ФИО:</b> {html.escape(fio)}")
+        if dob_txt:
+            header_lines.append(f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}")
+        if phone:
+            header_lines.append(f"📲 <b>Номер:</b> {html.escape(phone)}")
+        if reg_date:
+            header_lines.append(f"🗓️ <b>Регистрация:</b> {html.escape(reg_date)}")
+        if valid_str(tg.get("dc")):
+            header_lines.append(f"🌐 <b>DC:</b> {html.escape(valid_str(tg.get('dc')))}")
+        if valid_str(tg.get("premium")):
+            header_lines.append(f"⭐ <b>Premium:</b> {html.escape(valid_str(tg.get('premium')))}")
+        if valid_str(tg.get("bio")):
+            header_lines.append(f"ℹ️ <b>О себе:</b> {html.escape(valid_str(tg.get('bio')))}")
     elif qtype == "email":
-        parts = [
-            f"📧 <b>Email</b> · <code>{html.escape(query)}</code>\n"
-            f"{sep}\n"
-            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
-            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
-            docs_block,
-            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
-            "\n".join(hist_lines),
-        ]
+        header_lines.append(f"📧 <b>Email</b> · <code>{html.escape(query)}</code>")
+        header_lines.append(sep)
+        if fio:
+            header_lines.append(f"🕵️ <b>ФИО:</b> {html.escape(fio)}")
+        if phone:
+            header_lines.append(f"📲 <b>Номер:</b> {html.escape(phone)}")
+        if dob_txt:
+            header_lines.append(f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}")
     elif qtype in ("vin", "vehicle"):
         icon = "🔑" if qtype == "vin" else "🚘"
         label = "VIN" if qtype == "vin" else "Госномер"
-        parts = [
-            f"{icon} <b>{label}</b> · <code>{html.escape(query.upper())}</code>\n"
-            f"{sep}\n"
-            f"🕵️ <b>Владелец / ФИО:</b> {html.escape(fio)}\n"
-            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
-            f"📍 <b>Регион:</b> {html.escape(region)}",
-            docs_block,
-            "\n".join(hist_lines),
-        ]
+        header_lines.append(f"{icon} <b>{label}</b> · <code>{html.escape(query.upper())}</code>")
+        header_lines.append(sep)
+        if fio:
+            header_lines.append(f"🕵️ <b>Владелец / ФИО:</b> {html.escape(fio)}")
+        if phone:
+            header_lines.append(f"📲 <b>Номер:</b> {html.escape(phone)}")
+        if region:
+            header_lines.append(f"📍 <b>Регион:</b> {html.escape(region)}")
     elif qtype == "ip":
-        loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x) or "Не найдено"
-        parts = [
-            f"🌐 <b>IP-адрес</b> · <code>{html.escape(query)}</code>\n"
-            f"{sep}\n"
-            f"📡 <b>Провайдер / Регион:</b> {html.escape(loc)}\n"
-            f"🕵️ <b>ФИО / Владелец:</b> {html.escape(fio)}\n"
-            f"📲 <b>Контакты:</b> {html.escape(phone)}",
-            docs_block,
-            "\n".join(hist_lines),
-        ]
+        header_lines.append(f"🌐 <b>IP-адрес</b> · <code>{html.escape(query)}</code>")
+        header_lines.append(sep)
+        if loc:
+            header_lines.append(f"📡 <b>Провайдер / Регион:</b> {html.escape(loc)}")
+        if fio:
+            header_lines.append(f"🕵️ <b>ФИО / Владелец:</b> {html.escape(fio)}")
+        if phone:
+            header_lines.append(f"📲 <b>Контакты:</b> {html.escape(phone)}")
     else:
-        parts = [
-            f"🔎 <b>Запрос ({html.escape(qtype_title(qtype))})</b> · {html.escape(query or 'Не найдено')}\n"
-            f"{sep}\n"
-            f"🕵️ <b>ФИО:</b> {html.escape(fio)}\n"
-            f"📲 <b>Номер:</b> {html.escape(phone)}\n"
-            f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}",
-            docs_block,
-            f"📒 <b>Телефонные книги:</b> {html.escape(pbooks_txt)}",
-            "\n".join(hist_lines),
-        ]
+        header_lines.append(f"🔎 <b>Запрос ({html.escape(qtype_title(qtype))})</b> · {html.escape(query)}")
+        header_lines.append(sep)
+        if fio:
+            header_lines.append(f"🕵️ <b>ФИО:</b> {html.escape(fio)}")
+        if phone:
+            header_lines.append(f"📲 <b>Номер:</b> {html.escape(phone)}")
+        if dob_txt:
+            header_lines.append(f"🎂 <b>Дата рождения:</b> {html.escape(dob_txt)}")
+        if loc:
+            header_lines.append(f"📍 <b>Оператор / Регион:</b> {html.escape(loc)}")
+
+    parts: list[str] = ["\n".join(header_lines)]
+
+    if qtype != "telegram" and (tg_id or (tg_uname and not re.fullmatch(r"@\+?\d+", tg_uname)) or reg_date):
+        tg_extra: list[str] = []
+        if tg_uname or tg_id:
+            tg_extra.append(
+                f"💬 <b>Telegram:</b> {html.escape(tg_uname or '—')}"
+                + (f" (ID: <code>{html.escape(tg_id)}</code>)" if tg_id else "")
+            )
+        if reg_date:
+            tg_extra.append(f"🗓️ <b>Регистрация TG:</b> {html.escape(reg_date)}")
+        parts.append("\n".join(tg_extra))
+
+    doc_lines: list[str] = []
+    if inn:
+        doc_lines.append(f"• ИНН: <code>{html.escape(inn)}</code>")
+    if passport:
+        doc_lines.append(f"• Паспорт: <code>{html.escape(passport)}</code>")
+    if snils:
+        doc_lines.append(f"• СНИЛС: <code>{html.escape(snils)}</code>")
+    if doc_lines:
+        parts.append("🪪 <b>Документы и идентификаторы:</b>\n" + "\n".join(doc_lines))
+
+    if pbooks:
+        parts.append(f"📒 <b>Телефонные книги:</b> {html.escape(', '.join(pbooks))}")
+
+    if hist:
+        hist_lines = [f"📝 <b>История изменений ({len(hist)}):</b>"]
+        for item in hist[:15]:
+            hist_lines.append(f"• {html.escape(item)}")
+        if len(hist) > 15:
+            hist_lines.append(f"• ... еще {len(hist) - 15}")
+        parts.append("\n".join(hist_lines))
 
     if len(phones_all) > 1:
         parts.append("📞 <b>Все телефоны:</b>\n" + "\n".join(f"• <code>{html.escape(p)}</code>" for p in phones_all[:15]))
@@ -1898,8 +1905,9 @@ def build_text_report(data: dict) -> str:
 
     if not has_findings(data):
         parts.append("⚠️ По открытым источникам и базам совпадений не найдено.")
+    elif views:
+        parts.append(f"{sep}\n📊 <b>Найдено записей / совпадений:</b> <b>{html.escape(str(views))}</b>")
 
-    parts.append(f"{sep}\n📊 <b>Найдено записей / совпадений:</b> <b>{html.escape(str(views))}</b>")
     parts.append("🌐 Веб-отчет и выгрузки доступны по кнопкам ниже.")
     return "\n\n".join(parts)
 
@@ -2665,7 +2673,7 @@ async def execute_search_flow(msg: Message, q: str, forced_qtype: str | None = N
     resolved_type = forced_qtype or detect_qtype(q)
     note = await msg.answer(
         f"[Oasis Digital] Начался Поиск информации\n"
-        f"(Время поиска от 10-90 сек)\n"
+        f"(Время поиска от 30 до 90 секунд)\n"
         f"Тип: <b>{html.escape(qtype_title(resolved_type))}</b>\n"
         f"Цель : <code>{html.escape(q)}</code>",
         parse_mode="HTML",
@@ -3344,7 +3352,7 @@ async def handle_adm_raw(msg: Message, state: FSMContext):
     await state.clear()
     q = (msg.text or "").strip()
     note = await msg.answer(
-        f"⏳ Запрос к Black-Box, Argus и TraceSearch (до 90с): <b>{html.escape(q)}</b>...",
+        f"⏳ Запрос к Black-Box, Argus и TraceSearch (30–90с): <b>{html.escape(q)}</b>...",
         parse_mode="HTML",
     )
 
@@ -3406,24 +3414,38 @@ async def on_export_txt(cb: CallbackQuery):
     if not data:
         return await ack_cb(cb, "Отчет не найден", alert=True)
 
-    txt = (
-        f"OASIS DIGITAL\n"
-        f"Запрос: {data.get('query')}\n"
-        f"Тип: {data.get('query_type')}\n"
-        f"Номер: {data.get('phone_number', 'Не найдено')}\n"
-        f"ФИО: {data.get('fio', 'Не найдено')}\n"
-        f"Дата рождения: {data.get('dob', 'Нет')}\n"
-        f"Возраст: {data.get('age', 'Не найдено')}\n"
-        f"ИНН: {data.get('inn', 'Нет')}\n"
-        f"Паспорт: {data.get('passport', 'Нет')}\n"
-        f"СНИЛС: {data.get('snils', 'Нет')}\n"
-        f"Адреса: {', '.join(data.get('addresses') or []) or 'Нет'}\n"
-        f"Транспорт: {', '.join(data.get('vehicles') or []) or 'Нет'}\n"
-        f"Соцсети: {', '.join(data.get('social_links') or []) or 'Нет'}\n"
-        f"Регистрация: {data.get('reg_date', 'Не найдено')}\n"
-        f"Оператор / Регион: {data.get('operator', 'Нет')} / {data.get('region', 'Нет')}"
-    )
-    doc = BufferedInputFile(txt.encode("utf-8"), filename=f"oasis_{rid}.txt")
+    txt_lines = [
+        "OASIS DIGITAL",
+        f"Запрос: {data.get('query')}",
+        f"Тип: {data.get('query_type')}",
+    ]
+    if valid_str(data.get("phone_number")):
+        txt_lines.append(f"Номер: {data['phone_number']}")
+    if valid_str(data.get("fio")):
+        txt_lines.append(f"ФИО: {data['fio']}")
+    if valid_str(data.get("dob")):
+        txt_lines.append(f"Дата рождения: {data['dob']}")
+    if valid_str(data.get("age")):
+        txt_lines.append(f"Возраст: {data['age']}")
+    if valid_str(data.get("inn")):
+        txt_lines.append(f"ИНН: {data['inn']}")
+    if valid_str(data.get("passport")):
+        txt_lines.append(f"Паспорт: {data['passport']}")
+    if valid_str(data.get("snils")):
+        txt_lines.append(f"СНИЛС: {data['snils']}")
+    if data.get("addresses"):
+        txt_lines.append(f"Адреса: {', '.join(data['addresses'])}")
+    if data.get("vehicles"):
+        txt_lines.append(f"Транспорт: {', '.join(data['vehicles'])}")
+    if data.get("social_links"):
+        txt_lines.append(f"Соцсети: {', '.join(data['social_links'])}")
+    if valid_str(data.get("reg_date")):
+        txt_lines.append(f"Регистрация: {data['reg_date']}")
+    loc_txt = " / ".join(x for x in (valid_str(data.get("operator")), valid_str(data.get("region"))) if x)
+    if loc_txt:
+        txt_lines.append(f"Оператор / Регион: {loc_txt}")
+
+    doc = BufferedInputFile("\n".join(txt_lines).encode("utf-8"), filename=f"oasis_{rid}.txt")
     await cb.message.answer_document(document=doc, caption="📄 <b>TXT Отчет</b>", parse_mode="HTML")
     await ack_cb(cb)
 
