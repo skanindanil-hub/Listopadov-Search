@@ -619,24 +619,24 @@ def pack_report_token(data: dict) -> str:
         "q": data.get("query") or "",
         "qt": data.get("query_type") or "general",
         "dt": data.get("date") or "",
-        "fio": data.get("fio") or "Не найдено",
-        "dob": data.get("dob") or "Нет",
-        "age": data.get("age") or "Не найдено",
-        "inn": data.get("inn") or "Нет",
-        "passport": data.get("passport") or "Нет",
-        "snils": data.get("snils") or "Нет",
+        "fio": data.get("fio") or "",
+        "dob": data.get("dob") or "",
+        "age": data.get("age") or "",
+        "inn": data.get("inn") or "",
+        "passport": data.get("passport") or "",
+        "snils": data.get("snils") or "",
         "addr": (data.get("addresses") or [])[:10],
         "veh": (data.get("vehicles") or [])[:10],
         "soc": (data.get("social_links") or [])[:10],
-        "ph": data.get("phone_number") or "Не найдено",
-        "op": data.get("operator") or "Нет",
-        "reg": data.get("region") or "Нет",
-        "tgr": data.get("reg_date") or "Не найдено",
+        "ph": data.get("phone_number") or "",
+        "op": data.get("operator") or "",
+        "reg": data.get("region") or "",
+        "tgr": data.get("reg_date") or "",
         "tgi": tg.get("id") or "",
         "tgu": tg.get("username") or "",
         "pb": (data.get("phonebooks") or [])[:15],
         "nh": (data.get("name_history") or [])[:15],
-        "ex": (data.get("extra_kv") or [])[:30],
+        "ex": (data.get("extra_kv") or [])[:40],
     }
     raw_bytes = json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     compressed = zlib.compress(raw_bytes, level=9)
@@ -660,19 +660,19 @@ def unpack_report_token(token: str) -> dict | None:
             "query": c.get("q") or "",
             "query_type": c.get("qt") or "general",
             "date": c.get("dt") or "",
-            "fio": c.get("fio") or "Не найдено",
-            "dob": c.get("dob") or "Нет",
-            "age": c.get("age") or "Не найдено",
-            "inn": c.get("inn") or "Нет",
-            "passport": c.get("passport") or "Нет",
-            "snils": c.get("snils") or "Нет",
+            "fio": c.get("fio") or "",
+            "dob": c.get("dob") or "",
+            "age": c.get("age") or "",
+            "inn": c.get("inn") or "",
+            "passport": c.get("passport") or "",
+            "snils": c.get("snils") or "",
             "addresses": c.get("addr") or [],
             "vehicles": c.get("veh") or [],
             "social_links": c.get("soc") or [],
-            "phone_number": c.get("ph") or "Не найдено",
-            "operator": c.get("op") or "Нет",
-            "region": c.get("reg") or "Нет",
-            "reg_date": c.get("tgr") or "Не найдено",
+            "phone_number": c.get("ph") or "",
+            "operator": c.get("op") or "",
+            "region": c.get("reg") or "",
+            "reg_date": c.get("tgr") or "",
             "tg_info": {
                 "id": c.get("tgi") or "",
                 "username": c.get("tgu") or "",
@@ -942,6 +942,11 @@ def is_junk_value(val: str) -> bool:
     return False
 
 
+def valid_str(val: Any) -> str:
+    s = str(val or "").strip()
+    return "" if is_junk_value(s) else s
+
+
 def detect_qtype(query: str) -> str:
     q = (query or "").strip()
     low = q.lower()
@@ -971,6 +976,25 @@ def detect_qtype(query: str) -> str:
     if re.fullmatch(r"(?:https?://)?(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:/.*)?", q):
         return "domain"
     return "general"
+
+
+def clean_search_query(q: str, qtype: str | None = None) -> str:
+    clean_q = re.sub(
+        r"^(?:ФИО|В/У|ИНН|СНИЛС|ПАСПОРТ)\s*:\s*",
+        "",
+        (q or "").strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    qt = qtype or detect_qtype(clean_q)
+    if qt == "phone":
+        digits = re.sub(r"\D", "", clean_q)
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        if 10 <= len(digits) <= 15:
+            return digits
+    if qt == "telegram" and clean_q.startswith("@"):
+        return clean_q.lstrip("@")
+    return clean_q
 
 
 def qtype_title(qtype: str) -> str:
@@ -1122,12 +1146,18 @@ async def query_blackbox(q: str, api_key: str = BLACKBOX_KEY, debug: bool = Fals
     )
 
 
-async def query_argus(q: str, api_key: str = ARGUS_KEY, debug: bool = False):
+async def query_argus(
+    q: str,
+    api_key: str = ARGUS_KEY,
+    debug: bool = False,
+    forced_qtype: str | None = None,
+):
+    clean_q = clean_search_query(q, forced_qtype)
     return await req_json(
         URL_ARGUS,
         api_key=api_key,
         tag="ARGUS",
-        params={"q": q.strip(), "key": api_key},
+        params={"q": clean_q, "query": clean_q, "key": api_key},
         debug=debug,
     )
 
@@ -1138,7 +1168,7 @@ async def query_tracesearch(
     debug: bool = False,
     forced_qtype: str | None = None,
 ):
-    clean_q = re.sub(r"^(?:ФИО|В/У|ИНН|СНИЛС|ПАСПОРТ)\s*:\s*", "", q.strip(), flags=re.IGNORECASE)
+    clean_q = clean_search_query(q, forced_qtype)
     qt = forced_qtype or detect_qtype(q)
     params: dict[str, str] = {"q": clean_q}
     if qt in ("phone", "email", "username", "tg_id", "telegram", "ip", "fio"):
@@ -1321,9 +1351,19 @@ SKIP_KEYS = {
     "total",
     "elapsed",
     "time",
+    "time_sec",
+    "results_count",
     "request_id",
     "trace_id",
     "version",
+    "source",
+    "database",
+    "raw_data",
+    "код страны",
+    "код оператора",
+    "инн оператора",
+    "страна (столица)",
+    "регион гар",
 }
 
 
@@ -1352,9 +1392,10 @@ def walk_tree(node: Any, path: str = ""):
 def extract_regex_entities(text: str, out: dict):
     if not text or is_junk_value(text):
         return
-    for m in re.findall(r"\b\d{10}(?:\d{2})?\b", text):
-        if not re.fullmatch(r"\d{8}", m):
-            push_unique(out["inn_list"], m)
+    if "инн оператора" not in text.lower():
+        for m in re.findall(r"\b\d{10}(?:\d{2})?\b", text):
+            if not re.fullmatch(r"\d{8}", m):
+                push_unique(out["inn_list"], m)
     for m in re.findall(r"\b\d{4}\s?\d{6}\b", text):
         push_unique(out["passport_list"], re.sub(r"\s+", " ", m).strip())
     for m in re.findall(r"\b\d{3}-\d{3}-\d{3}[\s-]\d{2}\b", text):
@@ -1365,17 +1406,19 @@ def extract_regex_entities(text: str, out: dict):
 
 def parse_text_block(text: str, out: dict):
     extract_regex_entities(text, out)
-    for raw in text.splitlines():
+    normalized = re.sub(r",\s*(?=[А-ЯЁA-Za-z0-9_ ()-]{2,40}:)", "\n", text)
+    for raw in normalized.splitlines():
         clean = re.sub(r"<[^>]+>", "", raw).strip(" -*|\t")
         if ":" not in clean:
             continue
         k_part, v_part = clean.split(":", 1)
         lk = k_part.strip().lower()
         val = v_part.strip()
-        if is_junk_value(val):
+        if lk in SKIP_KEYS or is_junk_value(val):
             continue
 
-        extract_regex_entities(val, out)
+        if "оператор" not in lk:
+            extract_regex_entities(val, out)
 
         if any(w in lk for w in ("фио", "fio", "full_name", "имя", "владелец")):
             out["fio_set"].add(val)
@@ -1383,7 +1426,7 @@ def parse_text_block(text: str, out: dict):
             out["dob_set"].add(val)
         elif any(w in lk for w in ("возраст", "age")):
             out["age"] = val
-        elif any(w in lk for w in ("инн", "inn", "tin")):
+        elif any(w in lk for w in ("инн", "inn", "tin")) and "оператор" not in lk:
             push_unique(out["inn_list"], val)
         elif any(w in lk for w in ("паспорт", "passport", "серия", "document")):
             push_unique(out["passport_list"], val)
@@ -1391,7 +1434,7 @@ def parse_text_block(text: str, out: dict):
             push_unique(out["snils_list"], val)
         elif any(w in lk for w in ("адрес", "прописк", "address", "addr", "город", "регион")):
             push_unique(out["addresses"], val)
-            if lk in ("регион", "region", "город", "city") and out["region"] == "Нет":
+            if lk in ("регион", "region", "город", "city") and not out["region"]:
                 out["region"] = val
         elif any(w in lk for w in ("авто", "vin", "госномер", "vehicle", "car", "стс", "птс")):
             push_unique(out["vehicles"], val)
@@ -1401,17 +1444,17 @@ def parse_text_block(text: str, out: dict):
             digits = re.sub(r"\D", "", val)
             if 7 <= len(digits) <= 15:
                 out["phones_set"].add(val)
-                if out["phone_number"] == "Не найдено":
+                if not out["phone_number"]:
                     out["phone_number"] = val
         elif any(w in lk for w in ("оператор", "operator")):
-            if out["operator"] == "Нет":
+            if not out["operator"]:
                 out["operator"] = val
         elif any(w in lk for w in ("регистрац", "created", "reg_date", "first_seen")):
             out["reg_date"] = val
         elif lk in ("id", "telegram id", "tg id", "user_id", "tg_id"):
             if not out["tg_info"].get("id"):
                 out["tg_info"]["id"] = val
-        elif any(w in lk for w in ("username", "юзернейм", "ник", "login")):
+        elif lk in ("username", "юзернейм", "ник", "login"):
             uname = f"@{val.lstrip('@')}"
             push_unique(out["usernames_set"], uname)
             if not out["tg_info"].get("username"):
@@ -1432,6 +1475,10 @@ def absorb_response(resp: Any, out: dict, src: str):
         fname = ""
         lname = ""
         mname = ""
+
+        raw_d = obj.get("raw_data")
+        if isinstance(raw_d, str) and raw_d.strip() and not isinstance(obj.get("details"), dict):
+            parse_text_block(raw_d, out)
 
         for k, v in obj.items():
             lk = str(k).lower().strip()
@@ -1462,16 +1509,17 @@ def absorb_response(resp: Any, out: dict, src: str):
                     sel = str(el).strip()
                     if is_junk_value(sel):
                         continue
-                    extract_regex_entities(sel, out)
+                    if "оператор" not in lk:
+                        extract_regex_entities(sel, out)
                     if lk in PHONE_KEYS:
                         digits = re.sub(r"\D", "", sel)
                         if 7 <= len(digits) <= 15:
                             out["phones_set"].add(sel)
-                            if out["phone_number"] == "Не найдено":
+                            if not out["phone_number"]:
                                 out["phone_number"] = sel
                     elif lk in EMAIL_KEYS and "@" in sel:
                         out["emails_set"].add(sel)
-                    elif lk in INN_KEYS:
+                    elif lk in INN_KEYS and "оператор" not in lk:
                         push_unique(out["inn_list"], sel)
                     elif lk in PASSPORT_KEYS:
                         push_unique(out["passport_list"], sel)
@@ -1498,7 +1546,8 @@ def absorb_response(resp: Any, out: dict, src: str):
             if is_junk_value(sval):
                 continue
 
-            extract_regex_entities(sval, out)
+            if "оператор" not in lk:
+                extract_regex_entities(sval, out)
             items[str(k)] = sval
 
             if lk in {"first_name", "имя"}:
@@ -1512,9 +1561,9 @@ def absorb_response(resp: Any, out: dict, src: str):
                 out["fio_set"].add(sval)
             elif lk in DOB_KEYS:
                 out["dob_set"].add(sval)
-            elif lk in AGE_KEYS and out["age"] == "Не найдено":
+            elif lk in AGE_KEYS and not out["age"]:
                 out["age"] = sval
-            elif lk in INN_KEYS:
+            elif lk in INN_KEYS and "оператор" not in lk:
                 push_unique(out["inn_list"], sval)
             elif lk in PASSPORT_KEYS:
                 push_unique(out["passport_list"], sval)
@@ -1523,7 +1572,7 @@ def absorb_response(resp: Any, out: dict, src: str):
                 out["snils_set"].add(sval)
             elif lk in ADDRESS_KEYS:
                 push_unique(out["addresses"], sval)
-                if lk in {"region", "city", "регион", "город"} and out["region"] == "Нет":
+                if lk in {"region", "city", "регион", "город"} and not out["region"]:
                     out["region"] = sval
             elif lk in VEHICLE_KEYS:
                 push_unique(out["vehicles"], sval)
@@ -1533,12 +1582,12 @@ def absorb_response(resp: Any, out: dict, src: str):
                 digits = re.sub(r"\D", "", sval)
                 if 7 <= len(digits) <= 15:
                     out["phones_set"].add(sval)
-                    if out["phone_number"] == "Не найдено":
+                    if not out["phone_number"]:
                         out["phone_number"] = sval
-            elif lk in OPERATOR_KEYS and out["operator"] == "Нет":
+            elif lk in OPERATOR_KEYS and not out["operator"]:
                 out["operator"] = sval
             elif lk in REG_KEYS:
-                if out["reg_date"] == "Не найдено" or "tg" in lk or "reg" in lk:
+                if not out["reg_date"] or "tg" in lk or "reg" in lk:
                     out["reg_date"] = sval
             elif lk in EMAIL_KEYS and "@" in sval:
                 out["emails_set"].add(sval)
@@ -1577,7 +1626,7 @@ def absorb_response(resp: Any, out: dict, src: str):
 async def run_search(q: str, forced_qtype: str | None = None) -> dict:
     res_bb, res_argus, res_ts = await asyncio.gather(
         query_blackbox(q, BLACKBOX_KEY),
-        query_argus(q, ARGUS_KEY),
+        query_argus(q, ARGUS_KEY, forced_qtype=forced_qtype),
         query_tracesearch(q, TRACESEARCH_KEY, forced_qtype=forced_qtype),
         return_exceptions=True,
     )
@@ -1602,19 +1651,19 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
         "vehicles": [],
         "social_links": [],
         "extra_kv": [],
-        "fio": "Не найдено",
-        "dob": "Нет",
-        "age": "Не найдено",
-        "inn": "Нет",
-        "passport": "Нет",
-        "snils": "Нет",
-        "phone_number": "Не найдено",
-        "operator": "Нет",
-        "region": "Нет",
-        "country": "Россия",
+        "fio": "",
+        "dob": "",
+        "age": "",
+        "inn": "",
+        "passport": "",
+        "snils": "",
+        "phone_number": "",
+        "operator": "",
+        "region": "",
+        "country": "",
         "databases": {},
         "tg_info": {},
-        "reg_date": "Не найдено",
+        "reg_date": "",
         "phonebooks": [],
         "name_history": [],
         "views_count": None,
@@ -1641,7 +1690,7 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
             data["tg_info"]["id"] = q_clean
 
     tg_id_val = str(data["tg_info"].get("id") or "")
-    if data["reg_date"] == "Не найдено" and tg_id_val:
+    if not data["reg_date"] and tg_id_val:
         est = approx_tg_reg(tg_id_val)
         if est:
             data["reg_date"] = est
@@ -1669,18 +1718,18 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
     data["vehicles"] = clean_veh
     data["social_links"] = clean_soc
 
-    data["fio"] = ", ".join(clean_fios) if clean_fios else "Не найдено"
-    data["dob"] = ", ".join(clean_dobs) if clean_dobs else "Нет"
-    data["inn"] = ", ".join(clean_inn) if clean_inn else "Нет"
-    data["passport"] = ", ".join(clean_pass) if clean_pass else "Нет"
-    data["snils"] = ", ".join(clean_snils) if clean_snils else "Нет"
+    data["fio"] = ", ".join(clean_fios)
+    data["dob"] = ", ".join(clean_dobs)
+    data["inn"] = ", ".join(clean_inn)
+    data["passport"] = ", ".join(clean_pass)
+    data["snils"] = ", ".join(clean_snils)
 
-    if data["age"] == "Не найдено" and data["dob"] != "Нет":
+    if not data["age"] and data["dob"]:
         age_calc = calc_age(data["dob"])
         if age_calc:
             data["age"] = age_calc
 
-    if data["phone_number"] == "Не найдено" and clean_phones:
+    if not data["phone_number"] and clean_phones:
         data["phone_number"] = clean_phones[0]
 
     total_recs = sum(len(v) for v in data["databases"].values() if isinstance(v, list))
@@ -1705,12 +1754,11 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
 
 def has_findings(data: dict) -> bool:
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-    fio_val = str(data.get("fio") or "")
     return bool(
-        tg.get("id")
-        or tg.get("username")
-        or (data.get("phone_number") and data.get("phone_number") != "Не найдено")
-        or (fio_val and fio_val not in ("Не найдено", "НЕ НАЙДЕНО") and not is_junk_value(fio_val))
+        valid_str(tg.get("id"))
+        or valid_str(tg.get("username"))
+        or valid_str(data.get("phone_number"))
+        or valid_str(data.get("fio"))
         or bool(data.get("inn_list"))
         or bool(data.get("passport_list"))
         or bool(data.get("snils_list"))
@@ -1723,11 +1771,6 @@ def has_findings(data: dict) -> bool:
         or bool(data.get("emails_set"))
         or bool(data.get("extra_kv"))
     )
-
-
-def valid_str(val: Any) -> str:
-    s = str(val or "").strip()
-    return "" if is_junk_value(s) else s
 
 
 def build_text_report(data: dict) -> str:
@@ -1764,14 +1807,14 @@ def build_text_report(data: dict) -> str:
         if not isinstance(pair, (list, tuple)) or len(pair) < 2:
             continue
         k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
-        if is_junk_value(v_s):
+        if k_s.lower() in SKIP_KEYS or is_junk_value(v_s):
             continue
         sig = f"{k_s.lower()}:{v_s.lower()}"
         if sig in seen:
             continue
         seen.add(sig)
         extra_lines.append(f"• {html.escape(k_s)}: <code>{html.escape(v_s)}</code>")
-        if len(extra_lines) >= 20:
+        if len(extra_lines) >= 40:
             break
 
     views = data.get("views_count")
@@ -1919,18 +1962,17 @@ def make_local_analysis(data: dict) -> str:
         return "⚠️ Недостаточно данных для анализа — совпадений не найдено."
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
-    tg_id = tg.get("id") or tg.get("user_id")
-    raw_uname = tg.get("username") or ""
-    tg_uname = f"@{str(raw_uname).lstrip('@')}" if raw_uname else ""
+    tg_id = valid_str(tg.get("id") or tg.get("user_id"))
+    raw_uname = valid_str(tg.get("username"))
+    tg_uname = f"@{raw_uname.lstrip('@')}" if raw_uname else ""
 
-    phone = str(data.get("phone_number") or "").strip()
-    raw_fio = str(data.get("fio") or "").strip()
-    fio = "" if is_junk_value(raw_fio) else raw_fio
-    reg_date = str(data.get("reg_date") or "").strip()
-    region = str(data.get("region") or "").strip()
-    operator = str(data.get("operator") or "").strip()
-    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if str(x).strip() and not is_junk_value(str(x))]
-    hist = [str(x).strip() for x in (data.get("name_history") or []) if str(x).strip() and not is_junk_value(str(x))]
+    phone = valid_str(data.get("phone_number"))
+    fio = valid_str(data.get("fio"))
+    reg_date = valid_str(data.get("reg_date"))
+    region = valid_str(data.get("region"))
+    operator = valid_str(data.get("operator"))
+    pbooks = [str(x).strip() for x in (data.get("phonebooks") or []) if not is_junk_value(str(x))]
+    hist = [str(x).strip() for x in (data.get("name_history") or []) if not is_junk_value(str(x))]
     dbs = data.get("databases") if isinstance(data.get("databases"), dict) else {}
 
     unames: list[str] = []
@@ -1948,19 +1990,19 @@ def make_local_analysis(data: dict) -> str:
     facts = []
     if tg_uname or tg_id:
         facts.append(f"Профиль TG: {tg_uname or '-'} (ID: {tg_id or '-'})")
-    if reg_date and reg_date != "Не найдено":
+    if reg_date:
         facts.append(f"Регистрация TG: {reg_date}")
-    if phone and phone != "Не найдено":
-        loc = " / ".join(x for x in (operator if operator != "Нет" else "", region if region != "Нет" else "") if x)
+    if phone:
+        loc = " / ".join(x for x in (operator, region) if x)
         facts.append(f"Телефон: {phone}" + (f" ({loc})" if loc else ""))
-    if fio and fio not in ("Не найдено", "НЕ НАЙДЕНО"):
+    if fio:
         facts.append(f"ФИО/Имя: {fio}")
-    if data.get("inn") and data.get("inn") != "Нет":
-        facts.append(f"ИНН: {data['inn']}")
-    if data.get("passport") and data.get("passport") != "Нет":
-        facts.append(f"Паспорт: {data['passport']}")
-    if data.get("snils") and data.get("snils") != "Нет":
-        facts.append(f"СНИЛС: {data['snils']}")
+    if valid_str(data.get("inn")):
+        facts.append(f"ИНН: {valid_str(data.get('inn'))}")
+    if valid_str(data.get("passport")):
+        facts.append(f"Паспорт: {valid_str(data.get('passport'))}")
+    if valid_str(data.get("snils")):
+        facts.append(f"СНИЛС: {valid_str(data.get('snils'))}")
     if pbooks:
         facts.append(f"Записные книги: {', '.join(pbooks[:6])}")
 
@@ -1991,29 +2033,29 @@ def make_local_analysis(data: dict) -> str:
 def collect_blocks(data: dict) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
 
-    phones = list(data.get("phones_set") or [])
-    if data.get("phone_number") and data.get("phone_number") != "Не найдено":
-        push_unique(phones, str(data["phone_number"]))
+    phones = [str(p).strip() for p in (data.get("phones_set") or []) if not is_junk_value(str(p))]
+    if valid_str(data.get("phone_number")):
+        push_unique(phones, valid_str(data.get("phone_number")))
     if phones:
         blocks.append({"title": "ТЕЛЕФОНЫ", "items": [("Телефон", p) for p in phones]})
 
     fios = []
     for f_src in list(data.get("fio_set") or []) + (
-        str(data["fio"]).split(",") if data.get("fio") and data.get("fio") not in ("Не найдено", "НЕ НАЙДЕНО") else []
+        str(data["fio"]).split(",") if valid_str(data.get("fio")) else []
     ):
         push_unique(fios, f_src)
     if fios:
         blocks.append({"title": "ФИО", "items": [("ФИО", x) for x in fios]})
 
-    dobs = list(data.get("dob_set") or [])
-    if data.get("dob") and data.get("dob") not in ("Нет", "Не найдено"):
+    dobs = [str(d).strip() for d in (data.get("dob_set") or []) if not is_junk_value(str(d))]
+    if valid_str(data.get("dob")):
         for d in str(data["dob"]).split(","):
             push_unique(dobs, d)
     if dobs:
         blocks.append({"title": "ДАТА РОЖДЕНИЯ", "items": [("Дата рождения", x) for x in dobs]})
 
-    if data.get("age") and data.get("age") != "Не найдено":
-        blocks.append({"title": "ВОЗРАСТ", "items": [("Возраст", str(data["age"]))]})
+    if valid_str(data.get("age")):
+        blocks.append({"title": "ВОЗРАСТ", "items": [("Возраст", valid_str(data.get("age")))]})
 
     doc_items: list[tuple[str, str]] = []
     for x in data.get("inn_list") or []:
@@ -2030,26 +2072,26 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
 
     tg = data.get("tg_info") if isinstance(data.get("tg_info"), dict) else {}
     tg_items: list[tuple[str, str]] = []
-    if tg.get("username") and not is_junk_value(str(tg["username"])):
-        tg_items.append(("Username", str(tg["username"])))
-    if tg.get("id") and not is_junk_value(str(tg["id"])):
-        tg_items.append(("Telegram ID", str(tg["id"])))
-    if data.get("reg_date") and data.get("reg_date") != "Не найдено":
-        tg_items.append(("Дата регистрации", str(data["reg_date"])))
-    if tg.get("dc") and not is_junk_value(str(tg["dc"])):
-        tg_items.append(("DC", str(tg["dc"])))
-    if tg.get("premium") and not is_junk_value(str(tg["premium"])):
-        tg_items.append(("Premium", str(tg["premium"])))
-    if tg.get("bio") and not is_junk_value(str(tg["bio"])):
-        tg_items.append(("О себе", str(tg["bio"])))
+    if valid_str(tg.get("username")):
+        tg_items.append(("Username", valid_str(tg["username"])))
+    if valid_str(tg.get("id")):
+        tg_items.append(("Telegram ID", valid_str(tg["id"])))
+    if valid_str(data.get("reg_date")):
+        tg_items.append(("Дата регистрации", valid_str(data["reg_date"])))
+    if valid_str(tg.get("dc")):
+        tg_items.append(("DC", valid_str(tg["dc"])))
+    if valid_str(tg.get("premium")):
+        tg_items.append(("Premium", valid_str(tg["premium"])))
+    if valid_str(tg.get("bio")):
+        tg_items.append(("О себе", valid_str(tg["bio"])))
     if tg_items:
         blocks.append({"title": "TELEGRAM", "items": tg_items})
 
     loc_items: list[tuple[str, str]] = []
-    if data.get("operator") and data.get("operator") != "Нет":
-        loc_items.append(("Оператор", str(data["operator"])))
-    if data.get("region") and data.get("region") != "Нет":
-        loc_items.append(("Регион", str(data["region"])))
+    if valid_str(data.get("operator")):
+        loc_items.append(("Оператор", valid_str(data["operator"])))
+    if valid_str(data.get("region")):
+        loc_items.append(("Регион", valid_str(data["region"])))
     for a in (data.get("addresses") or [])[:10]:
         if not is_junk_value(str(a)):
             loc_items.append(("Адрес", str(a)))
@@ -2084,7 +2126,7 @@ def collect_blocks(data: dict) -> list[dict[str, Any]]:
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
                 continue
             k_s, v_s = str(pair[0]).strip(), str(pair[1]).strip()
-            if is_junk_value(v_s):
+            if k_s.lower() in SKIP_KEYS or is_junk_value(v_s):
                 continue
             sig = f"{k_s.lower()}:{v_s.lower()}"
             if sig in seen:
