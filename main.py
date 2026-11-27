@@ -48,13 +48,18 @@ CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/+BqWOF7S3AqQ1YzI6").strip()
 
 BLACKBOX_KEY = os.getenv("BLACKBOX_KEY", "8jdsYcPZiQMTpYNCluXg9scNhc7y").strip()
 ARGUS_KEY = os.getenv("ARGUS_KEY", "ARGUS-IO-M1b_3fSDQM5qp5TU5bDMOLAITOluLLtKGrtLSHD2GGE").strip()
+TRACESEARCH_KEY = os.getenv("TRACESEARCH_KEY", "tk_free_28db3c901df90bdb944f7d40bd4a6205").strip()
 
 TON_WALLET = os.getenv("TON_WALLET", "UQBlTLz8MaKDtNhYo1qeDsOXtVjN1upRp2uwsf0NWWE9p5cx").strip()
+KEEPER_WALLET = os.getenv("KEEPER_WALLET", "UQA7k7FbUJXC1ko40uBYfvv-jZ4WGnEiEIVsFcffXtFOU3pM").strip()
+CRYPTOBOT_URL = os.getenv("CRYPTOBOT_URL", "http://t.me/send?start=IVkWLGZuuURO").strip()
+
 WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://listopadov-search-1.onrender.com").rstrip("/")
 DB_PATH = os.getenv("USERS_DB", "/tmp/users.db")
 
 URL_BB = "https://api.black-box.cc/v1.1/search"
 URL_ARGUS = "https://argus.cc.cd/api/v1/search"
+URL_TRACESEARCH = "https://api.tracesearch.co/relationship"
 
 PROXY = os.getenv("PROXY_URL", None)
 TIMEOUT_SEC = 90
@@ -67,6 +72,12 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+API_PLANS: dict[str, tuple[str, str]] = {
+    "week": ("Api неделю - 3$", "3$ (7 дней)"),
+    "month": ("Api 1 месяц - 8$", "8$ (30 дней)"),
+    "forever": ("Api навсегда - 15$", "15$ (навсегда)"),
 }
 
 logging.basicConfig(
@@ -117,7 +128,7 @@ SEARCH_MODES: dict[str, tuple[str, str, str]] = {
     "ip": ("IP", "ip", "Введите IP-адрес (например 78.26.242.244):"),
     "mac": ("MAC Address", "general", "Введите MAC-адрес (например 00:1A:2B:3C:4D:5E):"),
     "metadata": ("Metadata", "general", "Введите метаданные, хэш, ссылку или домен:"),
-    "fio": ("ФИО", "general", "Введите ФИО полностью (например Иванов Иван Иванович):"),
+    "fio": ("ФИО", "fio", "Введите ФИО полностью (например Иванов Иван Иванович):"),
     "vu": ("В/У", "general", "Введите серию и номер водительского удостоверения:"),
     "inn": ("ИНН", "general", "Введите ИНН физлица (12 цифр) или организации (10 цифр):"),
     "snils": ("СНИЛС", "general", "Введите СНИЛС (например 112-233-445 95):"),
@@ -764,6 +775,7 @@ vk.com/id1, 2737383 - ВКонтакте</blockquote>
 
 <i>Отправьте запрос сообщением или выберите тип в разделе «Поиск».</i>"""
 
+API_SHOP_TEXT = "Вы можете купить Апи Oasis Digital и сделай свой поисковой инструмент"
 SUPPORT_TEXT = "💬 <b>Связь с нами</b>\nНапишите ваше сообщение в чат."
 HIDE_DATA_TEXT = "🛡️ <b>Скрытие данных</b>\nСтоимость скрытия данных: $7 (навсегда)"
 
@@ -772,6 +784,7 @@ def kb_main():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [red_btn("Поиск", callback_data="search_info")],
+            [red_btn("🔑API", callback_data="api_shop")],
             [red_btn("Купить запросы", callback_data="buy_requests")],
             [red_btn("Профиль", callback_data="profile")],
             [red_btn("Активировать промокод", callback_data="use_promo")],
@@ -779,6 +792,29 @@ def kb_main():
                 red_btn("Рефералка", callback_data="ref_link"),
                 red_btn("Связь с нами", callback_data="support"),
             ],
+        ]
+    )
+
+
+def kb_api_plans():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [red_btn("Api неделю - 3$", callback_data="api_plan_week")],
+            [red_btn("Api 1 месяц - 8$", callback_data="api_plan_month")],
+            [red_btn("Api навсегда - 15$", callback_data="api_plan_forever")],
+            [red_btn("Back", callback_data="back_to_start")],
+        ]
+    )
+
+
+def kb_api_payment_methods(plan_key: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                red_btn("Keeper", callback_data=f"api_pay_keeper_{plan_key}"),
+                red_btn("Crypto bot", callback_data=f"api_pay_cryptobot_{plan_key}"),
+            ],
+            [red_btn("Back", callback_data="api_shop")],
         ]
     )
 
@@ -910,6 +946,8 @@ def detect_qtype(query: str) -> str:
     low = q.lower()
     digits = re.sub(r"\D", "", q)
 
+    if low.startswith("фио:") or re.fullmatch(r"[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?", q):
+        return "fio"
     if "vk.com/" in low or "vk.me/" in low or low.startswith("vk"):
         return "vk"
     if re.fullmatch(r"\+?\d[\d\s\-()]{6,17}", q) and 10 <= len(digits) <= 15:
@@ -944,6 +982,7 @@ def qtype_title(qtype: str) -> str:
         "vin": "VIN",
         "vehicle": "АВТО",
         "ip": "IP-АДРЕС",
+        "fio": "ФИО",
         "general": "ПОИСК",
     }.get(qtype, "ПОИСК")
 
@@ -1092,9 +1131,29 @@ async def query_argus(q: str, api_key: str = ARGUS_KEY, debug: bool = False):
     )
 
 
+async def query_tracesearch(
+    q: str,
+    api_key: str = TRACESEARCH_KEY,
+    debug: bool = False,
+    forced_qtype: str | None = None,
+):
+    clean_q = re.sub(r"^(?:ФИО|В/У|ИНН|СНИЛС|ПАСПОРТ)\s*:\s*", "", q.strip(), flags=re.IGNORECASE)
+    qt = forced_qtype or detect_qtype(q)
+    params: dict[str, str] = {"q": clean_q}
+    if qt in ("phone", "email", "username", "tg_id", "telegram", "ip", "fio"):
+        params["type"] = "telegram" if qt in ("username", "tg_id") else qt
+    return await req_json(
+        URL_TRACESEARCH,
+        api_key=api_key,
+        tag="TRACESEARCH",
+        params=params,
+        debug=debug,
+    )
+
+
 async def ping_api(name: str, url: str, api_key: str, params: dict):
     timeout = aiohttp.ClientTimeout(total=TIMEOUT_SEC)
-    hdrs = {**HEADERS, "X-API-Key": api_key}
+    hdrs = {**HEADERS, "X-API-Key": api_key, "Authorization": f"Bearer {api_key}"}
     t0 = asyncio.get_event_loop().time()
     conn = aiohttp.TCPConnector(ssl=ssl.create_default_context())
     try:
@@ -1113,6 +1172,7 @@ async def check_apis():
     return await asyncio.gather(
         ping_api("Black-Box", URL_BB, BLACKBOX_KEY, {"q": "79825207224", "type": "phone"}),
         ping_api("Argus", URL_ARGUS, ARGUS_KEY, {"q": "79991234567", "key": ARGUS_KEY}),
+        ping_api("TraceSearch", URL_TRACESEARCH, TRACESEARCH_KEY, {"q": "Иванов Иван Иванович"}),
     )
 
 
@@ -1514,9 +1574,10 @@ def absorb_response(resp: Any, out: dict, src: str):
 
 
 async def run_search(q: str, forced_qtype: str | None = None) -> dict:
-    res_bb, res_argus = await asyncio.gather(
+    res_bb, res_argus, res_ts = await asyncio.gather(
         query_blackbox(q, BLACKBOX_KEY),
         query_argus(q, ARGUS_KEY),
+        query_tracesearch(q, TRACESEARCH_KEY, forced_qtype=forced_qtype),
         return_exceptions=True,
     )
 
@@ -1561,6 +1622,7 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
         "raw_response": {
             "blackbox": res_bb if isinstance(res_bb, dict) else {"error": str(res_bb)},
             "argus": res_argus if isinstance(res_argus, dict) else {"error": str(res_argus)},
+            "tracesearch": res_ts if isinstance(res_ts, dict) else {"error": str(res_ts)},
         },
     }
 
@@ -1568,6 +1630,8 @@ async def run_search(q: str, forced_qtype: str | None = None) -> dict:
         absorb_response(res_bb, data, "Black-Box")
     if isinstance(res_argus, dict):
         absorb_response(res_argus, data, "Argus")
+    if isinstance(res_ts, dict):
+        absorb_response(res_ts, data, "TraceSearch")
 
     if q_type == "telegram":
         if q_clean.startswith("@") and not data["tg_info"].get("username"):
@@ -2598,13 +2662,17 @@ async def execute_search_flow(msg: Message, q: str, forced_qtype: str | None = N
         await msg.answer("⚠️ Закончились запросы.")
         return
 
+    resolved_type = forced_qtype or detect_qtype(q)
     note = await msg.answer(
-        f"[Oasis Digital] Начался Поиск информации\n(Время поиска от 10-90 сек)\nЦель : <code>{html.escape(q)}</code>",
+        f"[Oasis Digital] Начался Поиск информации\n"
+        f"(Время поиска от 10-90 сек)\n"
+        f"Тип: <b>{html.escape(qtype_title(resolved_type))}</b>\n"
+        f"Цель : <code>{html.escape(q)}</code>",
         parse_mode="HTML",
     )
 
     try:
-        data = await run_search(q, forced_qtype=forced_qtype)
+        data = await run_search(q, forced_qtype=resolved_type)
         rid = uuid.uuid4().hex[:8]
         store_report(rid, data)
         markup = kb_result(rid, data)
@@ -2658,6 +2726,76 @@ async def on_start(msg: Message, state: FSMContext):
         pass
     await asyncio.sleep(0.5)
     await msg.answer(START_TEXT, parse_mode="HTML", reply_markup=kb_main())
+
+
+@dp.callback_query(F.data == "api_shop")
+async def on_api_shop(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
+    await cb.message.edit_text(API_SHOP_TEXT, reply_markup=kb_api_plans())
+    await ack_cb(cb)
+
+
+@dp.callback_query(F.data.startswith("api_plan_"))
+async def on_api_plan_select(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
+    plan_key = cb.data.replace("api_plan_", "", 1)
+    plan_info = API_PLANS.get(plan_key)
+    if not plan_info:
+        return await ack_cb(cb, "Тариф не найден", alert=True)
+
+    plan_label, price_desc = plan_info
+    await cb.message.edit_text(
+        f"{API_SHOP_TEXT}\n\n"
+        f"Тариф: <b>{html.escape(plan_label)}</b> ({html.escape(price_desc)})\n"
+        f"Выберите способ оплаты:",
+        parse_mode="HTML",
+        reply_markup=kb_api_payment_methods(plan_key),
+    )
+    await ack_cb(cb)
+
+
+@dp.callback_query(F.data.startswith("api_pay_"))
+async def on_api_pay_select(cb: CallbackQuery):
+    if not await require_sub_cb(cb):
+        return
+    payload = cb.data.replace("api_pay_", "", 1)
+    if payload.startswith("keeper_"):
+        plan_key = payload.replace("keeper_", "", 1)
+        plan_label, _ = API_PLANS.get(plan_key, ("API Oasis Digital", ""))
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[red_btn("Back", callback_data=f"api_plan_{plan_key}")]]
+        )
+        await cb.message.edit_text(
+            f"💎 <b>Оплата через Keeper</b>\n\n"
+            f"Тариф: <b>{html.escape(plan_label)}</b>\n"
+            f"Кошелек Keeper: <code>{html.escape(KEEPER_WALLET)}</code>\n"
+            f"После оплаты отправьте хэш/скриншот в «Связь с нами» или {html.escape(ADMIN_USERNAME)}.",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        await ack_cb(cb)
+    elif payload.startswith("cryptobot_"):
+        plan_key = payload.replace("cryptobot_", "", 1)
+        plan_label, _ = API_PLANS.get(plan_key, ("API Oasis Digital", ""))
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [red_btn("Перейти в Crypto bot", url=CRYPTOBOT_URL)],
+                [red_btn("Back", callback_data=f"api_plan_{plan_key}")],
+            ]
+        )
+        await cb.message.edit_text(
+            f"🤖 <b>Оплата через Crypto bot</b>\n\n"
+            f"Тариф: <b>{html.escape(plan_label)}</b>\n"
+            f"Ссылка на оплату: {html.escape(CRYPTOBOT_URL)}\n"
+            f"После оплаты отправьте подтверждение в «Связь с нами» или {html.escape(ADMIN_USERNAME)}.",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        await ack_cb(cb)
+    else:
+        await ack_cb(cb, "Неизвестный способ оплаты", alert=True)
 
 
 @dp.callback_query(F.data == "search_info")
@@ -3206,20 +3344,26 @@ async def handle_adm_raw(msg: Message, state: FSMContext):
     await state.clear()
     q = (msg.text or "").strip()
     note = await msg.answer(
-        f"⏳ Запрос к Black-Box и Argus (до 90с): <b>{html.escape(q)}</b>...",
+        f"⏳ Запрос к Black-Box, Argus и TraceSearch (до 90с): <b>{html.escape(q)}</b>...",
         parse_mode="HTML",
     )
 
-    res_bb, res_argus = await asyncio.gather(
+    res_bb, res_argus, res_ts = await asyncio.gather(
         query_blackbox(q, BLACKBOX_KEY, debug=True),
         query_argus(q, ARGUS_KEY, debug=True),
+        query_tracesearch(q, TRACESEARCH_KEY, debug=True),
         return_exceptions=True,
     )
 
-    bb_s = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1400] if isinstance(res_bb, dict) else str(res_bb)
-    arg_s = json.dumps(res_argus, ensure_ascii=False, indent=2)[:1400] if isinstance(res_argus, dict) else str(res_argus)
+    bb_s = json.dumps(res_bb, ensure_ascii=False, indent=2)[:1000] if isinstance(res_bb, dict) else str(res_bb)
+    arg_s = json.dumps(res_argus, ensure_ascii=False, indent=2)[:1000] if isinstance(res_argus, dict) else str(res_argus)
+    ts_s = json.dumps(res_ts, ensure_ascii=False, indent=2)[:1000] if isinstance(res_ts, dict) else str(res_ts)
 
-    txt = f"<b>BLACK-BOX:</b>\n<pre>{html.escape(bb_s)}</pre>\n\n<b>ARGUS:</b>\n<pre>{html.escape(arg_s)}</pre>"
+    txt = (
+        f"<b>BLACK-BOX:</b>\n<pre>{html.escape(bb_s)}</pre>\n\n"
+        f"<b>ARGUS:</b>\n<pre>{html.escape(arg_s)}</pre>\n\n"
+        f"<b>TRACESEARCH:</b>\n<pre>{html.escape(ts_s)}</pre>"
+    )
     await note.edit_text(txt[:4000], parse_mode="HTML", reply_markup=kb_admin())
 
 
@@ -3227,7 +3371,7 @@ async def handle_adm_raw(msg: Message, state: FSMContext):
 async def on_adm_check_apis(cb: CallbackQuery):
     if cb.from_user.id != MAIN_ADMIN_ID:
         return await ack_cb(cb, "Нет доступа", alert=True)
-    note = await cb.message.edit_text("📡 Проверка Black-Box и Argus...", parse_mode="HTML")
+    note = await cb.message.edit_text("📡 Проверка Black-Box, Argus и TraceSearch...", parse_mode="HTML")
     results = await check_apis()
     lines = [
         f"• <b>{r['name']}</b>: {'✅ OK' if r['ok'] else '❌ FAIL'} ({r['status']}, {r['ms']}ms)"
